@@ -1,0 +1,85 @@
+@import 'tailwindcss';
+
+/*
+ * App colour palette: the ONLY place colours are defined.
+ *
+ * Every --color-<name> below becomes Tailwind utilities: bg-<name>, text-<name>, border-<name>,
+ * ring-<name>, fill-<name>, from-/via-/to-<name>, divide-<name>, placeholder:text-<name>, …
+ * with opacity too (bg-<name>/40). Inline styles can use var(--color-<name>).
+ *
+ * Tailwind's built-in palette (slate-*, red-*, white, …) is switched off by `--color-*: initial`,
+ * so a class like bg-slate-200 or text-white does nothing. Add a token here instead.
+ */
+@theme {
+  --color-*: initial;
+
+  /* Brand (WhatsApp greens) */
+  --color-primary: #075e54; /* buttons, links, active states */
+  --color-primary-hover: #128c7e; /* hover/focus for primary, gradient start */
+  --color-primary-dark: #043d36; /* gradient end */
+  --color-primary-soft: #dcf8c6; /* avatars, badges, check marks */
+  --color-primary-soft-border: #c2e8a6; /* border around primary-soft badges */
+  --color-primary-subtle: #f0f7f2; /* selected list row, quiet chips */
+  --color-accent: #25d366; /* unread counts, online dots, highlights */
+  --color-on-primary: #ffffff; /* text/icons on primary, accent, secondary and the brand gradient */
+
+  /* Secondary action ("Start a conversation") */
+  --color-secondary: #55865e;
+  --color-secondary-hover: #46734e;
+
+  /* Text */
+  --color-ink: oklch(20.8% 0.042 265.755); /* headings, main text */
+  --color-ink-soft: oklch(27.9% 0.041 260.031);
+  --color-body: oklch(37.2% 0.044 257.287); /* labels, body text */
+  --color-body-soft: oklch(44.6% 0.043 257.281);
+  --color-muted: oklch(55.4% 0.046 257.417); /* secondary text */
+  --color-faint: oklch(70.4% 0.04 256.788); /* hints, placeholders, icons, timestamps */
+
+  /* Lines */
+  --color-line-soft: oklch(96.8% 0.007 247.896); /* dividers inside lists */
+  --color-line: oklch(92.9% 0.013 255.508); /* default borders */
+  --color-line-strong: oklch(86.9% 0.022 252.894); /* hover/dashed borders */
+
+  /* Surfaces */
+  --color-surface: #ffffff; /* cards, panels, inputs on hover */
+  --color-surface-muted: oklch(98.4% 0.003 247.858); /* hover rows, quiet fields */
+  --color-surface-strong: oklch(96.8% 0.007 247.896); /* chips, pressed/hover buttons */
+  --color-canvas: #f8f6f2; /* body and auth pages */
+  --color-page: #f7f5f2; /* settings page, loading screen */
+  --color-shell: #f4f2ee; /* app shell behind the panels */
+  --color-card-border: #ebe5dc;
+  --color-input: #fdfdfc;
+  --color-shadow: #000000; /* base colour for custom drop shadows */
+
+  /* Chat */
+  --color-chat-bg: #ece5dd;
+  --color-bubble-in: #ffffff;
+  --color-bubble-out: #dcf8c6;
+  --color-tick-read: oklch(68.5% 0.169 237.323);
+
+  /* Status */
+  --color-warning: #996e23;
+  --color-warning-soft: #fdf9ef;
+  --color-warning-soft-hover: #faebd1;
+  --color-warning-border: #e8d7ad;
+  --color-danger: oklch(57.7% 0.245 27.325);
+  --color-danger-icon: oklch(63.7% 0.237 25.331); /* required-field asterisk, failed tick */
+  --color-danger-soft: oklch(97.1% 0.013 17.38);
+  --color-danger-border: oklch(88.5% 0.062 18.334);
+  --color-success: oklch(52.7% 0.154 150.069);
+  --color-success-soft: oklch(98.2% 0.018 155.826);
+}
+
+/* WhatsApp-style dotted chat wallpaper: <div class="bg-chat-doodle opacity-[0.06]" /> */
+@utility bg-chat-doodle {
+  background-image:
+    radial-gradient(var(--color-primary) 1.5px, transparent 1.5px),
+    radial-gradient(var(--color-primary) 1.5px, var(--color-chat-bg) 1.5px);
+  background-size: 40px 40px;
+  background-position: 0 0, 20px 20px;
+}
+
+body {
+  @apply bg-canvas text-ink antialiased selection:bg-primary-soft selection:text-primary;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}

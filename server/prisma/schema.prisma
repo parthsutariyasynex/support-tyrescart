@@ -1,0 +1,96 @@
+// SQLite for local dev. For production switch provider to "postgresql"
+// and set DATABASE_URL to your Postgres connection string.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  members      Member[]
+}
+
+model Workspace {
+  id            String           @id @default(cuid())
+  name          String
+  createdAt     DateTime         @default(now())
+  members       Member[]
+  whatsapp      WhatsAppAccount?
+  contacts      Contact[]
+  conversations Conversation[]
+}
+
+model Member {
+  id          String    @id @default(cuid())
+  role        String    @default("agent") // owner | admin | agent
+  userId      String
+  workspaceId String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+}
+
+// One connected WhatsApp number per workspace (from Embedded Signup or manual setup)
+model WhatsAppAccount {
+  id            String    @id @default(cuid())
+  workspaceId   String    @unique
+  wabaId        String
+  phoneNumberId String    @unique
+  displayPhone  String?
+  accessToken   String    @db.Text // encrypt at rest in production
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model Contact {
+  id            String         @id @default(cuid())
+  workspaceId   String
+  waId          String // phone number in international format, no +
+  name          String?
+  tags          String         @default("") // comma separated; use a Tag table later
+  createdAt     DateTime       @default(now())
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([workspaceId, waId])
+}
+
+model Conversation {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  contactId      String
+  assignedToId   String?
+  lastMessageAt  DateTime  @default(now())
+  // Customer's last inbound message: free-form replies allowed for 24h after this
+  lastInboundAt  DateTime?
+  unread         Int       @default(0)
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact        Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages       Message[]
+
+  @@unique([workspaceId, contactId])
+  @@index([workspaceId, lastMessageAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  waMessageId    String?      @unique
+  direction      String // in | out
+  type           String // text | template | image | ...
+  body           String       @db.Text
+  status         String       @default("sent") // pending | sent | delivered | read | failed
+  error          String?      @db.Text
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
