@@ -1,5 +1,7 @@
 import { prisma } from './prisma.js';
 import { emitToWorkspace } from './realtime.js';
+import { recordActivity } from './services/activity.js';
+import { withSender } from './services/senders.js';
 
 type Incoming = { waId: string; name?: string; waMessageId?: string; type: string; body: string };
 
@@ -51,7 +53,14 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
       status: 'received',
     },
   });
-  emitToWorkspace(workspaceId, 'message:new', { conversation, message });
+  emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(message) });
+  await recordActivity({
+    workspaceId,
+    conversationId: conversation.id,
+    actorId: null,
+    type: 'message_received',
+    data: { messageId: message.id, preview: m.body.slice(0, 100) },
+  });
   // TODO: run automations / bot replies here
 }
 
@@ -65,5 +74,5 @@ export async function applyStatus(workspaceId: string, s: any) {
     where: { id: message.id },
     data: { status: s.status, error: s.errors?.[0]?.title },
   });
-  emitToWorkspace(workspaceId, 'message:status', updated);
+  emitToWorkspace(workspaceId, 'message:status', await withSender(updated));
 }

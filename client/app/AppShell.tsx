@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { getToken, setToken } from '@/lib/api';
-import { fetchMe } from '@/lib/auth';
+import { type WorkspaceSummary, createWorkspace, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
 
 export type Me = {
   user: { id: string; name: string; email: string };
@@ -25,6 +25,38 @@ export function AppShell({
   const [automationMenuOpen, setAutomationMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [newWorkspace, setNewWorkspace] = useState('');
+  // The name field only appears after clicking "Create workspace"
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[] | null>(null);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState('');
+
+  // Load the user's workspaces when the switcher opens
+  useEffect(() => {
+    if (!workspaceMenuOpen) {
+      setCreatingWorkspace(false);
+      setNewWorkspace('');
+      return;
+    }
+    setWorkspaceError('');
+    fetchWorkspaces()
+      .then(setWorkspaces)
+      .catch((err) => setWorkspaceError((err as Error).message));
+  }, [workspaceMenuOpen]);
+
+  // Creating or switching gives a token for that workspace; reload so the inbox, sockets and data all follow it
+  async function enterWorkspace(request: () => Promise<{ token: string }>) {
+    setWorkspaceBusy(true);
+    setWorkspaceError('');
+    try {
+      const { token } = await request();
+      setToken(token);
+      window.location.assign('/inbox');
+    } catch (err) {
+      setWorkspaceError((err as Error).message);
+      setWorkspaceBusy(false);
+    }
+  }
 
   const userMenuRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
@@ -397,7 +429,7 @@ export function AppShell({
         {/* Top Header Bar */}
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-line/80 bg-surface px-6">
           {/* Header Left: Back + Title + Connection Badge + Subtitle */}
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               onClick={() => router.back()}
               className="flex h-7 w-7 items-center justify-center rounded-md text-faint hover:bg-surface-strong hover:text-body transition"
@@ -407,33 +439,33 @@ export function AppShell({
               </svg>
             </button>
 
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h1 className="text-base font-bold tracking-tight text-ink">Inbox</h1>
                 {isConnected ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
+                  <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                     Connected: {me.workspace.whatsapp?.displayPhone}
                   </span>
                 ) : (
                   <Link
                     href="/settings"
-                    className="inline-flex items-center gap-1 rounded-full border border-warning-border bg-warning-soft px-2.5 py-0.5 text-[11px] font-medium text-warning hover:bg-warning-soft-hover transition"
+                    className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-warning-border bg-warning-soft px-2.5 py-0.5 text-[11px] font-medium text-warning hover:bg-warning-soft-hover transition"
                   >
                     Not connected
                   </Link>
                 )}
               </div>
-              <p className="text-[11px] text-faint -mt-0.5">Conversations with your customers</p>
+              <p className="truncate text-[11px] text-faint -mt-0.5">Conversations with your customers</p>
             </div>
 
-            {/* Channels Tabs */}
+            {/* Channels Tabs (hidden)
             <div className="ml-6 hidden md:flex items-center gap-5 border-l border-line pl-6 text-xs">
               <button className="flex items-center gap-1.5 font-semibold text-primary border-b-2 border-primary pb-1 pt-1">
                 <span className="flex h-4 w-4 items-center justify-center rounded-full bg-accent text-on-primary text-[9px]">💬</span>
                 WhatsApp
               </button>
-              {/* <button className="flex items-center gap-1.5 text-faint hover:text-body transition pb-1 pt-1">
+              <button className="flex items-center gap-1.5 text-faint hover:text-body transition pb-1 pt-1">
                 <span>🎫</span> Tickets
               </button>
               <button className="flex items-center gap-1.5 text-faint hover:text-body transition pb-1 pt-1">
@@ -441,26 +473,27 @@ export function AppShell({
               </button>
               <button className="flex items-center gap-1.5 text-faint hover:text-body transition pb-1 pt-1">
                 <span>👥</span> Team chat
-              </button> */}
+              </button>
             </div>
+            */}
           </div>
 
           {/* Header Right Controls */}
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3 pl-3">
             {/* New Campaign Button */}
-            <button
+            {/* <button
               onClick={() => alert('New Campaign modal / Broadcast wizard')}
-              className="flex items-center gap-2 rounded-full bg-secondary px-4 py-1.5 text-xs font-semibold text-on-primary shadow-xs hover:bg-secondary-hover active:scale-[0.98] transition cursor-pointer"
+              className="flex items-center gap-2 whitespace-nowrap rounded-full bg-secondary px-4 py-1.5 text-xs font-semibold text-on-primary shadow-xs hover:bg-secondary-hover active:scale-[0.98] transition cursor-pointer"
             >
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="22" y1="2" x2="11" y2="13" />
                 <polygon points="22 2 15 22 11 13 2 9 22 2" />
               </svg>
               <span>New campaign</span>
-            </button>
+            </button> */}
 
             {/* Vertical Separator */}
-            <div className="h-5 w-px bg-line" />
+            {/* <div className="h-5 w-px bg-line" /> */}
 
             {/* Workspace Switcher */}
             <div ref={workspaceMenuRef} className="relative">
@@ -485,27 +518,56 @@ export function AppShell({
                     YOUR WORKSPACES
                   </div>
 
-                  {/* Active Workspace */}
-                  <div className="flex items-center justify-between rounded-xl bg-primary-soft/80 px-3 py-2 text-xs font-semibold text-ink">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-bold text-on-primary">
-                        {workspaceInitial}
-                      </span>
-                      <span className="truncate">{me.workspace.name}</span>
-                    </div>
-                    <svg className="h-4 w-4 shrink-0 text-ink" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
+                  {/* All of the user's workspaces; the active one is ticked, the others switch to it */}
+                  <div className="max-h-56 space-y-1 overflow-y-auto">
+                    {(workspaces ?? [{ id: me.workspace.id, name: me.workspace.name, role: '' }]).map((w) => {
+                      const active = w.id === me.workspace.id;
+                      return (
+                        <button
+                          key={w.id}
+                          type="button"
+                          disabled={active || workspaceBusy}
+                          onClick={() => enterWorkspace(() => switchWorkspace(w.id))}
+                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-xs font-semibold text-ink transition ${
+                            active ? 'bg-primary-soft/80 cursor-default' : 'hover:bg-surface-strong cursor-pointer disabled:opacity-60'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-bold text-on-primary">
+                              {(w.name || 'W').charAt(0).toUpperCase()}
+                            </span>
+                            <span className="truncate">{w.name}</span>
+                          </div>
+                          {active && (
+                            <svg className="h-4 w-4 shrink-0 text-ink" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  {/* Add New Workspace Form */}
+                  {workspaceError && (
+                    <div className="mt-2 rounded-lg bg-danger-soft px-2.5 py-1.5 text-xs text-danger">{workspaceError}</div>
+                  )}
+
+                  {/* Add New Workspace: a button first, the name field once it's clicked */}
+                  {!creatingWorkspace ? (
+                    <button
+                      type="button"
+                      onClick={() => setCreatingWorkspace(true)}
+                      className="mt-3 flex w-full items-center gap-2 rounded-xl border border-dashed border-line-strong px-3 py-2 text-xs font-semibold text-secondary hover:bg-surface-strong transition cursor-pointer"
+                    >
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-strong text-sm leading-none">+</span>
+                      Create workspace
+                    </button>
+                  ) : (
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
-                      if (!newWorkspace.trim()) return;
-                      alert(`Create workspace "${newWorkspace}"`);
-                      setNewWorkspace('');
-                      setWorkspaceMenuOpen(false);
+                      if (!newWorkspace.trim() || workspaceBusy) return;
+                      enterWorkspace(() => createWorkspace(newWorkspace.trim()));
                     }}
                     className="mt-3"
                   >
@@ -513,7 +575,9 @@ export function AppShell({
                       <input
                         type="text"
                         placeholder="Workspace name"
+                        autoFocus
                         value={newWorkspace}
+                        maxLength={191}
                         onChange={(e) => setNewWorkspace(e.target.value)}
                         className="w-full rounded-lg bg-transparent px-2.5 py-1.5 text-xs text-ink placeholder:text-faint outline-none"
                       />
@@ -521,16 +585,16 @@ export function AppShell({
                     <div className="mt-2.5 flex items-center gap-2">
                       <button
                         type="submit"
-                        disabled={!newWorkspace.trim()}
+                        disabled={!newWorkspace.trim() || workspaceBusy}
                         className="rounded-lg bg-secondary px-3.5 py-1 text-xs font-semibold text-on-primary shadow-2xs hover:bg-secondary-hover disabled:opacity-50 transition cursor-pointer"
                       >
-                        Create
+                        {workspaceBusy ? 'Please wait…' : 'Create'}
                       </button>
                       <button
                         type="button"
                         onClick={() => {
                           setNewWorkspace('');
-                          setWorkspaceMenuOpen(false);
+                          setCreatingWorkspace(false);
                         }}
                         className="px-2 py-1 text-xs text-muted hover:text-body transition cursor-pointer"
                       >
@@ -538,6 +602,7 @@ export function AppShell({
                       </button>
                     </div>
                   </form>
+                  )}
                 </div>
               )}
             </div>
@@ -552,6 +617,9 @@ export function AppShell({
                 <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
               </svg>
             </button>
+
+            {/* Page-specific header controls (the inbox renders its Assign dropdown here) */}
+            <div id="app-header-actions" className="contents" />
 
             {/* Automation Menu Button */}
             <div ref={automationMenuRef} className="relative">

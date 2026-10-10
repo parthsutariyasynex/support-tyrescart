@@ -7,7 +7,7 @@ module.exports = {
       args: "../node_modules/tsx/dist/cli.mjs src/index.ts",
       env: {
         NODE_ENV: "production",
-        PORT: 5000
+        PORT: 5001
       }
     },
     {

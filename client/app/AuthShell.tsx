@@ -218,3 +218,21 @@ export const buttonClass =
   'w-full rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-on-primary shadow-sm transition hover:bg-primary-hover active:scale-[0.99] disabled:opacity-60 flex items-center justify-center gap-2 cursor-pointer';
 
 
+
+// Fixed-height slot for a form's error or notice. It's always there (empty when there's nothing to say),
+// so messages appearing or disappearing never move the form or the page. Fits two lines.
+export function FormMessage({ tone = 'error', children }: { tone?: 'error' | 'success'; children?: React.ReactNode }) {
+  return (
+    <div className="h-[54px]" aria-live="polite">
+      {children && (
+        <div
+          className={`line-clamp-2 rounded-xl border px-3.5 py-2.5 text-xs font-medium ${
+            tone === 'error' ? 'border-danger-border bg-danger-soft/80 text-danger' : 'border-primary-soft-border bg-primary-subtle text-primary'
+          }`}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -19,6 +19,7 @@
     "graphql": "^16.14.2",
     "graphql-yoga": "^5.24.4",
     "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^10.0.10",
     "socket.io": "^4.8.4",
     "zod": "^4.6.5"
   },
@@ -27,6 +28,7 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.6.4",
+    "@types/nodemailer": "^8.0.2",
     "prisma": "^6.19.3",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"

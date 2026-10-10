@@ -2,16 +2,19 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { setToken } from '@/lib/api';
 import { login } from '@/lib/auth';
-import { AuthShell, buttonClass, inputClass } from '../AuthShell';
+import { AuthShell, FormMessage, buttonClass, inputClass } from '../AuthShell';
 
 export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // Arrived here after setting a new password
+  const [passwordReset, setPasswordReset] = useState(false);
+  useEffect(() => setPasswordReset(new URLSearchParams(window.location.search).get('reset') === '1'), []);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -58,9 +61,9 @@ export default function LoginPage() {
             <label className="block text-[13px] font-medium text-body">
               Password <span className="text-danger-icon">*</span>
             </label>
-            <a href="#" className="text-xs font-normal text-faint transition hover:text-body">
+            <Link href="/forgot-password" className="text-xs font-normal text-faint transition hover:text-body">
               Forgot?
-            </a>
+            </Link>
           </div>
           <div className="relative mt-1.5">
             <input
@@ -92,15 +95,15 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Error Alert */}
-        {error && (
-          <div className="rounded-xl border border-danger-border bg-danger-soft/80 px-3.5 py-2.5 text-xs font-medium text-danger">
-            {error}
-          </div>
+        {/* Error / "password updated" notice, in a fixed slot so nothing shifts */}
+        {error ? (
+          <FormMessage>{error}</FormMessage>
+        ) : (
+          <FormMessage tone="success">{passwordReset && 'Password updated. Sign in with your new password.'}</FormMessage>
         )}
 
         {/* Submit Button */}
-        <button disabled={loading} className={`${buttonClass} mt-2`}>
+        <button disabled={loading} className={buttonClass}>
           <span>{loading ? 'Signing in…' : 'Sign in'}</span>
           {!loading && (
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

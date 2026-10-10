@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { setToken } from '@/lib/api';
 import { register } from '@/lib/auth';
-import { AuthShell, buttonClass, inputClass } from '../AuthShell';
+import { AuthShell, FormMessage, buttonClass, inputClass } from '../AuthShell';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -116,13 +116,9 @@ export default function RegisterPage() {
           </div>
         </div>
 
-        {error && (
-          <div className="rounded-xl border border-danger-border bg-danger-soft/80 px-3.5 py-2.5 text-xs font-medium text-danger">
-            {error}
-          </div>
-        )}
+        <FormMessage>{error}</FormMessage>
 
-        <button disabled={loading} className={`${buttonClass} mt-2`}>
+        <button disabled={loading} className={buttonClass}>
           <span>{loading ? 'Creating workspace…' : 'Create workspace'}</span>
           {!loading && (
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

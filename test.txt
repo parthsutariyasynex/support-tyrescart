@@ -1,0 +1,46 @@
+https://reacho.live/login
+
+info@tyrescart.ae
+Tyres@1100
+ 
+
+ 
+ 
+WHATSAPP_PHONE_NUMBER_ID=1150993524765951
+WHATSAPP_BUSINESS_ACCOUNT_ID=845270958305032
+WHATSAPP_TOKEN=EAAzGsMVZCddMBSprYt2dqkwef63TTwa1owAf3TZBudt1YxmNEazbjoU1x05Sa3qSMjfrg4ZBZBLZAtso201L5gwnF5hX1HQyxh33G3AiABO1behYBHWqdeNunpkYQIZCQqwV0ycFUl53MDTyf7qZAJYIlkGpFluoV4fw8L2uIjrZCUrQYCkEGtjVV5NOmoTuFAZDZD
+ 
+
+support.tyrescart.ae
+
+Node v: 22
+
+Port: 4000
+
+IP: 158.220.102.209
+
+tyrescart-support
+
+BPJU86yqpbY7HiEI323p
+ 
+Database
+
+------------
+
+name: supportdb
+
+usre: supportusr
+
+pass: oUNi3J2ezyNoKerOPkw3
+ 
+/home/tyrescart-support/htdocs/support.tyrescart.ae
+ 
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=pmQXK_llqPJixe08L4_bvv5_IoYZORW9ZhZPyyNFl1Q&code_challenge_method=S256&state=JQNiHW9W45Tq_rvwav_So_zCC0hDklhmdXW1YC1PmjM
+Claude
+Claude is Anthropic's AI, built for problem solvers. Tackle complex challenges, analyze data, write code, and think through your hardest work.
+ 
+va6JAhQfqObBGw6hSvya07ik2xZgZiapGZ7VOHhni31zDHhE#JQNiHW9W45Tq_rvwav_So_zCC0hDklhmdXW1YC1PmjM
+ 
+ 
+https://support.tyrescart.ae/login
+ 

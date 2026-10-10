@@ -5,6 +5,7 @@ import { prisma } from '../prisma.js';
 import { emitToWorkspace } from '../realtime.js';
 import { sendTemplate, sendText } from '../whatsapp.js';
 import { AppError, notFound } from './errors.js';
+import { withSender } from './senders.js';
 import { parse } from './validate.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -13,6 +14,12 @@ export const MAX_PAGE_SIZE = 100;
 const pageSchema = z.object({
   first: z.number().int().min(1).max(MAX_PAGE_SIZE).default(50),
   after: z.string().min(1).optional(),
+});
+
+const conversationPageSchema = pageSchema.extend({
+  labelId: z.string().min(1).optional(),
+  assignee: z.string().min(1).optional(),
+  status: z.enum(['open', 'closed']).optional(),
 });
 
 export type Page<T> = { nodes: T[]; hasNextPage: boolean; endCursor: string | null };
@@ -26,9 +33,13 @@ function toPage<T extends { id: string }>(rows: T[], first: number): Page<T> {
 const conversationInclude = {
   contact: true,
   messages: { orderBy: { createdAt: 'desc' as const }, take: 1 },
+  labels: { include: { label: true } },
+  assignedTo: true,
 };
 
 // Newest first. Omit `page` to get every conversation (REST behaviour).
+// `labelId` keeps only conversations that have that label; `assignee` is an assignee id or 'unassigned';
+// `status` is 'open' or 'closed' (omit for both).
 export async function listConversations(workspaceId: string, page?: unknown) {
   const query = {
     where: { workspaceId },
@@ -37,10 +48,16 @@ export async function listConversations(workspaceId: string, page?: unknown) {
   };
   if (page === undefined) return prisma.conversation.findMany(query);
 
-  const { first, after } = parse(pageSchema, page);
+  const { first, after, labelId, assignee, status } = parse(conversationPageSchema, page);
   if (after) await requireConversation(workspaceId, after);
   const rows = await prisma.conversation.findMany({
     ...query,
+    where: {
+      workspaceId,
+      ...(labelId ? { labels: { some: { labelId } } } : {}),
+      ...(assignee ? { assignedToId: assignee === 'unassigned' ? null : assignee } : {}),
+      ...(status ? { status } : {}),
+    },
     take: first + 1,
     ...(after ? { cursor: { id: after }, skip: 1 } : {}),
   });
@@ -60,7 +77,8 @@ export async function markConversationRead(workspaceId: string, id: string) {
 }
 
 // Newest page first; `after` walks back to older messages. Nodes are returned oldest -> newest.
-export async function listMessages(workspaceId: string, conversationId: string, page: unknown) {
+// `hideBefore`: the viewer cleared this chat at that time, so older messages are left out for them
+export async function listMessages(workspaceId: string, conversationId: string, page: unknown, hideBefore?: Date | null) {
   await requireConversation(workspaceId, conversationId);
   const { first, after } = parse(pageSchema, page);
   if (after) {
@@ -68,7 +86,7 @@ export async function listMessages(workspaceId: string, conversationId: string, 
     if (!cursor) throw notFound('Message');
   }
   const rows = await prisma.message.findMany({
-    where: { conversationId },
+    where: { conversationId, ...(hideBefore ? { createdAt: { gt: hideBefore } } : {}) },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: first + 1,
     ...(after ? { cursor: { id: after }, skip: 1 } : {}),
@@ -90,11 +108,15 @@ export const sendSchema = z.union([
   z.object({ type: z.literal('template'), name: z.string().min(1), language: z.string().default('en') }),
 ]);
 
-export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown) {
+// `sentById` is the agent sending it; it decides who may edit or delete the message later
+export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
   const input = parse(sendSchema, rawInput);
   const conversation = await requireConversation(workspaceId, conversationId);
   const account = await prisma.whatsAppAccount.findUnique({ where: { workspaceId } });
   if (!account) throw new AppError('Connect a WhatsApp number in Settings first', 400, 'WHATSAPP_NOT_CONNECTED');
+
+  if (conversation.status === 'closed')
+    throw new AppError('This chat is closed. Reopen it to reply.', 409, 'CONVERSATION_CLOSED');
 
   const windowOpen = conversation.lastInboundAt && Date.now() - conversation.lastInboundAt.getTime() < DAY;
   if (input.type === 'text' && !windowOpen)
@@ -102,7 +124,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;
   const message = await prisma.message.create({
-    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending' },
+    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById },
   });
 
   let saved;
@@ -119,7 +141,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
     });
   }
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
-  emitToWorkspace(workspaceId, 'message:new', { conversation, message: saved });
+  emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   return saved;
 }
 

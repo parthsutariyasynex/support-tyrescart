@@ -23,7 +23,7 @@ inboxRouter.get('/conversations/:id/messages', async (req, res) => {
 });
 
 inboxRouter.post('/conversations/:id/messages', async (req, res) => {
-  res.json(await sendMessage(req.auth!.workspaceId, req.params.id, req.body));
+  res.json(await sendMessage(req.auth!.workspaceId, req.params.id, req.body, req.auth!.userId));
 });
 
 // Start a chat with a new number (first message must be a template)

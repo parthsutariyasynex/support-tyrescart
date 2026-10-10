@@ -16,6 +16,9 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
   members      Member[]
+  // Set when the password is reset; login tokens issued before it stop working
+  passwordChangedAt DateTime?
+  resetTokens       PasswordResetToken[]
 }
 
 model Workspace {
@@ -26,11 +29,18 @@ model Workspace {
   whatsapp      WhatsAppAccount?
   contacts      Contact[]
   conversations Conversation[]
+  labels        Label[]
+  assignees     Assignee[]
+  activity      ActivityEvent[]
 }
 
 model Member {
   id          String    @id @default(cuid())
   role        String    @default("agent") // owner | admin | agent
+  // Agents need this to create, edit or delete labels and assignees (owners and admins always can)
+  canManageLabels Boolean @default(false)
+  // Bell: events after this time count as unseen for this member
+  notificationsSeenAt DateTime?
   userId      String
   workspaceId String
   user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -72,12 +82,21 @@ model Conversation {
   // Customer's last inbound message: free-form replies allowed for 24h after this
   lastInboundAt  DateTime?
   unread         Int       @default(0)
+  // open | closed. Closing keeps messages, labels and the assignee; new customer messages don't reopen it
+  status         String    @default("open")
+  closedAt       DateTime?
+  closedById     String?
   workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   contact        Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   messages       Message[]
+  labels         ConversationLabel[]
+  assignedTo     Assignee? @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  activity       ActivityEvent[]
+  clears         ConversationClear[]
 
   @@unique([workspaceId, contactId])
   @@index([workspaceId, lastMessageAt])
+  @@index([workspaceId, status, lastMessageAt])
 }
 
 model Message {
@@ -90,7 +109,112 @@ model Message {
   status         String       @default("sent") // pending | sent | delivered | read | failed
   error          String?      @db.Text
   createdAt      DateTime     @default(now())
+  // Outgoing messages: the agent (user id) who sent it; null for customer messages and older rows
+  sentById       String?
+  editedAt       DateTime?
+  // "Delete for everyone": body is cleared, the row stays so the conversation keeps its shape
+  deletedAt      DateTime?
+  deletedById    String?
+  // Bumped on every edit/delete so concurrent edits and late socket events can't overwrite newer content
+  version        Int          @default(0)
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  revisions      MessageRevision[]
 
   @@index([conversationId, createdAt])
+}
+
+// Previous text of a message, saved on each edit or delete. Server-side history only; never returned by the API.
+model MessageRevision {
+  id        String   @id @default(cuid())
+  messageId String
+  body      String   @db.Text
+  // edit | delete | restore
+  action    String
+  userId    String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+}
+
+// WhatsApp Business-style labels, shared by everyone in the workspace
+model Label {
+  id            String              @id @default(cuid())
+  workspaceId   String
+  name          String              @db.VarChar(50)
+  color         String              @db.VarChar(7) // #rrggbb
+  createdAt     DateTime            @default(now())
+  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversations ConversationLabel[]
+
+  @@unique([workspaceId, name])
+}
+
+model ConversationLabel {
+  conversationId String
+  labelId        String
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  label          Label        @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, labelId])
+  @@index([labelId])
+}
+
+// Who a conversation is assigned to: a named, coloured entry managed like labels (one per conversation)
+model Assignee {
+  id            String         @id @default(cuid())
+  workspaceId   String
+  name          String         @db.VarChar(50)
+  color         String         @db.VarChar(7) // #rrggbb
+  createdAt     DateTime       @default(now())
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([workspaceId, name])
+}
+
+// "Forgot password" links. Only a SHA-256 hash of the secret is stored; each link expires and works once.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Activity history (chat timeline + notification bell). Never stores message text except a short
+// preview of incoming customer messages.
+model ActivityEvent {
+  id             String        @id @default(cuid())
+  workspaceId    String
+  conversationId String?
+  // User who did it; null for the customer / system
+  actorId        String?
+  // conversation_closed | conversation_reopened | assigned | unassigned | label_added | label_removed |
+  // message_edited | message_deleted | message_restored | message_received
+  type           String
+  data           Json?
+  createdAt      DateTime      @default(now())
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([workspaceId, createdAt])
+}
+
+// "Clear chat" (only for the person who did it, like WhatsApp): messages and activity up to clearedAt are
+// hidden from that user. Nothing is deleted; the customer and teammates still see everything.
+model ConversationClear {
+  userId         String
+  conversationId String
+  clearedAt      DateTime
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId])
 }
