@@ -1,4 +1,4 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export function getToken() {
   return typeof window === 'undefined' ? null : localStorage.getItem('token');

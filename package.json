@@ -1,0 +1,16 @@
+{
+  "name": "support-tyrescart",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev:client": "npm run dev --workspace=client",
+    "dev:server": "npm run dev --workspace=server",
+    "build:client": "npm run build --workspace=client",
+    "start:client": "npm run start --workspace=client",
+    "start:server": "npm run start --workspace=server"
+  }
+}
