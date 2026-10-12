@@ -2,9 +2,10 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { setToken } from '@/lib/api';
 import { register } from '@/lib/auth';
+import { fetchJoinLinkInfo } from '@/lib/members';
 import { AuthShell, FormMessage, buttonClass, inputClass } from '../AuthShell';
 
 export default function RegisterPage() {
@@ -12,6 +13,16 @@ export default function RegisterPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // Opened from a team signup link (?join=...): join that workspace as an Agent instead of creating one
+  const [join, setJoin] = useState<{ token: string; workspaceName: string | null } | null>(null);
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('join');
+    if (!token) return;
+    setJoin({ token, workspaceName: null });
+    fetchJoinLinkInfo(token)
+      .then(({ workspaceName }) => setJoin({ token, workspaceName }))
+      .catch((err) => setError((err as Error).message));
+  }, []);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -23,10 +34,10 @@ export default function RegisterPage() {
         name: String(form.get('name')),
         email: String(form.get('email')),
         password: String(form.get('password')),
-        workspaceName: String(form.get('workspaceName')),
+        ...(join ? { joinToken: join.token } : { workspaceName: String(form.get('workspaceName')) }),
       });
       setToken(token);
-      router.push('/settings');
+      router.push(join ? '/inbox' : '/settings');
     } catch (err) {
       setError((err as Error).message);
       setLoading(false);
@@ -35,13 +46,14 @@ export default function RegisterPage() {
 
   return (
     <AuthShell
-      title="Create workspace"
-      subtitle="Set up your WhatsApp SaaS in 5 minutes."
+      title={join ? `Join ${join.workspaceName ?? 'your team'}` : 'Create workspace'}
+      subtitle={join ? "You'll join as an Agent. An admin can change your role later." : 'Set up your WhatsApp SaaS in 5 minutes.'}
       footerText="Already have an account?"
-      footerLinkText="Sign in →"
-      footerLinkHref="/login"
+      footerLinkText={join ? 'Sign in to join →' : 'Sign in →'}
+      footerLinkHref={join ? `/login?join=${encodeURIComponent(join.token)}` : '/login'}
     >
       <form onSubmit={onSubmit} className="space-y-3.5">
+        {!join && (
         <div>
           <label className="block text-[13px] font-medium text-body">
             Business name <span className="text-danger-icon">*</span>
@@ -54,6 +66,7 @@ export default function RegisterPage() {
             className={`${inputClass} mt-1.5`}
           />
         </div>
+        )}
 
         <div>
           <label className="block text-[13px] font-medium text-body">
@@ -119,7 +132,7 @@ export default function RegisterPage() {
         <FormMessage>{error}</FormMessage>
 
         <button disabled={loading} className={buttonClass}>
-          <span>{loading ? 'Creating workspace…' : 'Create workspace'}</span>
+          <span>{join ? (loading ? 'Joining…' : 'Create account & join') : loading ? 'Creating workspace…' : 'Create workspace'}</span>
           {!loading && (
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M5 12h14" />

@@ -30,7 +30,7 @@ export type Conversation = {
   lastInboundAt: string | null;
   lastMessage: Message | null;
   labels: Pick<Label, 'id' | 'name' | 'color'>[];
-  assignee: Pick<Assignee, 'id' | 'name' | 'color'> | null;
+  assignee: Pick<Assignee, 'id' | 'name' | 'color' | 'userId'> | null;
   // Closed chats keep everything; new customer messages don't reopen them
   status: ConversationStatus;
   closedAt: string | null;
@@ -43,9 +43,9 @@ export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endC
 export const PAGE_SIZE = 50;
 
 const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version';
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color } status closedAt closedById`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } status closedAt closedById`;
 
-// Optional filters: labelId, assignee (an assignee id or 'unassigned'), status (open | closed)
+// Optional filters: labelId, assignee (an assignee id, 'unassigned' or 'me'), status (open | closed)
 export async function fetchConversations(
   after?: string | null,
   filter: { labelId?: string | null; assignee?: string | null; status?: ConversationStatus | null } = {},
@@ -84,6 +84,21 @@ export async function sendTemplateMessage(conversationId: string, name: string, 
   const query = `mutation SendTemplate($input: SendTemplateInput!) { sendTemplateMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
   return (await gql<{ sendTemplateMessage: Message }>(query, { input: { conversationId, name, language } }))
     .sendTemplateMessage;
+}
+
+// My Chats: the chat's assignee is linked to this user's login. Never by name or email: unassigned chats and
+// name-only assignees (no userId) are never anyone's. (The server's "me" filter applies the same rule.)
+export function isAssignedTo(c: Pick<Conversation, 'assignee'>, userId: string | null | undefined) {
+  return !!userId && !!c.assignee?.userId && c.assignee.userId === userId;
+}
+
+// Approved WhatsApp templates (one per name + language), live from Meta
+export type MessageTemplate = { name: string; language: string; category: string; body: string; needsParameters: boolean };
+
+export async function fetchMessageTemplates() {
+  return (
+    await gql<{ messageTemplates: MessageTemplate[] }>(`query Templates { messageTemplates { name language category body needsParameters } }`)
+  ).messageTemplates;
 }
 
 export async function startConversation(waId: string, name?: string) {

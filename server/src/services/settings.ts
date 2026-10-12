@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import type { AuthPayload } from '../auth.js';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
 import { AppError } from './errors.js';
+import { requireAdmin } from './permissions.js';
 import { parse } from './validate.js';
 
 const connectSchema = z.object({
@@ -17,8 +19,11 @@ export function getWhatsAppAccount(workspaceId: string) {
   return prisma.whatsAppAccount.findUnique({ where: { workspaceId }, select: publicFields });
 }
 
-// Manual connect (paste IDs from Meta). Replace with Embedded Signup for real customers.
-export async function connectWhatsApp(workspaceId: string, rawInput: unknown) {
+// Manual connect (paste IDs from Meta). Replace with Embedded Signup for real customers. Admins only:
+// it changes which number the whole workspace sends from.
+export async function connectWhatsApp(auth: AuthPayload, rawInput: unknown) {
+  await requireAdmin(auth);
+  const { workspaceId } = auth;
   const { wabaId, phoneNumberId, accessToken } = parse(connectSchema, rawInput);
 
   // Check the credentials work and fetch the display number

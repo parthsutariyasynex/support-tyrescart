@@ -5,9 +5,13 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { getToken, setToken } from '@/lib/api';
 import { type WorkspaceSummary, createWorkspace, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
+import { RoleBadge } from './RoleBadge';
+import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 
 export type Me = {
   user: { id: string; name: string; email: string };
+  // Your role in this workspace (owner | admin | supervisor | agent)
+  role?: string;
   workspace: { id: string; name: string; whatsapp: { displayPhone: string | null; phoneNumberId?: string; wabaId?: string } | null };
 };
 
@@ -28,6 +32,8 @@ export function AppShell({
   // The name field only appears after clicking "Create workspace"
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[] | null>(null);
+  // Extra detail for workspaces that share a name (created date and the end of the id)
+  const duplicateDetails = workspaceDetails(workspaces ?? []);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState('');
 
@@ -86,7 +92,10 @@ export function AppShell({
       return;
     }
     fetchMe<Me>()
-      .then(setMe)
+      .then((m) => {
+        setMe(m);
+        rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
+      })
       .catch(() => {
         router.replace('/login');
       });
@@ -177,6 +186,23 @@ export function AppShell({
                       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
                     </svg>
                     <span>Inbox</span>
+                  </Link>
+
+                  {/* Same inbox, only the chats assigned to you */}
+                  <Link
+                    href="/my-chats"
+                    className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                      pathname === '/my-chats'
+                        ? 'bg-secondary text-on-primary shadow-2xs'
+                        : 'text-body hover:bg-surface-strong'
+                    }`}
+                  >
+                    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                      <circle cx="12" cy="9" r="2" />
+                      <path d="M8.5 13.5a4 4 0 0 1 7 0" />
+                    </svg>
+                    <span>My Chats</span>
                   </Link>
 
                   {/* Future Contacts / Leads menus
@@ -371,6 +397,21 @@ export function AppShell({
                     <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
                   </svg>
                 </Link>
+                <Link
+                  href="/my-chats"
+                  title="My Chats"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/my-chats'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    <circle cx="12" cy="9" r="2" />
+                    <path d="M8.5 13.5a4 4 0 0 1 7 0" />
+                  </svg>
+                </Link>
 
                 {/* Future Slim Icons (Hidden for now)
                 <button
@@ -441,7 +482,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">Inbox</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/my-chats' ? 'My Chats' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -456,7 +497,9 @@ export function AppShell({
                   </Link>
                 )}
               </div>
-              <p className="truncate text-[11px] text-faint -mt-0.5">Conversations with your customers</p>
+              <p className="truncate text-[11px] text-faint -mt-0.5">
+                {pathname === '/my-chats' ? 'Chats assigned to you' : 'Conversations with your customers'}
+              </p>
             </div>
 
             {/* Channels Tabs (hidden)
@@ -536,7 +579,13 @@ export function AppShell({
                             <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-bold text-on-primary">
                               {(w.name || 'W').charAt(0).toUpperCase()}
                             </span>
-                            <span className="truncate">{w.name}</span>
+                            <span className="min-w-0">
+                              <span className="block truncate">{w.name}</span>
+                              {/* Same name as another of your workspaces: show which one this is */}
+                              {duplicateDetails.get(w.id) && (
+                                <span className="block truncate text-[10px] font-normal text-muted">{duplicateDetails.get(w.id)}</span>
+                              )}
+                            </span>
                           </div>
                           {active && (
                             <svg className="h-4 w-4 shrink-0 text-ink" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -787,6 +836,7 @@ export function AppShell({
                   {userInitial}
                 </span>
                 <span className="font-semibold max-w-[120px] truncate">{me.user.name || me.user.email}</span>
+                <RoleBadge role={me.role} />
                 <svg className="h-3 w-3 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
@@ -800,7 +850,10 @@ export function AppShell({
                       {userInitial}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-xs font-bold text-ink truncate">{me.user.name || 'User'}</p>
+                      <p className="flex items-center gap-1.5 text-xs font-bold text-ink">
+                        <span className="truncate">{me.user.name || 'User'}</span>
+                        <RoleBadge role={me.role} />
+                      </p>
                       <p className="text-[11px] text-muted truncate">{me.user.email}</p>
                     </div>
                   </div>

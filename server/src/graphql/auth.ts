@@ -29,16 +29,20 @@ export const typeDefs = /* GraphQL */ `
     workspace: Workspace!
   }
 
+  "Without joinToken: creates a workspace you own. With joinToken (a team signup link): joins that workspace as an Agent."
   input RegisterInput {
     name: String!
     email: String!
     password: String!
-    workspaceName: String!
+    workspaceName: String
+    joinToken: String
   }
 
   input LoginInput {
     email: String!
     password: String!
+    "Optional: open this workspace if you're a member of it (e.g. the last one you used); otherwise your first"
+    workspaceId: ID
   }
 
   input ResetPasswordInput {
@@ -51,7 +55,7 @@ export const typeDefs = /* GraphQL */ `
   type WorkspaceSummary {
     id: ID!
     name: String!
-    "owner | admin | agent"
+    "owner | admin | supervisor | agent"
     role: String!
     createdAt: DateTime!
   }
@@ -76,7 +80,7 @@ export const typeDefs = /* GraphQL */ `
   }
 `;
 
-async function withMe(result: { token: string; userId: string }) {
+export async function withMe(result: { token: string; userId: string }) {
   const { workspaceId } = verifyToken(result.token);
   return { token: result.token, ...(await getMe({ userId: result.userId, workspaceId })) };
 }

@@ -30,6 +30,6 @@ export const resolvers = {
     whatsappAccount: authed((_args, { workspaceId }) => getWhatsAppAccount(workspaceId)),
   },
   Mutation: {
-    connectWhatsApp: authed(({ input }: { input: unknown }, { workspaceId }) => connectWhatsApp(workspaceId, input)),
+    connectWhatsApp: authed(({ input }: { input: unknown }, auth) => connectWhatsApp(auth, input)),
   },
 };

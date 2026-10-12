@@ -11,6 +11,7 @@ export type ActivityType =
   | 'conversation_closed'
   | 'conversation_reopened'
   | 'assigned'
+  | 'reassigned'
   | 'unassigned'
   | 'label_added'
   | 'label_removed'

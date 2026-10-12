@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Message } from '@/lib/inbox';
+import { formatDateTime, formatTime } from '@/lib/time';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
 const LONG_PRESS_MS = 450;
@@ -13,8 +14,6 @@ function agentColor(id: string) {
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return AGENT_NAME_COLORS[h % AGENT_NAME_COLORS.length];
 }
-
-const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 export type MessageAction = 'copy' | 'edit' | 'delete';
 
@@ -120,11 +119,11 @@ export function MessageBubble({
         )}
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-faint">
           {m.editedAt && !m.deletedAt && (
-            <span title={`Edited ${new Date(m.editedAt).toLocaleString()}`} className="italic">
+            <span title={`Edited ${formatDateTime(m.editedAt)}`} className="italic">
               Edited
             </span>
           )}
-          <span>{time(m.createdAt)}</span>
+          <span>{formatTime(m.createdAt)}</span>
           {isOut && !m.deletedAt && (
             <span
               className={
