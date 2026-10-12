@@ -13,20 +13,22 @@ webhookRouter.get('/', (req, res) => {
   res.sendStatus(403);
 });
 
-function validSignature(rawBody: Buffer | undefined, header: string | undefined) {
-  // Original check (requires META_APP_SECRET in production):
-  // if (!env.metaAppSecret) return !env.isProd; // allow unsigned only in dev
-  if (!env.metaAppSecret) return true; // allow if secret is not configured
-
+// Meta signs every webhook with the app secret (X-Hub-Signature-256). Without META_APP_SECRET, unsigned
+// webhooks are accepted only outside production, so local testing still works.
+export function validSignature(rawBody: Buffer | undefined, header: string | undefined, secret: string, isProd: boolean) {
+  if (!secret) return !isProd;
   if (!rawBody || !header) return false;
-  const expected = 'sha256=' + crypto.createHmac('sha256', env.metaAppSecret).update(rawBody).digest('hex');
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
   return expected.length === header.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(header));
 }
 
+if (env.isProd && !env.metaAppSecret)
+  console.error('[Webhook] META_APP_SECRET is not set: every webhook will be rejected until it is');
+
 // Incoming messages + delivery/read statuses
 webhookRouter.post('/', async (req, res) => {
-  console.log('[Webhook] Incoming POST event received from Meta:', JSON.stringify(req.body));
-  if (!validSignature((req as any).rawBody, req.header('x-hub-signature-256'))) {
+  // Logs never include customer numbers, names or message text: only ids, types and statuses
+  if (!validSignature((req as any).rawBody, req.header('x-hub-signature-256'), env.metaAppSecret, env.isProd)) {
     console.warn('[Webhook] Invalid signature, rejecting');
     return res.sendStatus(401);
   }
@@ -46,11 +48,15 @@ webhookRouter.post('/', async (req, res) => {
         }
 
         for (const msg of value.messages ?? []) {
-          console.log('[Webhook] Processing incoming message:', msg);
+          console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type });
           await saveIncoming(account.workspaceId, parseWebhookMessage(msg, value.contacts));
         }
         for (const status of value.statuses ?? []) {
-          console.log('[Webhook] Processing status update:', status);
+          console.log('[Webhook] Status update:', {
+            id: status?.id,
+            status: status?.status,
+            errors: status?.errors?.map((e: any) => ({ code: e.code, title: e.title })),
+          });
           await applyStatus(account.workspaceId, status);
         }
       }

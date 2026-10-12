@@ -1,10 +1,15 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { type Assignee, assignConversation, createAssignee, deleteAssignee, updateAssignee } from '@/lib/assignees';
+import {
+  type Assignee,
+  type WorkspaceMember,
+  assignConversation,
+  fetchWorkspaceMembers,
+} from '@/lib/assignees';
 import type { Conversation } from '@/lib/inbox';
-import { LABEL_COLORS } from '@/lib/labels';
-import { ColorField } from './colors';
+import { assignableMembers, roleStyle } from '@/lib/roles';
+import { RoleBadge } from '../RoleBadge';
 
 type AssigneeRef = NonNullable<Conversation['assignee']>;
 
@@ -26,7 +31,7 @@ export function PersonIcon({ className = 'h-3.5 w-3.5' }: { className?: string }
 }
 
 // Coloured initial, like a label dot but for a person
-export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { assignee: AssigneeRef; size?: string }) {
+export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { assignee: Pick<AssigneeRef, 'name' | 'color'>; size?: string }) {
   return (
     <span
       className={`flex shrink-0 items-center justify-center rounded-full font-bold text-on-primary ${size}`}
@@ -40,40 +45,38 @@ export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { ass
 const inputClass =
   'w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-xs text-ink-soft placeholder:text-faint outline-hidden focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary';
 
-// Top-header "Assign" dropdown: assign the open chat to one assignee, and create, edit or
-// delete assignees (name + colour) the same way labels work. Without a chat it only manages them.
-// Without `canManage` assignees can be used but not changed.
+// Top-header "Assign" dropdown: assign the open chat to a person (or Unassigned). Without a chat it just lists them.
 export function AssignDropdown({
   conversation,
   assignees,
-  canManage,
+  meId,
+  canAssignOthers,
+  membersVersion,
   onAssigned,
-  onAssigneeSaved,
-  onAssigneeDeleted,
 }: {
   conversation?: Conversation;
   assignees: Assignee[];
-  canManage: boolean;
+  meId: string | null;
+  // Supervisors and admins; agents may only take an unassigned chat or release their own (the server enforces it)
+  canAssignOthers: boolean;
+  // Bumped by the page when members join, leave or change role (Socket.IO): refetch while open
+  membersVersion: number;
   onAssigned: (conversationId: string, assignee: Conversation['assignee']) => void;
-  onAssigneeSaved: (assignee: Assignee) => void;
-  onAssigneeDeleted: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [editing, setEditing] = useState<{
-    id: string | null;
-    name: string;
-    color: string;
-  } | null>(null);
-  const [colorValid, setColorValid] = useState(true);
+  // Workspace members (People)
+  const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
+  // Messages shown after an action
+  const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const ref = useRef<HTMLDivElement>(null);
 
   function close() {
     setOpen(false);
-    setEditing(null);
     setError('');
+    setNotice('');
     setQuery('');
   }
 
@@ -96,6 +99,19 @@ export function AssignDropdown({
   // Switching chats closes the menu
   useEffect(close, [conversation?.id]);
 
+  // Members (with roles) for People, the badges and the "Linked user" picker: fetched every time the menu opens,
+  // and again while it's open if someone joins, leaves or changes role
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetchWorkspaceMembers()
+      .then((list) => !cancelled && setMembers(list))
+      .catch(() => !cancelled && setMembers((m) => m ?? []));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, membersVersion]);
+
   async function attempt(fn: () => Promise<void>) {
     setBusy(true);
     setError('');
@@ -111,49 +127,52 @@ export function AssignDropdown({
   // Like a label checkbox: tick to assign, untick the ticked one to unassign. The menu stays open.
   function toggle(assigneeId: string) {
     if (!conversation) return;
+    if (conversation.assignee?.id === assigneeId && !confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
     attempt(async () => {
       const c = await assignConversation(conversation.id, conversation.assignee?.id === assigneeId ? null : assigneeId);
       onAssigned(c.id, c.assignee);
     });
   }
 
-  const nextColor = LABEL_COLORS[assignees.length % LABEL_COLORS.length];
+  // "Unassigned" row: release the chat from whoever has it (asks first, like unticking them)
+  function unassign() {
+    if (!conversation?.assignee) return;
+    if (!confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
+    attempt(async () => {
+      const c = await assignConversation(conversation.id, null);
+      onAssigned(c.id, c.assignee);
+    });
+  }
+
+  // A person: the server assigns their linked assignee (creating it the first time)
+  function toggleMember(userId: string) {
+    if (!conversation) return;
+    if (conversation.assignee?.userId === userId && !confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
+    attempt(async () => {
+      const c =
+        conversation.assignee?.userId === userId
+          ? await assignConversation(conversation.id, null)
+          : await assignConversation(conversation.id, null, userId);
+      onAssigned(c.id, c.assignee);
+    });
+  }
+
   const term = query.trim();
-  const visible = assignees.filter((a) => a.name.toLowerCase().includes(term.toLowerCase()));
-  const exactMatch = assignees.some((a) => a.name.toLowerCase() === term.toLowerCase());
+  const matches = (name: string) => name.toLowerCase().includes(term.toLowerCase());
+  // People who can be assigned chats: this workspace's owner, Supervisors and Agents (live from the API; removed
+  // members aren't in it). Their linked assignee carries the count; other assignees are listed below them.
+  const eligible = assignableMembers(members ?? []);
+  const people = eligible.filter((m) => matches(m.name) || matches(m.email));
+  const linkedTo = (userId: string) => assignees.find((a) => a.userId === userId);
+  const visible = assignees.filter((a) => !(a.userId && eligible.some((m) => m.id === a.userId)) && matches(a.name));
 
-  // New assignees open the form first so the name and colour can be previewed before saving
-  function startNew(name: string) {
-    setError('');
-    setEditing({ id: null, name, color: nextColor });
-  }
 
-  function save() {
-    if (!editing || !colorValid) return;
-    attempt(async () => {
-      const input = { name: editing.name.trim(), color: editing.color };
-      const saved = editing.id ? await updateAssignee(editing.id, input) : await createAssignee(input);
-      onAssigneeSaved(saved);
-      // One created from a chat is assigned to it straight away
-      if (!editing.id && conversation) {
-        const c = await assignConversation(conversation.id, saved.id);
-        onAssigned(c.id, c.assignee);
-      }
-      setEditing(null);
-      setQuery('');
-    });
-  }
-
-  function remove(a: { id: string; name: string }) {
-    if (!confirm(`Delete "${a.name}"? Chats assigned to them will become unassigned.`)) return;
-    attempt(async () => {
-      await deleteAssignee(a.id);
-      onAssigneeDeleted(a.id);
-      setEditing(null);
-    });
-  }
 
   const current = conversation?.assignee;
+  const memberRole = (userId: string | null) => (userId ? members?.find((m) => m.id === userId)?.role : undefined);
+  const allowed = (a: Assignee) => canAssignOthers || (!!meId && a.userId === meId && (!current || current.id === a.id));
+  const allowedPerson = (userId: string) => canAssignOthers || (userId === meId && (!current || current.userId === meId));
+  const sectionTitle = (text: string) => <li className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-faint">{text}</li>;
 
   return (
     <div ref={ref} className="relative">
@@ -180,19 +199,11 @@ export function AssignDropdown({
         <div
           role="dialog"
           aria-label="Assign chat"
-          className="absolute right-0 top-11 flex max-h-[70vh] w-64 max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface text-xs shadow-xl z-50"
+          className={`absolute right-0 top-11 flex max-h-[70vh] w-64 max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface text-xs shadow-xl z-50`}
         >
           <div className="flex items-center justify-between border-b border-line-soft px-3 py-2">
             <span className="font-semibold text-ink">
-              {editing
-                ? editing.id
-                  ? 'Edit assignee'
-                  : 'New assignee'
-                : conversation
-                  ? 'Assign chat'
-                  : canManage
-                    ? 'Manage assignees'
-                    : 'Assignees'}
+              {conversation ? 'Assign chat' : 'Assignees'}
             </span>
             <button onClick={close} title="Close" className="text-faint hover:text-body-soft">
               ✕
@@ -200,69 +211,9 @@ export function AssignDropdown({
           </div>
 
           {error && <div className="mx-3 mt-2 rounded-lg bg-danger-soft px-2.5 py-1.5 text-danger">{error}</div>}
+          {notice && !error && <div className="mx-3 mt-2 rounded-lg bg-success-soft px-2.5 py-1.5 text-success">{notice}</div>}
 
-          {editing ? (
-            <form
-              className="space-y-3 p-3"
-              onSubmit={(e) => {
-                e.preventDefault();
-                save();
-              }}
-            >
-              <input
-                autoFocus
-                value={editing.name}
-                maxLength={50}
-                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-                placeholder="Name"
-                className={inputClass}
-              />
-              <ColorField
-                color={editing.color}
-                onChange={(color) => setEditing({ ...editing, color })}
-                onValidChange={setColorValid}
-                preview={(color) => {
-                  const name = editing.name.trim() || 'Name';
-                  return (
-                    <span className="flex items-center gap-1.5 text-xs font-medium text-body">
-                      <AssigneeAvatar assignee={{ id: 'preview', name, color }} />
-                      <span className="truncate">{name}</span>
-                    </span>
-                  );
-                }}
-              />
-              <div className="flex items-center justify-between gap-2">
-                {editing.id ? (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => remove({ id: editing.id!, name: editing.name })}
-                    className="rounded-lg px-2 py-1.5 font-medium text-danger hover:bg-danger-soft disabled:opacity-50"
-                  >
-                    Delete
-                  </button>
-                ) : (
-                  <span />
-                )}
-                <div className="flex gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setEditing(null)}
-                    className="rounded-lg px-2.5 py-1.5 font-medium text-body-soft hover:bg-surface-strong"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={busy || !editing.name.trim() || !colorValid}
-                    className="rounded-lg bg-primary px-3 py-1.5 font-semibold text-on-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Save
-                  </button>
-                </div>
-              </div>
-            </form>
-          ) : (
+          {(
             <>
               <div className="p-2">
                 <input
@@ -270,84 +221,87 @@ export function AssignDropdown({
                   value={query}
                   maxLength={50}
                   onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && term && !exactMatch && canManage) startNew(term);
-                  }}
-                  placeholder={canManage ? 'Search or add a name' : 'Search names'}
+                  placeholder="Search names"
                   className={inputClass}
                 />
               </div>
               <ul className="min-h-0 flex-1 overflow-y-auto pb-1">
+                {/* Unassigned: the chat belongs to nobody (choosing it releases the current assignee) */}
+                {conversation && !term && (
+                  <li className="px-1">
+                    <button
+                      disabled={busy || (!!current && !(canAssignOthers || current.userId === meId))}
+                      title={current && !(canAssignOthers || current.userId === meId) ? 'Agents can only release their own chats' : undefined}
+                      onClick={unassign}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
+                        current && !(canAssignOthers || current.userId === meId) ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Checkbox on={!current} />
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-faint">
+                        <PersonIcon className="h-4 w-4" />
+                      </span>
+                      <span className="text-body">Unassigned</span>
+                    </button>
+                  </li>
+                )}
+                {people.length > 0 && sectionTitle('People')}
+                {people.map((m) => {
+                  const linked = linkedTo(m.id);
+                  const ok = allowedPerson(m.id);
+                  return (
+                    <li key={`member:${m.id}`} className="flex items-center gap-1 px-1">
+                      <button
+                        disabled={busy || !conversation || !ok}
+                        title={conversation && !ok ? 'Agents can only take unassigned chats or release their own' : undefined}
+                        onClick={() => toggleMember(m.id)}
+                        className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
+                          conversation && !ok ? 'opacity-50' : ''
+                        }`}
+                      >
+                        {conversation && <Checkbox on={!!current?.userId && current.userId === m.id} color={roleStyle(m.role).color} />}
+                        <AssigneeAvatar assignee={{ name: m.name, color: roleStyle(m.role).color }} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5">
+                            <span className="truncate text-body">{m.name}</span>
+                            <RoleBadge role={m.role} />
+                            {m.id === meId && <span className="text-[10px] text-faint">You</span>}
+                          </span>
+                          <span className="block truncate text-[10px] text-muted">{m.email}</span>
+                        </span>
+                        <span className="text-[10px] text-faint">{linked?.conversationCount ?? 0}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+                {people.length > 0 && visible.length > 0 && sectionTitle('Other assignees')}
                 {visible.map((a) => (
                   <li key={a.id} className="flex items-center gap-1 px-1">
                     <button
-                      disabled={busy || !conversation}
+                      disabled={busy || !conversation || !allowed(a)}
+                      title={conversation && !allowed(a) ? 'Only supervisors and admins can assign chats to others' : undefined}
                       onClick={() => toggle(a.id)}
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
+                      className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
+                        conversation && !allowed(a) ? 'opacity-50' : ''
+                      }`}
                     >
                       {conversation && <Checkbox on={current?.id === a.id} color={a.color} />}
                       <AssigneeAvatar assignee={a} />
                       <span className="truncate text-body">{a.name}</span>
+                      <RoleBadge role={memberRole(a.userId)} />
                       <span className="ml-auto text-[10px] text-faint">{a.conversationCount}</span>
                     </button>
-                    {canManage && (
-                      <button
-                        title={`Edit ${a.name}`}
-                        onClick={() => {
-                          setError('');
-                          setEditing({
-                            id: a.id,
-                            name: a.name,
-                            color: a.color,
-                          });
-                        }}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint hover:bg-surface-strong hover:text-body"
-                      >
-                        <svg
-                          className="h-3 w-3"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 20h9" />
-                          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                        </svg>
-                      </button>
-                    )}
                   </li>
                 ))}
-                {assignees.length === 0 && !term && (
+                {assignees.length === 0 && eligible.length === 0 && !term && (
                   <li className="px-3 py-2 text-muted">
-                    {canManage ? 'No assignees yet. Type a name to add one.' : 'No assignees yet.'}
+                    No assignees yet.
                   </li>
                 )}
-                {visible.length === 0 && term && !canManage && (
+                {visible.length === 0 && people.length === 0 && term && (
                   <li className="px-3 py-2 text-muted">No names match.</li>
                 )}
               </ul>
-              {canManage && (
-                <div className="border-t border-line-soft p-1">
-                  {term && !exactMatch ? (
-                    <button
-                      disabled={busy}
-                      onClick={() => startNew(term)}
-                      className="w-full truncate rounded-lg px-2 py-1.5 text-left font-medium text-primary hover:bg-primary-subtle disabled:opacity-50"
-                    >
-                      + Add &ldquo;{term}&rdquo;
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => startNew(term)}
-                      className="w-full rounded-lg px-2 py-1.5 text-left font-medium text-primary hover:bg-primary-subtle"
-                    >
-                      + New assignee
-                    </button>
-                  )}
-                </div>
-              )}
             </>
           )}
         </div>

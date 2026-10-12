@@ -15,6 +15,7 @@ export function initRealtime(server: HttpServer) {
       socket.data.userId = userId;
       socket.data.workspaceId = workspaceId;
       socket.join(workspaceId);
+      socket.join(userRoom(workspaceId, userId));
       next();
     } catch {
       next(new Error('Unauthorized'));
@@ -31,4 +32,16 @@ export async function disconnectUser(userId: string) {
 
 export function emitToWorkspace(workspaceId: string, event: string, data: unknown) {
   io?.to(workspaceId).emit(event, data);
+}
+
+// One user's connections in one workspace (all their tabs), e.g. "a chat was assigned to you"
+const userRoom = (workspaceId: string, userId: string) => `${workspaceId}:user:${userId}`;
+
+export function emitToUser(workspaceId: string, userId: string, event: string, data: unknown) {
+  io?.to(userRoom(workspaceId, userId)).emit(event, data);
+}
+
+// Removed from a workspace: close their live connections to it (their token for it no longer works either)
+export function disconnectMember(workspaceId: string, userId: string) {
+  io?.in(userRoom(workspaceId, userId)).disconnectSockets(true);
 }

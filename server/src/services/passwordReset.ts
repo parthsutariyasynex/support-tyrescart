@@ -71,6 +71,34 @@ export async function requestPasswordReset(rawInput: unknown, ip: string) {
   return true;
 }
 
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// An admin added someone who had no account: email them a link to choose their password (same single-use
+// link as "Forgot password", valid for 7 days). Returns false if the email couldn't be sent.
+export async function sendInvite(user: { id: string; name: string; email: string }, workspaceName: string, inviter: string) {
+  const token = randomBytes(32).toString('base64url');
+  await prisma.$transaction([
+    prisma.passwordResetToken.deleteMany({ where: { userId: user.id } }),
+    prisma.passwordResetToken.create({
+      data: { userId: user.id, tokenHash: hash(token), expiresAt: new Date(Date.now() + INVITE_TTL_MS) },
+    }),
+  ]);
+  const appUrl = (process.env.APP_URL || env.webOrigin).replace(/\/$/, '');
+  const link = `${appUrl}/reset-password?token=${token}`;
+  try {
+    await sendMail({
+      to: user.email,
+      subject: `You've been invited to ${workspaceName} on support-tyrescart`,
+      text: `Hi ${user.name},\n\n${inviter} added you to ${workspaceName}. Choose your password to sign in (link valid for 7 days):\n${link}`,
+      html: `<p>Hi ${escapeHtml(user.name)},</p><p>${escapeHtml(inviter)} added you to ${escapeHtml(workspaceName)}. Choose your password to sign in (link valid for 7 days):</p><p><a href="${link}">Choose password</a></p>`,
+    });
+    return true;
+  } catch (err) {
+    console.error('[mail] invite email failed', err);
+    return false;
+  }
+}
+
 // Sets the new password, uses up the link, and signs out every existing session
 export async function resetPassword(rawInput: unknown) {
   const { token, password } = parse(resetSchema, rawInput);

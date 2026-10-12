@@ -40,6 +40,10 @@ function details(a: Activity): Record<string, string | null> {
   }
 }
 
+// "you" when the assignee is linked to the viewer
+const assignedTo = (d: Record<string, string | null>, meId: string | null) =>
+  d.assigneeUserId && d.assigneeUserId === meId ? 'you' : (d.assignee ?? 'someone');
+
 // One-line description. `where: 'chat'` for the chat timeline ("closed this chat"), 'bell' names the customer.
 export function activityText(a: Activity, meId: string | null, where: 'chat' | 'bell') {
   const who = a.actorId && a.actorId === meId ? 'You' : (a.actorName ?? 'Someone');
@@ -51,8 +55,11 @@ export function activityText(a: Activity, meId: string | null, where: 'chat' | '
     case 'conversation_reopened':
       return `${who} reopened ${chat}`;
     case 'assigned':
-      return `${who} assigned ${chat} to ${d.assignee ?? 'someone'}`;
+      return `${who} assigned ${chat} to ${assignedTo(d, meId)}`;
+    case 'reassigned':
+      return `${who} reassigned ${chat} from ${d.previous ?? 'someone'} to ${assignedTo(d, meId)}`;
     case 'unassigned':
+      if (d.reason === 'assignee_deleted') return `${who} deleted ${d.assignee ?? 'the assignee'}, so ${chat} is now unassigned`;
       return d.assignee ? `${who} unassigned ${d.assignee} from ${chat}` : `${who} unassigned ${chat}`;
     case 'label_added':
       return `${who} added label "${d.label}" to ${chat}`;

@@ -13,5 +13,5 @@ export const env = {
   metaAppSecret: process.env.META_APP_SECRET ?? '',
   metaVerifyToken: required('META_VERIFY_TOKEN'),
   graphVersion: process.env.GRAPH_API_VERSION ?? 'v21.0',
-  isProd: process.env.NODE_ENV === 'development',
+  isProd: process.env.NODE_ENV === 'production',
 };

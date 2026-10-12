@@ -1,9 +1,10 @@
+import { isValidPhoneNumber } from 'libphonenumber-js/max';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { saveIncoming } from '../messages.js';
 import { prisma } from '../prisma.js';
 import { emitToWorkspace } from '../realtime.js';
-import { sendTemplate, sendText } from '../whatsapp.js';
+import { type ApprovedTemplate, listApprovedTemplates, sendTemplate, sendText } from '../whatsapp.js';
 import { AppError, notFound } from './errors.js';
 import { withSender } from './senders.js';
 import { parse } from './validate.js';
@@ -38,9 +39,9 @@ const conversationInclude = {
 };
 
 // Newest first. Omit `page` to get every conversation (REST behaviour).
-// `labelId` keeps only conversations that have that label; `assignee` is an assignee id or 'unassigned';
-// `status` is 'open' or 'closed' (omit for both).
-export async function listConversations(workspaceId: string, page?: unknown) {
+// `labelId` keeps only conversations that have that label; `assignee` is an assignee id, 'unassigned', or 'me'
+// (assigned to the assignee linked to `viewerId`); `status` is 'open' or 'closed' (omit for both).
+export async function listConversations(workspaceId: string, page?: unknown, viewerId?: string) {
   const query = {
     where: { workspaceId },
     orderBy: [{ lastMessageAt: 'desc' as const }, { id: 'desc' as const }],
@@ -50,12 +51,17 @@ export async function listConversations(workspaceId: string, page?: unknown) {
 
   const { first, after, labelId, assignee, status } = parse(conversationPageSchema, page);
   if (after) await requireConversation(workspaceId, after);
+  if (assignee === 'me' && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
   const rows = await prisma.conversation.findMany({
     ...query,
     where: {
       workspaceId,
       ...(labelId ? { labels: { some: { labelId } } } : {}),
-      ...(assignee ? { assignedToId: assignee === 'unassigned' ? null : assignee } : {}),
+      ...(assignee === 'me'
+        ? { assignedTo: { userId: viewerId } }
+        : assignee
+          ? { assignedToId: assignee === 'unassigned' ? null : assignee }
+          : {}),
       ...(status ? { status } : {}),
     },
     take: first + 1,
@@ -105,15 +111,62 @@ export async function openConversation(workspaceId: string, id: string) {
 
 export const sendSchema = z.union([
   z.object({ type: z.literal('text'), body: z.string().min(1).max(4096) }),
-  z.object({ type: z.literal('template'), name: z.string().min(1), language: z.string().default('en') }),
+  // language: omit to use the one the template is approved in
+  z.object({ type: z.literal('template'), name: z.string().min(1), language: z.string().min(1).optional() }),
 ]);
+
+async function requireAccount(workspaceId: string) {
+  const account = await prisma.whatsAppAccount.findUnique({ where: { workspaceId } });
+  if (!account) throw new AppError('Connect a WhatsApp number in Settings first', 400, 'WHATSAPP_NOT_CONNECTED');
+  return account;
+}
+
+// Approved templates of the workspace's number, straight from Meta (nothing cached or stored)
+export async function listMessageTemplates(workspaceId: string) {
+  const account = await requireAccount(workspaceId);
+  try {
+    return await listApprovedTemplates(account);
+  } catch (err) {
+    throw new AppError(`Couldn't load templates from WhatsApp: ${(err as Error).message}`, 502, 'WHATSAPP_API_ERROR');
+  }
+}
+
+// Each language of a template is approved separately; sending one that isn't approved fails at Meta.
+// If Meta can't be asked right now, send as requested (or 'en') and let Meta's reply decide.
+async function templateLanguage(account: { wabaId: string; accessToken: string }, name: string, requested?: string) {
+  let approved;
+  try {
+    approved = await listApprovedTemplates(account);
+  } catch {
+    return requested ?? 'en';
+  }
+  return pickTemplateLanguage(approved, name, requested);
+}
+
+export function pickTemplateLanguage(templates: ApprovedTemplate[], name: string, requested?: string) {
+  const approved = templates.filter((t) => t.name === name);
+  const languages = approved.map((t) => t.language).join(', ');
+  if (!approved.length)
+    throw new AppError(`"${name}" is not an approved template on this WhatsApp number`, 400, 'TEMPLATE_NOT_APPROVED');
+  const chosen = requested ? approved.find((t) => t.language === requested) : approved.length === 1 ? approved[0] : null;
+  if (!chosen)
+    throw new AppError(
+      requested
+        ? `"${name}" is not approved in ${requested}. Approved: ${languages}`
+        : `"${name}" is approved in several languages (${languages}). Choose one.`,
+      400,
+      'TEMPLATE_LANGUAGE',
+    );
+  if (chosen.needsParameters)
+    throw new AppError(`"${name}" needs variables, which can't be filled in here yet`, 400, 'TEMPLATE_NEEDS_PARAMETERS');
+  return chosen.language;
+}
 
 // `sentById` is the agent sending it; it decides who may edit or delete the message later
 export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
   const input = parse(sendSchema, rawInput);
   const conversation = await requireConversation(workspaceId, conversationId);
-  const account = await prisma.whatsAppAccount.findUnique({ where: { workspaceId } });
-  if (!account) throw new AppError('Connect a WhatsApp number in Settings first', 400, 'WHATSAPP_NOT_CONNECTED');
+  const account = await requireAccount(workspaceId);
 
   if (conversation.status === 'closed')
     throw new AppError('This chat is closed. Reopen it to reply.', 409, 'CONVERSATION_CLOSED');
@@ -121,6 +174,15 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   const windowOpen = conversation.lastInboundAt && Date.now() - conversation.lastInboundAt.getTime() < DAY;
   if (input.type === 'text' && !windowOpen)
     throw new AppError('24-hour window closed. Send an approved template instead.', 400, 'WINDOW_CLOSED');
+
+  // Chats started before numbers were validated may lack the country code; WhatsApp would send to the wrong number
+  if (!isWhatsAppNumber(conversation.contact.waId))
+    throw new AppError(
+      `+${conversation.contact.waId} is not a valid WhatsApp number. Start a new chat with the full number including the country code.`,
+      400,
+      'INVALID_PHONE',
+    );
+  const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;
   const message = await prisma.message.create({
@@ -132,7 +194,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
     const wamid =
       input.type === 'text'
         ? await sendText(account, conversation.contact.waId, input.body)
-        : await sendTemplate(account, conversation.contact.waId, input.name, input.language);
+        : await sendTemplate(account, conversation.contact.waId, input.name, language);
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({
@@ -145,11 +207,20 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   return saved;
 }
 
+// International number without '+' (WhatsApp's wa_id), checked against real numbering plans
+export const isWhatsAppNumber = (waId: string) => isValidPhoneNumber(`+${waId}`);
+
 const startSchema = z.object({
   waId: z
     .string()
     .transform((v) => v.replace(/\D/g, ''))
-    .pipe(z.string().min(8, 'Enter the number with country code').max(15, 'Number is too long')),
+    .pipe(
+      z
+        .string()
+        .min(8, 'Enter the number with country code')
+        .max(15, 'Number is too long')
+        .refine(isWhatsAppNumber, 'Not a valid number. Include the country code, e.g. 971501234567 or 919876543210'),
+    ),
   name: z.string().trim().max(191).optional().nullable(),
 });
 

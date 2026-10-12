@@ -4,14 +4,14 @@ import { authed, requireAuth, type Context } from './shared.js';
 export const typeDefs = /* GraphQL */ `
   type MemberPermissions {
     userId: ID!
-    "owner | admin | agent"
+    "owner | admin | supervisor | agent"
     role: String!
     "Owners and admins always can; agents only when granted"
     canManageLabels: Boolean!
   }
 
   extend type Me {
-    "owner | admin | agent"
+    "owner | admin | supervisor | agent"
     role: String!
     "Can create, rename, recolour and delete labels and assignees"
     canManageLabels: Boolean!

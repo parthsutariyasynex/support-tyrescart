@@ -19,6 +19,7 @@ model User {
   // Set when the password is reset; login tokens issued before it stop working
   passwordChangedAt DateTime?
   resetTokens       PasswordResetToken[]
+  assignees         Assignee[]
 }
 
 model Workspace {
@@ -32,6 +33,7 @@ model Workspace {
   labels        Label[]
   assignees     Assignee[]
   activity      ActivityEvent[]
+  quickReplies  QuickReply[]
 }
 
 model Member {
@@ -168,10 +170,16 @@ model Assignee {
   name          String         @db.VarChar(50)
   color         String         @db.VarChar(7) // #rrggbb
   createdAt     DateTime       @default(now())
+  // Optional: the workspace member this assignee stands for ("Assigned to me", assignment notifications).
+  // Unlinked assignees keep working as plain names.
+  userId        String?
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
   conversations Conversation[]
 
   @@unique([workspaceId, name])
+  @@unique([workspaceId, userId])
+  @@index([userId])
 }
 
 // "Forgot password" links. Only a SHA-256 hash of the secret is stored; each link expires and works once.
@@ -195,7 +203,7 @@ model ActivityEvent {
   conversationId String?
   // User who did it; null for the customer / system
   actorId        String?
-  // conversation_closed | conversation_reopened | assigned | unassigned | label_added | label_removed |
+  // conversation_closed | conversation_reopened | assigned | reassigned | unassigned | label_added | label_removed |
   // message_edited | message_deleted | message_restored | message_received
   type           String
   data           Json?
@@ -217,4 +225,27 @@ model ConversationClear {
 
   @@id([userId, conversationId])
   @@index([conversationId])
+}
+
+// WhatsApp Business-style quick replies: typing "/shortcut" in the message box offers these texts.
+// Same columns as the TyresCart site's klever_tyres_chat table (imported with scripts/importQuickReplies.ts),
+// plus workspaceId so each workspace has its own set.
+model QuickReply {
+  id          Int       @id @default(autoincrement()) @db.UnsignedInt
+  workspaceId String
+  shortcut    String    @db.VarChar(255)
+  description String?   @db.Text
+  category    String?   @db.VarChar(50)
+  // Admin user ids from the TyresCart site, kept as imported
+  createdBy   BigInt?   @map("created_by") @db.UnsignedBigInt
+  updatedBy   BigInt?   @map("updated_by") @db.UnsignedBigInt
+  // 1 = enabled, 0 = disabled
+  status      Int       @default(1) @db.SmallInt
+  sortOrder   Int       @default(0) @map("sort_order")
+  createdAt   DateTime? @map("created_at")
+  updatedAt   DateTime? @updatedAt @map("updated_at")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status, sortOrder])
+  @@map("klever_tyres_chat")
 }

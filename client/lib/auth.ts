@@ -19,15 +19,17 @@ export const REGISTER = `
 
 export const ME = `
   query Me {
-    me { ${ME_FIELDS} }
+    me { ${ME_FIELDS} role }
   }
 `;
 
-export async function login(input: { email: string; password: string }) {
+// workspaceId: open this workspace if the account belongs to it (the last one used); otherwise its first
+export async function login(input: { email: string; password: string; workspaceId?: string | null }) {
   return (await gql<{ login: { token: string } }>(LOGIN, { input })).login;
 }
 
-export async function register(input: { name: string; email: string; password: string; workspaceName: string }) {
+// workspaceName: create your own workspace (you own it). joinToken: join a team from its signup link as an Agent.
+export async function register(input: { name: string; email: string; password: string; workspaceName?: string; joinToken?: string }) {
   return (await gql<{ register: { token: string } }>(REGISTER, { input })).register;
 }
 
@@ -35,10 +37,10 @@ export async function fetchMe<T>() {
   return (await gql<{ me: T }>(ME)).me;
 }
 
-export type WorkspaceSummary = { id: string; name: string; role: string };
+export type WorkspaceSummary = { id: string; name: string; role: string; createdAt?: string };
 
 export async function fetchWorkspaces() {
-  return (await gql<{ workspaces: WorkspaceSummary[] }>(`query Workspaces { workspaces { id name role } }`)).workspaces;
+  return (await gql<{ workspaces: WorkspaceSummary[] }>(`query Workspaces { workspaces { id name role createdAt } }`)).workspaces;
 }
 
 // Both return a token for the target workspace (you become owner of a new one)

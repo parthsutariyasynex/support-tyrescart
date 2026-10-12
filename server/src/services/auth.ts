@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { signToken } from '../auth.js';
 import { prisma } from '../prisma.js';
 import { AppError } from './errors.js';
+import { readJoinLink } from './joinLinks.js';
+import { DEFAULT_ROLE } from './roles.js';
 import { parse } from './validate.js';
 
 const email = z.string().trim().toLowerCase().email('Enter a valid email');
@@ -12,12 +14,17 @@ export const registerSchema = z.object({
   name: z.string().trim().min(1, 'Name is required'),
   email,
   password: z.string().min(8, 'Password must be at least 8 characters').max(72, 'Password is too long'),
-  workspaceName: z.string().trim().min(1, 'Workspace name is required'),
+  // Without a team signup link: the new workspace this person will own (the original sign-up flow)
+  workspaceName: z.string().trim().min(1, 'Workspace name is required').optional(),
+  // With a team signup link: join that workspace as an Agent. There is deliberately no role field.
+  joinToken: z.string().min(1).optional(),
 });
 
 export const loginSchema = z.object({
   email,
   password: z.string().min(1, 'Password is required'),
+  // The workspace to open (the browser remembers the last one used); ignored unless the user is a member
+  workspaceId: z.string().min(1).max(64).optional().nullable(),
 });
 
 // Simple in-memory limiter: 10 failed logins per IP per 15 minutes.
@@ -42,14 +49,20 @@ function recordFailure(ip: string) {
 const DUMMY_HASH = bcrypt.hashSync('dummy-password', 10);
 
 export async function register(input: unknown) {
-  const { name, email, password, workspaceName } = parse(registerSchema, input);
+  const { name, email, password, workspaceName, joinToken } = parse(registerSchema, input);
+  const joining = joinToken ? await readJoinLink(joinToken) : null;
+  if (!joining && !workspaceName) throw new AppError('Workspace name is required', 400, 'BAD_USER_INPUT');
   try {
     const user = await prisma.user.create({
       data: {
         name,
         email,
         passwordHash: await bcrypt.hash(password, 10),
-        members: { create: { role: 'owner', workspace: { create: { name: workspaceName } } } },
+        members: {
+          create: joining
+            ? { role: DEFAULT_ROLE, workspaceId: joining.id }
+            : { role: 'owner', workspace: { create: { name: workspaceName! } } },
+        },
       },
       include: { members: true },
     });
@@ -63,15 +76,16 @@ export async function register(input: unknown) {
 
 export async function login(input: unknown, ip: string) {
   checkRateLimit(ip);
-  const { email, password } = parse(loginSchema, input);
-  const user = await prisma.user.findUnique({ where: { email }, include: { members: true } });
+  const { email, password, workspaceId } = parse(loginSchema, input);
+  const user = await prisma.user.findUnique({ where: { email }, include: { members: { orderBy: { id: 'asc' } } } });
   const ok = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
   if (!user || !ok) {
     recordFailure(ip);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
   failures.delete(ip);
-  const member = user.members[0];
+  // The requested workspace if they belong to it, otherwise the first one they joined
+  const member = user.members.find((m) => m.workspaceId === workspaceId) ?? user.members[0];
   if (!member) throw new AppError('This account has no workspace', 403, 'NO_WORKSPACE');
   return { token: signToken({ userId: user.id, workspaceId: member.workspaceId }), userId: user.id };
 }

@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { setToken } from '@/lib/api';
 import { login } from '@/lib/auth';
+import { joinWorkspace } from '@/lib/members';
+import { lastWorkspace } from '@/lib/workspaces';
 import { AuthShell, FormMessage, buttonClass, inputClass } from '../AuthShell';
 
 export default function LoginPage() {
@@ -14,7 +16,13 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   // Arrived here after setting a new password
   const [passwordReset, setPasswordReset] = useState(false);
-  useEffect(() => setPasswordReset(new URLSearchParams(window.location.search).get('reset') === '1'), []);
+  // Arrived from a team signup link with an existing account: join that workspace after signing in
+  const [joinToken, setJoinToken] = useState<string | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setPasswordReset(params.get('reset') === '1');
+    setJoinToken(params.get('join'));
+  }, []);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -22,8 +30,16 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
     try {
-      const { token } = await login({ email: String(form.get('email')), password: String(form.get('password')) });
+      const email = String(form.get('email'));
+      const { token } = await login({ email, password: String(form.get('password')), workspaceId: lastWorkspace(email) });
       setToken(token);
+      if (joinToken) {
+        try {
+          setToken((await joinWorkspace(joinToken)).token);
+        } catch (err) {
+          alert(`Signed in, but couldn't join the team: ${(err as Error).message}`);
+        }
+      }
       router.push('/inbox');
     } catch (err) {
       setError((err as Error).message);
@@ -36,8 +52,8 @@ export default function LoginPage() {
       title="Welcome back"
       subtitle="Sign in to your support-tyrescart workspace."
       footerText="Don't have an account?"
-      footerLinkText="Create workspace →"
-      footerLinkHref="/register"
+      footerLinkText={joinToken ? 'Create your account →' : 'Create workspace →'}
+      footerLinkHref={joinToken ? `/register?join=${encodeURIComponent(joinToken)}` : '/register'}
     >
       <form onSubmit={onSubmit} className="space-y-4">
         {/* Email Field */}

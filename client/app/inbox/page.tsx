@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
 import { API_URL, getToken } from '@/lib/api';
@@ -12,13 +13,13 @@ import {
   editMessage,
   fetchConversation,
   fetchConversations,
+  isAssignedTo,
   fetchMessages,
   markConversationRead,
   newerMessage,
   clearConversation,
   restoreMessage,
   setConversationStatus,
-  sendTemplateMessage,
   sendTextMessage,
   simulateIncomingMessage,
   startConversation,
@@ -36,6 +37,11 @@ import { type Assignee, fetchAssignees } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
 import { AppShell } from '../AppShell';
 import { AssignDropdown, AssigneeAvatar } from './assign';
+import { QuickReplyMenu, useQuickReplies } from './quickReplies';
+import { type QuickReply, slashQuery } from '@/lib/quickReplies';
+import { enterAction, fitHeight } from '@/lib/composer';
+import { dayKey, dayLabel, formatTime, listTimestamp } from '@/lib/time';
+import { canManageAssignments } from '@/lib/roles';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog } from './chatOptions';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
@@ -71,14 +77,14 @@ type PickerTarget = { conversationId: string | null; anchor: HTMLElement };
 
 
 export default function InboxPage() {
-  return <AppShell>{() => <Inbox />}</AppShell>;
+  return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
 }
 
 type ConversationFilter = { labelId: string | null; assignee: string | null };
 const filterKey = (f: ConversationFilter) => `${f.labelId}|${f.assignee}`;
 type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string };
 
-function Inbox() {
+function Inbox({ meName }: { meName: string }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -91,6 +97,8 @@ function Inbox() {
   const [picker, setPicker] = useState<PickerTarget | null>(null);
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
+  // Bumped when someone joins, leaves or changes role, so the open Assign menu refetches the people list
+  const [membersVersion, setMembersVersion] = useState(0);
   // Who may create/edit/delete labels and assignees; null until loaded (treated as "can't")
   const [permissions, setPermissions] = useState<Permissions | null>(null);
   const permissionsRef = useRef(permissions);
@@ -105,10 +113,13 @@ function Inbox() {
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
-  // filterType is 'all' | 'unread' | 'label:<id>' | 'assigned:unassigned' | 'assigned:<assigneeId>'.
+  // filterType is 'all' | 'unread' | 'label:<id>' | 'assigned:me' | 'assigned:unassigned' | 'assigned:<assigneeId>'.
   // Label and assignee filters are applied by the API.
+  // My Chats (/my-chats) is this same inbox limited to chats assigned to you (through the assignee linked to
+  // you; the server resolves "me" from your login). Search, Unread and label filters still apply on top.
+  const mine = usePathname() === '/my-chats';
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   const filterRef = useRef<ConversationFilter>({ labelId: labelFilter, assignee: assigneeFilter });
   filterRef.current = { labelId: labelFilter, assignee: assigneeFilter };
   // Keeps the open chat visible when a filter or edit drops it from the list
@@ -207,16 +218,29 @@ function Inbox() {
     [patchConversations],
   );
 
+  // Counts change often; only the most recently started fetch may update them, so a slow older reply can't win
+  const assigneesSeqRef = useRef(0);
+  const assigneesLoadedRef = useRef(false);
   const loadAssignees = useCallback(() => {
+    const seq = ++assigneesSeqRef.current;
     fetchAssignees()
-      .then(setAssignees)
+      .then((list) => {
+        if (seq !== assigneesSeqRef.current) return;
+        assigneesLoadedRef.current = true;
+        setAssignees(list);
+      })
       .catch(() => {});
   }, []);
 
-  // Shared by the Assign dropdown (own changes) and Socket.IO (changes from other agents)
+  // Shared by the Assign dropdown (own changes) and Socket.IO (changes from other agents).
+  // Your own change arrives twice (the reply and its socket echo); only the first one does anything.
   const onAssigned = useCallback(
     (conversationId: string, assignee: Conversation['assignee']) => {
-      const ref = assignee && { id: assignee.id, name: assignee.name, color: assignee.color };
+      const ref = assignee && { id: assignee.id, name: assignee.name, color: assignee.color, userId: assignee.userId ?? null };
+      const known =
+        conversationsRef.current.find((c) => c.id === conversationId) ??
+        (lastActiveRef.current?.id === conversationId ? lastActiveRef.current : undefined);
+      if (known && (known.assignee?.id ?? null) === (ref?.id ?? null)) return;
       patchConversations((c) => (c.id === conversationId ? { ...c, assignee: ref } : c));
       loadAssignees(); // counts changed
       if (filterRef.current.assignee) loadConversations(); // may have joined the filtered list
@@ -229,11 +253,12 @@ function Inbox() {
       setAssignees((prev) => [...prev.filter((a) => a.id !== assignee.id), assignee].sort(byName));
       patchConversations((c) =>
         c.assignee?.id === assignee.id
-          ? { ...c, assignee: { id: assignee.id, name: assignee.name, color: assignee.color } }
+          ? { ...c, assignee: { id: assignee.id, name: assignee.name, color: assignee.color, userId: assignee.userId } }
           : c,
       );
+      if (filterRef.current.assignee === 'me') loadConversations(); // linking may have changed what's "mine"
     },
-    [patchConversations],
+    [patchConversations, loadConversations],
   );
 
   // The server unassigns their chats too
@@ -294,6 +319,18 @@ function Inbox() {
     },
     [conversations, onStatusChanged],
   );
+
+  // The assignee linked to you, if any: "Assigned to me" is only offered when there is one
+  const myAssignee = permissions ? (assignees.find((a) => a.userId === permissions.userId) ?? null) : null;
+  // Only for the My Chats hint, never for filtering: an assignee with your name that isn't linked to anyone
+  // (chats assigned to it aren't yours as far as the app knows; names aren't unique)
+  const unlinkedNamesake = myAssignee
+    ? null
+    : (assignees.find((a) => !a.userId && a.name.trim().toLowerCase() === meName.trim().toLowerCase()) ?? null);
+  // Your link was removed while "Assigned to me" was selected: fall back to All
+  useEffect(() => {
+    if (filterType === 'assigned:me' && permissions && assigneesLoadedRef.current && !myAssignee) setFilterType('all');
+  }, [filterType, permissions, myAssignee]);
 
   // Changing the filter starts over from the newest page
   useEffect(() => {
@@ -419,10 +456,38 @@ function Inbox() {
       ({ conversationId, assignee }: { conversationId: string; assignee: Conversation['assignee'] }) =>
         onAssigned(conversationId, assignee),
     );
+    // A teammate assigned a chat to you (sent only to you): sound + desktop pop-up while this tab is in the background.
+    // The bell gets it through activity:new like everything else.
+    socket.on(
+      'assignment:you',
+      ({ conversationId, actorName, contactName }: { conversationId: string; actorName: string | null; contactName: string }) => {
+        if (!document.hidden) return;
+        playPing();
+        showDesktopNotification(`${actorName ?? 'Someone'} assigned a chat to you`, contactName, `assigned-${conversationId}`, () =>
+          openConversation(conversationId),
+        );
+      },
+    );
+    // A teammate moved a chat away from you (reassigned or unassigned; sent only to you): same pop-up rules
+    socket.on(
+      'assignment:removed',
+      ({ conversationId, actorName, contactName, assignee }: { conversationId: string; actorName: string | null; contactName: string; assignee: Conversation['assignee'] }) => {
+        if (!document.hidden) return;
+        playPing();
+        showDesktopNotification(
+          assignee ? `${actorName ?? 'Someone'} reassigned your chat to ${assignee.name}` : `${actorName ?? 'Someone'} unassigned you from a chat`,
+          contactName,
+          `unassigned-${conversationId}`,
+          () => openConversation(conversationId),
+        );
+      },
+    );
     socket.on('assignee:saved', onAssigneeSaved);
     socket.on('assignee:deleted', ({ id }: { id: string }) => onAssigneeDeleted(id));
     // An owner/admin granted or removed this user's label-management permission
+    socket.on('member:removed', () => setMembersVersion((v) => v + 1));
     socket.on('member:permissions', ({ userId, role, canManageLabels }: Permissions) => {
+      setMembersVersion((v) => v + 1);
       if (userId === permissionsRef.current?.userId) setPermissions({ userId, role, canManageLabels });
     });
     return () => {
@@ -489,8 +554,12 @@ function Inbox() {
     const name = (c.contact.name || '').toLowerCase();
     const phone = c.contact.waId.toLowerCase();
     const matchesSearch = name.includes(term) || phone.includes(term);
+    // A chat reassigned away from you leaves My Chats at once (the socket update patches it before any refetch)
+    // (Until your permissions load, the server's "me" filter alone decides, so My Chats doesn't flash empty)
+    if (mine && permissions && !isAssignedTo(c, permissions.userId)) return false;
     if (filterType === 'unread') return matchesSearch && c.unread > 0;
     if (labelFilter) return matchesSearch && c.labels.some((l) => l.id === labelFilter);
+    if (assigneeFilter === 'me') return matchesSearch && isAssignedTo(c, permissions?.userId);
     if (assigneeFilter === 'unassigned') return matchesSearch && !c.assignee;
     if (assigneeFilter) return matchesSearch && c.assignee?.id === assigneeFilter;
     return matchesSearch;
@@ -519,6 +588,9 @@ function Inbox() {
         onFilterChange={setFilterType}
         labels={labels}
         assignees={assignees}
+        myAssignee={myAssignee}
+        unlinkedNamesake={unlinkedNamesake}
+        mine={mine}
         typing={typing}
         onOpenLabels={openPicker}
         pickerConversationId={picker?.conversationId}
@@ -567,10 +639,10 @@ function Inbox() {
           <AssignDropdown
             conversation={active}
             assignees={assignees}
-            canManage={canManage}
+            meId={permissions?.userId ?? null}
+            canAssignOthers={canManageAssignments(permissions?.role)}
+            membersVersion={membersVersion}
             onAssigned={onAssigned}
-            onAssigneeSaved={onAssigneeSaved}
-            onAssigneeDeleted={onAssigneeDeleted}
           />,
           headerSlot,
         )}
@@ -605,6 +677,9 @@ function ConversationList({
   onFilterChange,
   labels,
   assignees,
+  myAssignee,
+  unlinkedNamesake,
+  mine,
   onOpenLabels,
   pickerConversationId,
   loading,
@@ -622,6 +697,9 @@ function ConversationList({
   onFilterChange: (f: string) => void;
   labels: Label[];
   assignees: Assignee[];
+  myAssignee: Assignee | null;
+  unlinkedNamesake: Assignee | null;
+  mine: boolean;
   onOpenLabels: (conversationId: string | null, anchor: HTMLElement) => void;
   pickerConversationId?: string | null;
   loading: boolean;
@@ -699,14 +777,18 @@ function ConversationList({
           >
             <option value="all">All</option>
             <option value="unread">Unread</option>
-            <optgroup label="Assigned">
-              <option value="assigned:unassigned">Unassigned</option>
-              {assignees.map((a) => (
-                <option key={a.id} value={`assigned:${a.id}`}>
-                  {a.name} ({a.conversationCount})
-                </option>
-              ))}
-            </optgroup>
+            {/* My Chats is already "assigned to me" */}
+            {!mine && (
+              <optgroup label="Assigned">
+                {myAssignee && <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>}
+                <option value="assigned:unassigned">Unassigned</option>
+                {assignees.map((a) => (
+                  <option key={a.id} value={`assigned:${a.id}`}>
+                    {a.name} ({a.conversationCount})
+                  </option>
+                ))}
+              </optgroup>
+            )}
             {labels.length > 0 && (
               <optgroup label="Labels">
                 {labels.map((l) => (
@@ -736,6 +818,21 @@ function ConversationList({
       <div className="flex-1 overflow-y-auto">
         {conversations.length === 0 && filterType !== 'all' ? (
           <p className="p-5 text-xs leading-relaxed text-muted">No conversations match this filter.</p>
+        ) : conversations.length === 0 && mine ? (
+          <div className="space-y-2 p-5 text-xs leading-relaxed text-muted">
+            <p>
+              {myAssignee
+                ? 'No chats are assigned to you right now. Chats assigned to you will appear here.'
+                : "No chats are assigned to you yet. When someone assigns you a chat from the Assign menu (under People), it appears here."}
+            </p>
+            {unlinkedNamesake && (
+              <p className="rounded-lg bg-warning-soft px-3 py-2 text-warning">
+                &ldquo;{unlinkedNamesake.name}&rdquo; is a name-only assignee that isn&apos;t linked to your account, so chats
+                assigned to it don&apos;t show here. To link it, an admin opens Assign, clicks ✏️ next to &ldquo;
+                {unlinkedNamesake.name}&rdquo; and sets Linked user to you.
+              </p>
+            )}
+          </div>
         ) : conversations.length === 0 ? (
           <div className="p-5 text-left">
             <p className="text-xs leading-relaxed text-muted font-normal">
@@ -781,7 +878,7 @@ function ConversationList({
                           {contactName}
                         </span>
                         <span className="text-[10px] text-faint">
-                          {new Date(c.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          {listTimestamp(c.lastMessageAt)}
                         </span>
                       </div>
                       {typingNames(typing, c.id).length > 0 ? (
@@ -884,7 +981,7 @@ function ChatPanel({
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   // Message actions: open menu, message being edited in the composer, message awaiting delete confirmation
   const [menu, setMenu] = useState<{ message: Message; anchor: HTMLElement } | null>(null);
   const [editing, setEditing] = useState<Message | null>(null);
@@ -893,6 +990,22 @@ function ChatPanel({
   const [undo, setUndo] = useState<Message | null>(null);
   const [busy, setBusy] = useState(false);
   const typingSender = useTypingSender(onTyping);
+  // "/" at the start of the message box opens the quick replies menu; Esc hides it until you type again
+  const [quickClosed, setQuickClosed] = useState(false);
+  const [quickActive, setQuickActive] = useState(0);
+  const quickSearch = !editing && !quickClosed ? slashQuery(text) : null;
+  const quick = useQuickReplies(quickSearch);
+  useEffect(() => setQuickActive(0), [quickSearch]);
+  // The message box grows with multi-line text (up to ~8 lines, then scrolls)
+  useEffect(() => {
+    if (inputRef.current) fitHeight(inputRef.current, 160);
+  }, [text]);
+  function insertQuickReply(reply: QuickReply) {
+    const next = reply.description ?? '';
+    setText(next);
+    typingSender.onInput(next);
+    inputRef.current?.focus();
+  }
   const closeMenu = useCallback(() => setMenu(null), []);
   const clearUndo = useCallback(() => setUndo(null), []);
 
@@ -1035,14 +1148,10 @@ function ChatPanel({
     bottomRef.current?.scrollIntoView();
   }, [lastId]);
 
-  async function send(input: { type: 'text'; body: string } | { type: 'template'; name: string; language?: string }) {
+  async function send(body: string) {
     setError('');
     try {
-      onSent(
-        input.type === 'text'
-          ? await sendTextMessage(conversation.id, input.body)
-          : await sendTemplateMessage(conversation.id, input.name, input.language),
-      );
+      onSent(await sendTextMessage(conversation.id, body));
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1142,26 +1251,39 @@ function ChatPanel({
             </button>
           </div>
         )}
-        {stream.map((item) => {
+        {stream.map((item, i) => {
+          // WhatsApp-style day separator (Today / Yesterday / date, in Dubai time) where the day changes
+          const day = dayKey(item.at);
+          const separator = (i === 0 || dayKey(stream[i - 1].at) !== day) && (
+            <div className="flex justify-center py-1">
+              <span className="rounded-lg bg-surface/90 px-3 py-1 text-[11px] font-medium text-body-soft shadow-2xs">
+                {dayLabel(item.at)}
+              </span>
+            </div>
+          );
           if (item.kind === 'activity')
             return (
-              <div key={item.id} className="flex justify-center">
-                <span className="rounded-full bg-surface/90 px-3 py-1 text-center text-[11px] text-muted shadow-2xs">
-                  {activityText(item.a, meId, 'chat')} ·{' '}
-                  {new Date(item.a.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </div>
+              <Fragment key={item.id}>
+                {separator}
+                <div className="flex justify-center">
+                  <span className="rounded-full bg-surface/90 px-3 py-1 text-center text-[11px] text-muted shadow-2xs">
+                    {activityText(item.a, meId, 'chat')} · {formatTime(item.a.createdAt)}
+                  </span>
+                </div>
+              </Fragment>
             );
           const m = item.m;
           const actions = messageActions(m, viewer);
           return (
-            <MessageBubble
-              key={m.id}
-              message={m}
-              actions={actions}
-              highlighted={menu?.message.id === m.id || editing?.id === m.id}
-              onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
-            />
+            <Fragment key={m.id}>
+              {separator}
+              <MessageBubble
+                message={m}
+                actions={actions}
+                highlighted={menu?.message.id === m.id || editing?.id === m.id}
+                onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
+              />
+            </Fragment>
           );
         })}
         <div ref={bottomRef} />
@@ -1187,6 +1309,18 @@ function ChatPanel({
           </div>
         )}
 
+        {quickSearch !== null && !isClosed && (
+          <QuickReplyMenu
+            query={quickSearch}
+            items={quick.items}
+            loading={quick.loading}
+            error={quick.error}
+            active={quickActive}
+            onHover={setQuickActive}
+            onPick={insertQuickReply}
+          />
+        )}
+
         {isClosed && !editing ? (
           <p className="rounded-xl bg-surface-muted px-4 py-2.5 text-center text-xs text-muted">
             {reopenError
@@ -1200,7 +1334,7 @@ function ChatPanel({
             typingSender.stop();
             if (editing) return void saveEdit();
             if (!text.trim()) return;
-            send({ type: 'text', body: text });
+            send(text);
             setText('');
           }}
           className="flex items-center gap-2"
@@ -1230,20 +1364,46 @@ function ChatPanel({
             </svg>
           </button>
 
-          {/* Main Message Input */}
-          <input
+          {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
+          <textarea
             ref={inputRef}
+            rows={1}
             value={text}
             onChange={(e) => {
               setText(e.target.value);
+              setQuickClosed(false); // Esc hides the menu only until the text changes
               typingSender.onInput(e.target.value);
             }}
             onBlur={typingSender.stop}
             onKeyDown={(e) => {
+              if (quickSearch !== null) {
+                const count = quick.items.length;
+                if (e.key === 'ArrowDown' && count) {
+                  e.preventDefault();
+                  return setQuickActive((i) => (i + 1) % count);
+                }
+                if (e.key === 'ArrowUp' && count) {
+                  e.preventDefault();
+                  return setQuickActive((i) => (i - 1 + count) % count);
+                }
+                if (((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') && count && !e.nativeEvent.isComposing) {
+                  e.preventDefault(); // insert, don't send "/..."
+                  return insertQuickReply(quick.items[Math.min(quickActive, count - 1)]);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  return setQuickClosed(true);
+                }
+              }
               if (e.key === 'Escape' && editing) cancelEdit();
+              // Same form submit as before (send, or save an edit); Shift+Enter keeps its default new line
+              if (enterAction({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing }) === 'send') {
+                e.preventDefault();
+                e.currentTarget.form?.requestSubmit();
+              }
             }}
-            placeholder={editing ? 'Edit message' : 'Type a message'}
-            className="flex-1 rounded-xl border border-line bg-surface-muted/70 px-4 py-2.5 text-xs text-ink placeholder:text-faint outline-hidden transition focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
+            placeholder={editing ? 'Edit message' : 'Type a message, or / for quick replies'}
+            className="flex-1 resize-none rounded-xl border border-line bg-surface-muted/70 px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
           />
 
           {/* Send Button */}

@@ -5,6 +5,8 @@ import { API_URL } from '@/lib/api';
 import { connectWhatsApp } from '@/lib/settings';
 import { AppShell, type Me } from '../AppShell';
 import { buttonClass, inputClass } from '../AuthShell';
+import { isAdminRole } from '@/lib/roles';
+import { TeamSection } from './team';
 
 export default function SettingsPage() {
   return <AppShell>{(me) => <Settings me={me} />}</AppShell>;
@@ -15,6 +17,8 @@ function Settings({ me }: { me: Me }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  // Only admins may change the WhatsApp connection (the server refuses everyone else)
+  const canEditSettings = isAdminRole(me.role);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -66,7 +70,11 @@ function Settings({ me }: { me: Me }) {
             From Meta Developer Dashboard (<a href="https://developers.facebook.com" target="_blank" rel="noreferrer" className="text-primary underline font-medium">developers.facebook.com</a>), open your WhatsApp Business app and copy the credentials:
           </p>
 
+          {!canEditSettings && (
+            <p className="mt-3 rounded-xl bg-surface-muted p-3 text-xs text-muted">Only admins can change the WhatsApp connection.</p>
+          )}
           <form onSubmit={onSubmit} className="mt-4 space-y-3.5">
+            <fieldset disabled={!canEditSettings} className="space-y-3.5 disabled:opacity-60">
             <div>
               <label className="block text-xs font-medium text-body">WhatsApp Business Account ID (WABA ID)</label>
               <input name="wabaId" required placeholder="e.g. 845270958305032" className={`${inputClass} mt-1`} />
@@ -88,8 +96,11 @@ function Settings({ me }: { me: Me }) {
             <button disabled={loading} className={`${buttonClass} mt-2`}>
               {loading ? 'Verifying with Meta…' : connected ? 'Update WhatsApp Connection' : 'Connect WhatsApp'}
             </button>
+            </fieldset>
           </form>
         </section>
+
+        <TeamSection meId={me.user.id} role={me.role} />
 
         {/* Webhook Configuration Card */}
         <section className="rounded-2xl border border-line bg-surface p-6 shadow-xs text-xs">

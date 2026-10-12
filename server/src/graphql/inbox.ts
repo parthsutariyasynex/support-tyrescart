@@ -8,6 +8,7 @@ import { senderName } from '../services/senders.js';
 import {
   listConversations,
   listMessages,
+  listMessageTemplates,
   markConversationRead,
   requireConversation,
   sendMessage,
@@ -105,7 +106,20 @@ export const typeDefs = /* GraphQL */ `
   input SendTemplateInput {
     conversationId: ID!
     name: String!
+    "Language code exactly as approved, e.g. en_US. Omit to use the template's only approved language."
     language: String
+  }
+
+  "An approved WhatsApp template (one per name + language)"
+  type MessageTemplate {
+    name: String!
+    "Language code as approved by Meta, e.g. en or en_US"
+    language: String!
+    category: String!
+    "Body text, for preview"
+    body: String!
+    "Has {{variables}} or a media header; can't be sent from the inbox yet"
+    needsParameters: Boolean!
   }
 
   input StartConversationInput {
@@ -121,9 +135,11 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, or 'unassigned'. status: open | closed"
+    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', or 'me' (assigned to you). status: open | closed"
     conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String): ConversationConnection!
     conversationCounts: ConversationCounts!
+    "Approved templates of the connected number, live from Meta"
+    messageTemplates: [MessageTemplate!]!
     conversation(id: ID!): Conversation!
     "Newest page first. first: 1-100 (default 50)"
     messages(conversationId: ID!, first: Int, after: String): MessageConnection!
@@ -168,17 +184,17 @@ type ConversationParent = {
 
 export const resolvers = {
   Query: {
-    conversations: authed(async ({ labelId, assignee, status, ...args }: ConversationPageArgs, { workspaceId }) =>
+    conversations: authed(async ({ labelId, assignee, status, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
-        (await listConversations(workspaceId, {
-          ...pageArgs(args),
-          labelId: labelId ?? undefined,
-          assignee: assignee ?? undefined,
-          status: status ?? undefined,
-        })) as Page<ConversationParent>,
+        (await listConversations(
+          workspaceId,
+          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined },
+          userId,
+        )) as Page<ConversationParent>,
       ),
     ),
     conversationCounts: authed((_args, { workspaceId }) => conversationCounts(workspaceId)),
+    messageTemplates: authed((_args, { workspaceId }) => listMessageTemplates(workspaceId)),
     conversation: authed(({ id }: { id: string }, { workspaceId }) => requireConversation(workspaceId, id)),
     messages: authed(async ({ conversationId, ...args }: PageArgs & { conversationId: string }, { workspaceId, userId }) =>
       toConnection(

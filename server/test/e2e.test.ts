@@ -4,8 +4,14 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import bcrypt from 'bcryptjs';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { io as connectSocket, type Socket } from 'socket.io-client';
 import { prisma } from '../src/prisma.js';
+import { validSignature } from '../src/routes/webhook.js';
+import { pickTemplateLanguage } from '../src/services/inbox.js';
+import { parseQuickReplyDump, possibleLostEmojis } from '../src/services/quickReplyImport.js';
+import type { ApprovedTemplate } from '../src/whatsapp.js';
 
 const API = process.env.API_URL ?? 'http://localhost:4000';
 const run = Date.now();
@@ -483,12 +489,13 @@ describe('label permissions and colours', () => {
     assert.equal((await prisma.label.findUnique({ where: { id: label.id } }))!.color, '#25d366');
   });
 
-  test('agents without permission can use labels and assignees but not change them', async () => {
+  test('agents without permission can use labels but not change them, and cannot assign chats to others', async () => {
     const add = `mutation($c: ID!, $l: ID!) { addConversationLabel(conversationId: $c, labelId: $l) { labels { id color } } }`;
     const added = (await ok(add, { c: conversationId, l: label.id }, agent.token)).addConversationLabel.labels;
     assert.equal(added.find((l: any) => l.id === label.id).color, '#25d366');
     const assign = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { assignee { color } } }`;
-    assert.deepEqual((await ok(assign, { c: conversationId, a: assignee.id }, agent.token)).assignConversation.assignee, { color: '#0f0f0f' });
+    assert.equal(await errorCode(assign, { c: conversationId, a: assignee.id }, agent.token), 'FORBIDDEN'); // supervisors/admins only
+    assert.deepEqual((await ok(assign, { c: conversationId, a: assignee.id }, A.token)).assignConversation.assignee, { color: '#0f0f0f' });
     // Same colours everywhere they read labels
     const { labels } = await ok(`{ labels { id color } }`, undefined, agent.token);
     assert.equal(labels.find((l: any) => l.id === label.id).color, '#25d366');
@@ -543,7 +550,7 @@ describe('edit and delete messages', () => {
     await prisma.whatsAppAccount.create({
       data: { workspaceId: B.workspaceId, wabaId: 'w', phoneNumberId: `pn-msg-${run}`, accessToken: 'fake-token-e2e' },
     });
-    await ok(SIMULATE, { i: { waId: '915555555555', body: 'hi' } }, B.token);
+    await ok(SIMULATE, { i: { waId: '919555555555', body: 'hi' } }, B.token);
     const [c] = (await ok(CONVERSATIONS, {}, B.token)).conversations.nodes;
     const bUser = (await ok(`{ me { user { id } } }`, undefined, B.token)).me.user.id;
     const sent = (await ok(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { ${FIELDS} } }`, { i: { conversationId: c.id, body: 'from B' } }, B.token)).sendTextMessage;
@@ -951,7 +958,8 @@ describe('activity history and notifications', () => {
     me = (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id;
     const email = `e2e-activity-mate-${run}@example.com`;
     const user = await prisma.user.create({
-      data: { name: 'Mate', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } },
+      // Supervisor: Mate assigns chats to others below (agents can only take and release their own)
+      data: { name: 'Mate', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'supervisor', workspaceId: ws.workspaceId } } },
     });
     created.userIds.push(user.id);
     mate = { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
@@ -1026,6 +1034,263 @@ describe('activity history and notifications', () => {
     assert.equal((await ok(`{ unreadTotal }`, undefined, ws.token)).unreadTotal, 0);
     assert.equal(await errorCode(TIMELINE, { c: conv }, B.token), 'NOT_FOUND');
     assert.ok(!(await ok(FEED, undefined, B.token)).notifications.items.some((a: any) => a.contactName === 'Riya'));
+  });
+});
+
+describe('assignments: linked users, history, permissions and Socket.IO', () => {
+  const ASSIGNEE = 'id name color userId conversationCount';
+  const CREATE = `mutation($i: CreateAssigneeInput!) { createAssignee(input: $i) { ${ASSIGNEE} } }`;
+  const UPDATE = `mutation($id: ID!, $i: UpdateAssigneeInput!) { updateAssignee(id: $id, input: $i) { ${ASSIGNEE} } }`;
+  const ASSIGN = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { id assignee { id name userId } } }`;
+  const MINE = `{ conversations(assignee: "me") { nodes { id } } }`;
+  const TIMELINE = `query($c: ID!) { conversationActivity(conversationId: $c) { type actorName data } }`;
+  type Agent = { id: string; token: string };
+  type Listener = { socket: Socket; events: { event: string; data: any }[] };
+  let ws: { token: string; workspaceId: string };
+  let owner: Agent;
+  let asha: Agent; // agent without label/assignee management
+  let ravi: Agent;
+  let sam: Agent; // supervisor: assigns and reassigns anyone
+  let conv: string;
+  let conv2: string;
+  let deskAsha: any;
+  let deskRavi: any;
+  let nightShift: any;
+  const sockets: Record<string, Listener> = {};
+
+  async function newAgent(name: string, role = 'agent') {
+    const email = `e2e-assign-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    const { login } = await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } });
+    return { id: user.id, token: login.token as string };
+  }
+
+  async function listen(token: string): Promise<Listener> {
+    const socket = connectSocket(API, { auth: { token }, transports: ['websocket'], forceNew: true });
+    const events: Listener['events'] = [];
+    socket.onAny((event, data) => events.push({ event, data }));
+    await new Promise<void>((resolve, reject) => {
+      socket.on('connect', () => resolve());
+      socket.on('connect_error', reject);
+    });
+    return { socket, events };
+  }
+  const received = (who: string, event: string) => sockets[who].events.filter((e) => e.event === event).map((e) => e.data);
+  const resetEvents = () => Object.values(sockets).forEach((s) => (s.events.length = 0));
+  const settle = () => new Promise((r) => setTimeout(r, 300)); // let socket events arrive
+  const timeline = async (c: string) => (await ok(TIMELINE, { c }, owner.token)).conversationActivity;
+  const mine = async (token: string) => (await ok(MINE, undefined, token)).conversations.nodes.map((c: any) => c.id);
+
+  before(async () => {
+    ws = await newWorkspace('assignflow');
+    owner = { id: (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id, token: ws.token };
+    asha = await newAgent('Asha');
+    ravi = await newAgent('Ravi');
+    sam = await newAgent('Sam', 'supervisor');
+    await ok(SIMULATE, { i: { waId: '917777777771', name: 'Riya', body: 'Need 4 tyres' } }, ws.token);
+    await ok(SIMULATE, { i: { waId: '917777777772', name: 'Kabir', body: 'Alignment?' } }, ws.token);
+    const nodes = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes;
+    conv = nodes.find((c: any) => c.contact.name === 'Riya').id;
+    conv2 = nodes.find((c: any) => c.contact.name === 'Kabir').id;
+    for (const [who, a] of Object.entries({ owner, asha, ravi })) sockets[who] = await listen(a.token);
+  });
+
+  after(() => Object.values(sockets).forEach((s) => s.socket.disconnect()));
+
+  test('workspaceMembers lists everyone in the workspace by name, with email and role', async () => {
+    const { workspaceMembers } = await ok(`{ workspaceMembers { id name email role } }`, undefined, asha.token);
+    assert.deepEqual(
+      workspaceMembers.map((m: any) => [m.name, m.role]),
+      [['Asha', 'agent'], ['assignflow', 'owner'], ['Ravi', 'agent'], ['Sam', 'supervisor']],
+    );
+    assert.equal(workspaceMembers.find((m: any) => m.id === asha.id).email, `e2e-assign-asha-${run}@example.com`);
+    assert.ok(!(await ok(`{ workspaceMembers { id } }`, undefined, B.token)).workspaceMembers.some((m: any) => m.id === asha.id));
+  });
+
+  test('link assignees to members: managers only, members of this workspace only, one assignee per person', async () => {
+    assert.equal(await errorCode(CREATE, { i: { name: 'Asha', color: '#128c7e', userId: asha.id } }, asha.token), 'FORBIDDEN');
+    deskAsha = (await ok(CREATE, { i: { name: 'Asha', color: '#128c7e', userId: asha.id } }, owner.token)).createAssignee;
+    deskRavi = (await ok(CREATE, { i: { name: 'Ravi', color: '#5e5ce6', userId: ravi.id } }, owner.token)).createAssignee;
+    nightShift = (await ok(CREATE, { i: { name: 'Night shift', color: '#c2410c' } }, owner.token)).createAssignee;
+    assert.deepEqual([deskAsha.userId, deskRavi.userId, nightShift.userId], [asha.id, ravi.id, null]);
+
+    const bUser = (await ok(`{ me { user { id } } }`, undefined, B.token)).me.user.id;
+    assert.equal(await errorCode(CREATE, { i: { name: 'Outsider', color: '#000000', userId: bUser } }, owner.token), 'NOT_FOUND');
+    assert.equal(await errorCode(CREATE, { i: { name: 'Asha 2', color: '#000000', userId: asha.id } }, owner.token), 'ASSIGNEE_USER_TAKEN');
+    assert.equal(await errorCode(UPDATE, { id: deskRavi.id, i: { userId: asha.id } }, owner.token), 'ASSIGNEE_USER_TAKEN');
+    assert.equal(await errorCode(UPDATE, { id: nightShift.id, i: { userId: ravi.id } }, asha.token), 'FORBIDDEN');
+
+    // Leaving userId out (or sending other fields as null) keeps the link; userId: null unlinks
+    let r = (await ok(UPDATE, { id: deskRavi.id, i: { color: '#5E5CE6', name: null } }, owner.token)).updateAssignee;
+    assert.deepEqual([r.name, r.userId], ['Ravi', ravi.id]);
+    r = (await ok(UPDATE, { id: deskRavi.id, i: { userId: null } }, owner.token)).updateAssignee;
+    assert.equal(r.userId, null);
+    r = (await ok(UPDATE, { id: deskRavi.id, i: { userId: ravi.id } }, owner.token)).updateAssignee;
+    assert.equal(r.userId, ravi.id);
+    const { assignees } = await ok(`{ assignees { name user { id name role } } }`, undefined, asha.token);
+    assert.deepEqual(assignees.find((a: any) => a.name === 'Ravi').user, { id: ravi.id, name: 'Ravi', role: 'agent' });
+    assert.equal(assignees.find((a: any) => a.name === 'Night shift').user, null);
+  });
+
+  test('agents take and release their own chats; supervisors assign, reassign and unassign; history names the previous assignee; no-ops record nothing', async () => {
+    await ok(ASSIGN, { c: conv, a: deskAsha.id }, asha.token); // Asha takes the unassigned chat
+    await ok(ASSIGN, { c: conv, a: nightShift.id }, sam.token);
+    await ok(ASSIGN, { c: conv, a: nightShift.id }, sam.token); // already Night shift
+    await ok(ASSIGN, { c: conv, a: deskAsha.id }, sam.token);
+    const c = (await ok(ASSIGN, { c: conv, a: null }, asha.token)).assignConversation; // Asha releases it
+    assert.equal(c.assignee, null);
+    await ok(ASSIGN, { c: conv, a: null }, sam.token); // already unassigned
+
+    const items = await timeline(conv);
+    assert.deepEqual(
+      items.map((a: any) => [a.type, a.actorName, JSON.parse(a.data)]),
+      [
+        ['assigned', 'Asha', { assignee: 'Asha', color: '#128c7e', assigneeUserId: asha.id }],
+        ['reassigned', 'Sam', { assignee: 'Night shift', color: '#c2410c', previous: 'Asha' }],
+        ['reassigned', 'Sam', { assignee: 'Asha', color: '#128c7e', previous: 'Night shift', assigneeUserId: asha.id }],
+        ['unassigned', 'Asha', { assignee: 'Asha' }],
+      ],
+    );
+  });
+
+  test('Socket.IO: one conversation:assigned per real change; assignment:you only to the linked agent, never to yourself', async () => {
+    resetEvents();
+    await ok(ASSIGN, { c: conv, a: deskRavi.id }, owner.token);
+    await settle();
+    for (const who of ['owner', 'asha', 'ravi']) {
+      const assigned = received(who, 'conversation:assigned');
+      assert.equal(assigned.length, 1, `${who} should get exactly one conversation:assigned`);
+      assert.deepEqual([assigned[0].conversationId, assigned[0].assignee.id, assigned[0].assignee.userId], [conv, deskRavi.id, ravi.id]);
+    }
+    assert.deepEqual(
+      received('ravi', 'assignment:you').map((e) => [e.conversationId, e.actorName, e.contactName, e.assignee.name]),
+      [[conv, 'assignflow', 'Riya', 'Ravi']],
+    );
+    assert.equal(received('owner', 'assignment:you').length, 0);
+    assert.equal(received('asha', 'assignment:you').length, 0);
+    assert.equal(received('owner', 'activity:new').filter((a) => a.type === 'reassigned' || a.type === 'assigned').length, 1);
+
+    resetEvents();
+    await ok(ASSIGN, { c: conv, a: deskRavi.id }, asha.token); // no change
+    await settle();
+    for (const who of ['owner', 'asha', 'ravi']) {
+      assert.equal(received(who, 'conversation:assigned').length, 0);
+      assert.equal(received(who, 'activity:new').length, 0);
+    }
+
+    resetEvents();
+    await ok(ASSIGN, { c: conv2, a: deskRavi.id }, ravi.token); // to himself: no pop-up
+    await ok(ASSIGN, { c: conv2, a: null }, owner.token); // unassign: nobody is "assigned"
+    await settle();
+    assert.equal(received('ravi', 'assignment:you').length, 0);
+    assert.deepEqual(received('asha', 'conversation:assigned').map((e) => e.assignee?.id ?? null), [deskRavi.id, null]);
+  });
+
+  test('Socket.IO: assignment:removed tells only the agent a chat was taken from, unless they did it', async () => {
+    // conv is assigned to Ravi (from the previous test)
+    resetEvents();
+    await ok(ASSIGN, { c: conv, a: deskAsha.id }, owner.token); // reassign Ravi -> Asha
+    await settle();
+    assert.deepEqual(
+      received('ravi', 'assignment:removed').map((e) => [e.conversationId, e.previous, e.assignee?.name, e.actorName, e.contactName]),
+      [[conv, 'Ravi', 'Asha', 'assignflow', 'Riya']],
+    );
+    assert.equal(received('asha', 'assignment:you').length, 1);
+    assert.equal(received('asha', 'assignment:removed').length, 0);
+    assert.equal(received('owner', 'assignment:removed').length, 0);
+
+    resetEvents();
+    await ok(ASSIGN, { c: conv, a: null }, asha.token); // Asha unassigns herself: nobody to tell
+    await ok(ASSIGN, { c: conv, a: deskRavi.id }, owner.token);
+    await ok(ASSIGN, { c: conv, a: null }, owner.token); // owner unassigns Ravi
+    await ok(ASSIGN, { c: conv, a: nightShift.id }, owner.token); // from nobody: nothing removed
+    await ok(ASSIGN, { c: conv, a: deskRavi.id }, owner.token); // from an unlinked assignee: nothing removed
+    await settle();
+    assert.equal(received('asha', 'assignment:removed').length, 0);
+    assert.deepEqual(
+      received('ravi', 'assignment:removed').map((e) => [e.previous, e.assignee]),
+      [['Ravi', null]],
+    );
+    assert.equal(received('owner', 'assignment:removed').length, 0);
+  });
+
+  test('"Assigned to me" lists only chats assigned to your linked assignee', async () => {
+    await ok(ASSIGN, { c: conv, a: deskRavi.id }, owner.token);
+    await ok(ASSIGN, { c: conv2, a: deskAsha.id }, owner.token);
+    assert.deepEqual(await mine(ravi.token), [conv]);
+    assert.deepEqual(await mine(asha.token), [conv2]);
+    assert.deepEqual(await mine(owner.token), []); // owner isn't linked to any assignee
+    assert.deepEqual(await mine(B.token), []);
+    await ok(UPDATE, { id: deskRavi.id, i: { userId: null } }, owner.token);
+    assert.deepEqual(await mine(ravi.token), []);
+    await ok(UPDATE, { id: deskRavi.id, i: { userId: ravi.id } }, owner.token);
+    assert.deepEqual(await mine(ravi.token), [conv]);
+    const counts = (await ok(`{ assignees { name conversationCount } }`, undefined, owner.token)).assignees;
+    assert.deepEqual(counts.map((a: any) => [a.name, a.conversationCount]), [['Asha', 1], ['Night shift', 0], ['Ravi', 1]]);
+  });
+
+  test('visibility and replies are unchanged: every agent sees every chat and can reply whoever it is assigned to', async () => {
+    for (const a of [asha, owner]) assert.ok((await ok(CONVERSATIONS, {}, a.token)).conversations.nodes.some((c: any) => c.id === conv));
+    // conv is assigned to Ravi; Asha replies anyway. Meta rejects the fake number, but the reply is accepted and saved.
+    await prisma.whatsAppAccount.create({
+      data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-assign-${run}`, accessToken: 'fake-token-e2e' },
+    });
+    try {
+      const sent = (
+        await ok(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { sentById senderName } }`, { i: { conversationId: conv, body: 'On it' } }, asha.token)
+      ).sendTextMessage;
+      assert.deepEqual(sent, { sentById: asha.id, senderName: 'Asha' });
+    } finally {
+      await prisma.whatsAppAccount.delete({ where: { workspaceId: ws.workspaceId } });
+    }
+  });
+
+  test('concurrent reassignments: every history entry names the real previous assignee and ends at the final one', async () => {
+    await ok(ASSIGN, { c: conv, a: nightShift.id }, owner.token);
+    const before = (await timeline(conv)).length;
+    const targets = [deskAsha, deskRavi, nightShift, deskAsha, deskRavi, deskAsha];
+    const tokens = [owner.token, sam.token]; // supervisors and admins reassign; agents can't
+    const results = await Promise.all(targets.map((t, i) => gql(ASSIGN, { c: conv, a: t.id }, tokens[i % tokens.length])));
+    for (const r of results) assert.ok(!r.errors || r.errors[0].extensions?.code === 'ASSIGN_CONFLICT', JSON.stringify(r.errors));
+
+    const final = (await ok(`query($id: ID!) { conversation(id: $id) { assignee { name } } }`, { id: conv }, owner.token)).conversation.assignee.name;
+    const changes = (await timeline(conv)).slice(before).map((a: any) => {
+      assert.equal(a.type, 'reassigned');
+      const d = JSON.parse(a.data);
+      return [d.previous, d.assignee] as [string, string];
+    });
+    // The recorded changes must chain from "Night shift" to the final assignee using every change exactly once
+    const chains = (from: string, left: [string, string][]): boolean =>
+      left.length === 0
+        ? from === final
+        : left.some(([p, n], i) => p === from && chains(n, left.filter((_, j) => j !== i)));
+    assert.ok(chains('Night shift', changes), `history ${JSON.stringify(changes)} does not end at ${final}`);
+  });
+
+  test('deleting an assignee unassigns its chats and records it in each chat; deleting a user only unlinks', async () => {
+    await ok(ASSIGN, { c: conv, a: nightShift.id }, owner.token);
+    await ok(ASSIGN, { c: conv2, a: nightShift.id }, owner.token);
+    await settle();
+    resetEvents();
+    await ok(`mutation($id: ID!) { deleteAssignee(id: $id) }`, { id: nightShift.id }, owner.token);
+    await settle();
+    for (const c of [conv, conv2]) {
+      const last = (await timeline(c)).at(-1);
+      assert.deepEqual([last.type, last.actorName, JSON.parse(last.data)], ['unassigned', 'assignflow', { assignee: 'Night shift', reason: 'assignee_deleted' }]);
+    }
+    assert.deepEqual(received('asha', 'assignee:deleted'), [{ id: nightShift.id }]);
+    assert.equal(received('asha', 'conversation:assigned').length, 0);
+    assert.equal(received('asha', 'activity:new').filter((a) => a.type === 'unassigned').length, 2);
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: nightShift.id }, owner.token), 'NOT_FOUND');
+
+    const temp = await newAgent('Temp');
+    const desk = (await ok(CREATE, { i: { name: 'Temp desk', color: '#0369a1', userId: temp.id } }, owner.token)).createAssignee;
+    await prisma.user.delete({ where: { id: temp.id } });
+    const after = await prisma.assignee.findUnique({ where: { id: desk.id } });
+    assert.equal(after?.userId, null);
   });
 });
 
@@ -1140,5 +1405,1187 @@ describe('REST routes still work (parity)', () => {
     assert.equal((await rest('POST', '/inbox/contacts', A.token, { waId: '12' })).status, 400);
     assert.equal((await rest('POST', '/inbox/dev/simulate-incoming', B.token, {})).status, 200);
     assert.equal((await rest('POST', '/settings/whatsapp', A.token, { wabaId: '1' })).status, 400);
+  });
+});
+
+describe('WhatsApp integration: config, webhook, numbers, templates', () => {
+  let ws: { token: string; workspaceId: string };
+  const phoneNumberId = `pn-hook-${run}`;
+  const hook = (value: object) =>
+    fetch(`${API}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: 'waba', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', metadata: { phone_number_id: phoneNumberId }, ...value } }] }] }),
+    });
+  const status = (id: string, s: string, extra: object = {}) => ({ id, status: s, timestamp: '1760000000', recipient_id: '919876543210', ...extra });
+  // The webhook answers 200 straight away and processes afterwards
+  async function eventually<T>(read: () => Promise<T>, done: (v: T) => boolean) {
+    for (let i = 0; i < 40; i++) {
+      const v = await read();
+      if (done(v)) return v;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return read();
+  }
+
+  before(async () => {
+    ws = await newWorkspace('wa');
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId, accessToken: 'fake-token-e2e' } });
+  });
+
+  test('isProd is true only when NODE_ENV=production', () => {
+    const isProd = (nodeEnv?: string) => {
+      const env = { ...process.env };
+      if (nodeEnv === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = nodeEnv;
+      const r = spawnSync(process.execPath, ['--import', 'tsx', '-e', 'import("./src/env.ts").then((m) => console.log(m.env.isProd))'], { env, encoding: 'utf8' });
+      return r.stdout.trim();
+    };
+    assert.deepEqual([isProd('production'), isProd('development'), isProd(undefined)], ['true', 'false', 'false']);
+  });
+
+  test('webhook signatures: valid HMAC accepted; wrong, missing or unsigned rejected (unsigned allowed only outside production without a secret)', () => {
+    const body = Buffer.from('{"entry":[]}');
+    const sign = (secret: string) => 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+    assert.equal(validSignature(body, sign('app-secret'), 'app-secret', true), true);
+    assert.equal(validSignature(body, sign('other-secret'), 'app-secret', true), false);
+    assert.equal(validSignature(body, undefined, 'app-secret', false), false);
+    assert.equal(validSignature(body, 'sha256=short', 'app-secret', true), false);
+    assert.equal(validSignature(Buffer.from('{"entry":[1]}'), sign('app-secret'), 'app-secret', true), false); // body changed
+    assert.equal(validSignature(body, undefined, '', true), false); // production without META_APP_SECRET
+    assert.equal(validSignature(body, undefined, '', false), true); // local development
+  });
+
+  test('delivery statuses from Meta move sent -> delivered -> read, never backwards; failures keep the reason', async () => {
+    await ok(SIMULATE, { i: { waId: '919876500001', name: 'Hook', body: 'hi' } }, ws.token);
+    const conversationId = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+    const out = (body: string, wamid: string) =>
+      prisma.message.create({ data: { conversationId, direction: 'out', type: 'text', body, status: 'sent', waMessageId: wamid } });
+    const m = await out('one', `wamid.e2e-1-${run}`);
+    const read = () => prisma.message.findUniqueOrThrow({ where: { id: m.id } });
+
+    assert.equal((await hook({ statuses: [status(m.waMessageId!, 'delivered')] })).status, 200);
+    assert.equal((await eventually(read, (x) => x.status === 'delivered')).status, 'delivered');
+    await hook({ statuses: [status(m.waMessageId!, 'read')] });
+    assert.equal((await eventually(read, (x) => x.status === 'read')).status, 'read');
+    await hook({ statuses: [status(m.waMessageId!, 'delivered')] }); // late, out of order
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal((await read()).status, 'read');
+
+    const f = await out('two', `wamid.e2e-2-${run}`);
+    await hook({ statuses: [status(f.waMessageId!, 'failed', { errors: [{ code: 131047, title: 'Re-engagement message' }] })] });
+    const failed = await eventually(() => prisma.message.findUniqueOrThrow({ where: { id: f.id } }), (x) => x.status === 'failed');
+    assert.deepEqual([failed.status, failed.error], ['failed', 'Re-engagement message']);
+  });
+
+  test('real incoming messages are saved once with their WhatsApp id and open the 24-hour window', async () => {
+    const wamid = `wamid.e2e-in-${run}`;
+    const message = { from: '919876500002', id: wamid, timestamp: '1760000000', type: 'text', text: { body: 'Do you fit tyres on Sunday?' } };
+    const contacts = [{ profile: { name: 'Real Customer' }, wa_id: '919876500002' }];
+    await hook({ contacts, messages: [message] });
+    await hook({ contacts, messages: [message] }); // Meta retry
+    const saved = await eventually(() => prisma.message.findMany({ where: { waMessageId: wamid } }), (x) => x.length > 0);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await prisma.message.count({ where: { waMessageId: wamid } })), 1);
+    assert.deepEqual([saved[0].direction, saved[0].body], ['in', 'Do you fit tyres on Sunday?']);
+    const c = await prisma.conversation.findUniqueOrThrow({ where: { id: saved[0].conversationId } });
+    assert.ok(c.lastInboundAt && Date.now() - c.lastInboundAt.getTime() < 60_000);
+  });
+
+  test('numbers must be real international numbers: starting a chat without a country code is refused', async () => {
+    const start = `mutation($i: StartConversationInput!) { startConversation(input: $i) { contact { waId } } }`;
+    assert.equal(await errorCode(start, { i: { waId: '9016312927' } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(start, { i: { waId: '915555555555' } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal((await ok(start, { i: { waId: '+971 50 123 4567' } }, ws.token)).startConversation.contact.waId, '971501234567');
+    assert.equal((await rest('POST', '/inbox/contacts', ws.token, { waId: '9016312927' })).status, 400);
+  });
+
+  test('replying to an old chat whose number lacks the country code is refused before calling WhatsApp, and stores nothing', async () => {
+    const contact = await prisma.contact.create({ data: { workspaceId: ws.workspaceId, waId: '9016312927' } });
+    const conv = await prisma.conversation.create({ data: { workspaceId: ws.workspaceId, contactId: contact.id, lastInboundAt: new Date() } });
+    const r = await gql(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { id } }`, { i: { conversationId: conv.id, body: 'hi' } }, ws.token);
+    assert.equal(r.errors?.[0].extensions?.code, 'INVALID_PHONE');
+    assert.match(r.errors![0].message, /country code/);
+    assert.equal(await prisma.message.count({ where: { conversationId: conv.id } }), 0);
+  });
+
+  test('template language: the approved one is used; unapproved names, languages and templates with variables are refused', () => {
+    const t = (name: string, language: string, needsParameters = false): ApprovedTemplate => ({ name, language, category: 'UTILITY', body: '', needsParameters });
+    const approved = [t('hello_world', 'en_US'), t('offer', 'en'), t('offer', 'ar'), t('greet', 'en', true)];
+    const code = (fn: () => unknown) => {
+      try {
+        fn();
+        return 'ok';
+      } catch (err) {
+        return (err as any).code;
+      }
+    };
+    assert.equal(pickTemplateLanguage(approved, 'hello_world'), 'en_US'); // the old default 'en' would fail at Meta
+    assert.equal(pickTemplateLanguage(approved, 'hello_world', 'en_US'), 'en_US');
+    assert.equal(code(() => pickTemplateLanguage(approved, 'hello_world', 'en')), 'TEMPLATE_LANGUAGE');
+    assert.equal(pickTemplateLanguage(approved, 'offer', 'ar'), 'ar');
+    assert.equal(code(() => pickTemplateLanguage(approved, 'offer')), 'TEMPLATE_LANGUAGE'); // ambiguous
+    assert.equal(code(() => pickTemplateLanguage(approved, 'missing')), 'TEMPLATE_NOT_APPROVED');
+    assert.equal(code(() => pickTemplateLanguage(approved, 'greet')), 'TEMPLATE_NEEDS_PARAMETERS');
+  });
+
+  test('messageTemplates needs a connected number and reports Meta errors instead of an empty list', async () => {
+    const Q = `{ messageTemplates { name language category body needsParameters } }`;
+    assert.equal(await errorCode(Q, undefined, B.token), 'WHATSAPP_NOT_CONNECTED');
+    assert.equal(await errorCode(Q, undefined, ws.token), 'WHATSAPP_API_ERROR'); // fake token: Meta refuses it
+    assert.equal((await gql(Q)).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+  });
+});
+
+describe('roles, team management and authorization', () => {
+  type U = { id: string; token: string; email: string };
+  const ME = `{ me { user { id } workspace { id } role canManageLabels } }`;
+  const MEMBERS = `{ members { userId name email role isOwner canManageLabels } }`;
+  const INVITE = `mutation($i: InviteMemberInput!) { inviteMember(input: $i) { invited emailSent member { userId name email role isOwner } } }`;
+  const SET_ROLE = `mutation($u: ID!, $r: String!) { updateMemberRole(userId: $u, role: $r) { userId role } }`;
+  const REMOVE = `mutation($u: ID!) { removeMember(userId: $u) }`;
+  const JOIN_LINK = `mutation { createJoinLink { token expiresAt } }`;
+  const REGISTER = `mutation($i: RegisterInput!) { register(input: $i) { token workspace { id } } }`;
+  const ASSIGN = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { assignee { name } } }`;
+  const CREATE_LABEL = `mutation($i: CreateLabelInput!) { createLabel(input: $i) { id } }`;
+  let ws: { token: string; workspaceId: string };
+  let owner: U;
+  let admin: U;
+  let sup: U;
+  let agent: U;
+  let conv: string;
+
+  async function member(name: string, role: string): Promise<U> {
+    const email = `e2e-roles-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    const { login } = await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } });
+    return { id: user.id, token: login.token, email };
+  }
+  const role = async (token: string) => (await ok(ME, undefined, token)).me.role;
+  function connect(token: string) {
+    const socket = connectSocket(API, { auth: { token }, transports: ['websocket'], forceNew: true, reconnection: false });
+    const events: { event: string; data: any }[] = [];
+    socket.onAny((event, data) => events.push({ event, data }));
+    const ready = new Promise<boolean>((resolve) => {
+      socket.on('connect', () => resolve(true));
+      socket.on('connect_error', () => resolve(false));
+    });
+    return { socket, events, ready };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+
+  before(async () => {
+    ws = await newWorkspace('roles');
+    const me = (await ok(ME, undefined, ws.token)).me;
+    owner = { id: me.user.id, token: ws.token, email: `e2e-roles-${run}@example.com` };
+    admin = await member('Adam', 'admin');
+    sup = await member('Sara', 'supervisor');
+    agent = await member('Aman', 'agent');
+    await ok(SIMULATE, { i: { waId: '917777700001', name: 'Rahul', body: 'Hi' } }, ws.token);
+    conv = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+  });
+
+  test('each member sees their own role; supervisors can manage labels without a grant, agents cannot', async () => {
+    assert.deepEqual(
+      [await role(owner.token), await role(admin.token), await role(sup.token), await role(agent.token)],
+      ['owner', 'admin', 'supervisor', 'agent'],
+    );
+    assert.equal((await ok(ME, undefined, sup.token)).me.canManageLabels, true);
+    assert.equal((await ok(ME, undefined, agent.token)).me.canManageLabels, false);
+    assert.ok((await ok(CREATE_LABEL, { i: { name: 'VIP', color: '#6d28d9' } }, sup.token)).createLabel.id);
+    assert.equal(await errorCode(CREATE_LABEL, { i: { name: 'Nope', color: '#000000' } }, agent.token), 'FORBIDDEN');
+  });
+
+  test('only admins (owner or admin) can see and manage the team', async () => {
+    const { members } = await ok(MEMBERS, undefined, admin.token);
+    assert.deepEqual(
+      members.map((m: any) => [m.name, m.role, m.isOwner]),
+      [['Adam', 'admin', false], ['Aman', 'agent', false], ['roles', 'owner', true], ['Sara', 'supervisor', false]],
+    );
+    assert.ok(members.every((m: any) => m.email.includes('@')));
+    for (const t of [sup.token, agent.token]) {
+      assert.equal(await errorCode(MEMBERS, undefined, t), 'FORBIDDEN');
+      assert.equal(await errorCode(INVITE, { i: { name: 'X', email: `x-${run}@example.com`, role: 'agent' } }, t), 'FORBIDDEN');
+      assert.equal(await errorCode(SET_ROLE, { u: agent.id, r: 'admin' }, t), 'FORBIDDEN');
+      assert.equal(await errorCode(REMOVE, { u: agent.id }, t), 'FORBIDDEN');
+      assert.equal(await errorCode(JOIN_LINK, undefined, t), 'FORBIDDEN');
+      assert.equal(await errorCode(`mutation($u: ID!) { setLabelPermission(userId: $u, canManageLabels: true) { userId } }`, { u: agent.id }, t), 'FORBIDDEN');
+    }
+    assert.equal(await errorCode(SET_ROLE, { u: agent.id, r: 'supervisor' }, agent.token), 'FORBIDDEN'); // no self-promotion
+  });
+
+  test('invite: a new email gets one account with the chosen role and an emailed link; an existing account is added, never duplicated', async () => {
+    const email = `e2e-roles-invited-${run}@example.com`;
+    const r = (await ok(INVITE, { i: { name: 'Nina', email: email.toUpperCase(), role: 'supervisor' } }, admin.token)).inviteMember;
+    created.userIds.push(r.member.userId);
+    assert.deepEqual([r.invited, r.member.email, r.member.role], [true, email, 'supervisor']);
+    assert.equal(await prisma.user.count({ where: { email } }), 1);
+    // The invite is a single-use "choose your password" link (the same table as Forgot password)
+    assert.equal(await prisma.passwordResetToken.count({ where: { userId: r.member.userId, usedAt: null } }), 1);
+    assert.equal(await errorCode(INVITE, { i: { name: 'Nina again', email, role: 'agent' } }, admin.token), 'MEMBER_EXISTS');
+
+    // Workspace B's owner already has an account: added here as an agent, name and password untouched
+    const bUser = await prisma.user.findFirstOrThrow({ where: { members: { some: { workspaceId: B.workspaceId, role: 'owner' } } } });
+    const added = (await ok(INVITE, { i: { name: 'Different name', email: bUser.email, role: 'agent' } }, owner.token)).inviteMember;
+    assert.deepEqual([added.invited, added.member.userId, added.member.name, added.member.role], [false, bUser.id, bUser.name, 'agent']);
+    assert.equal(await prisma.user.count({ where: { email: bUser.email } }), 1);
+    assert.equal(await prisma.passwordResetToken.count({ where: { userId: bUser.id } }), 0); // no password link sent
+    assert.equal(await role(B.token), 'owner'); // their own workspace is unaffected
+    await prisma.member.delete({ where: { userId_workspaceId: { userId: bUser.id, workspaceId: ws.workspaceId } } });
+
+    for (const r of ['owner', 'superadmin', ''])
+      assert.equal(await errorCode(INVITE, { i: { name: 'X', email: `x2-${run}@example.com`, role: r } }, admin.token), 'BAD_USER_INPUT');
+  });
+
+  test('role changes: admins only, never the owner or themselves; applied at once and announced over Socket.IO', async () => {
+    const live = connect(agent.token);
+    assert.equal(await live.ready, true);
+    await ok(SET_ROLE, { u: agent.id, r: 'supervisor' }, admin.token);
+    await settle();
+    assert.deepEqual(
+      live.events.filter((e) => e.event === 'member:permissions' && e.data.userId === agent.id).map((e) => [e.data.role, e.data.canManageLabels]),
+      [['supervisor', true]],
+    );
+    assert.ok((await ok(CREATE_LABEL, { i: { name: 'Promoted', color: '#1d4ed8' } }, agent.token)).createLabel.id); // same token, new rights
+    await ok(SET_ROLE, { u: agent.id, r: 'agent' }, owner.token);
+    assert.equal(await errorCode(CREATE_LABEL, { i: { name: 'Demoted', color: '#047857' } }, agent.token), 'FORBIDDEN');
+    live.socket.disconnect();
+
+    assert.equal(await errorCode(SET_ROLE, { u: owner.id, r: 'agent' }, admin.token), 'OWNER_PROTECTED');
+    assert.equal(await errorCode(SET_ROLE, { u: admin.id, r: 'agent' }, admin.token), 'CANNOT_CHANGE_SELF');
+    assert.equal(await errorCode(SET_ROLE, { u: agent.id, r: 'owner' }, admin.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(SET_ROLE, { u: (await ok(ME, undefined, B.token)).me.user.id, r: 'agent' }, admin.token), 'NOT_FOUND');
+    // An admin can make another admin
+    const temp = await member('Tara', 'agent');
+    assert.equal((await ok(SET_ROLE, { u: temp.id, r: 'admin' }, admin.token)).updateMemberRole.role, 'admin');
+    assert.ok((await ok(MEMBERS, undefined, temp.token)).members.length > 0);
+    await ok(REMOVE, { u: temp.id }, admin.token);
+  });
+
+  test('removing a member cuts off GraphQL, REST and Socket.IO at once; the account itself stays', async () => {
+    const gone = await member('Gita', 'agent');
+    const desk = (await ok(`mutation($i: CreateAssigneeInput!) { createAssignee(input: $i) { id } }`, { i: { name: 'Gita desk', color: '#047857', userId: gone.id } }, admin.token)).createAssignee;
+    const live = connect(gone.token);
+    assert.equal(await live.ready, true);
+    const closed = new Promise<boolean>((resolve) => live.socket.on('disconnect', () => resolve(true)));
+
+    assert.equal(await errorCode(REMOVE, { u: owner.id }, admin.token), 'OWNER_PROTECTED');
+    assert.equal(await errorCode(REMOVE, { u: admin.id }, admin.token), 'CANNOT_CHANGE_SELF');
+    assert.equal((await ok(REMOVE, { u: gone.id }, admin.token)).removeMember, gone.id);
+
+    assert.equal(await closed, true);
+    assert.equal((await gql(CONVERSATIONS, {}, gone.token)).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+    assert.equal((await rest('GET', '/inbox/conversations', gone.token)).status, 401);
+    const again = connect(gone.token);
+    assert.equal(await again.ready, false); // can't reconnect with the old token
+    again.socket.disconnect();
+    assert.ok(await prisma.user.findUnique({ where: { id: gone.id } }));
+    assert.equal((await prisma.assignee.findUniqueOrThrow({ where: { id: desk.id } })).userId, null); // unlinked
+    assert.equal(await errorCode(REMOVE, { u: gone.id }, admin.token), 'NOT_FOUND');
+  });
+
+  test('self-registration through a signup link always gives Agent; a role cannot be chosen; bad links are refused', async () => {
+    const { token } = (await ok(JOIN_LINK, undefined, admin.token)).createJoinLink;
+    assert.equal((await ok(`query($t: String!) { joinLinkInfo(token: $t) { workspaceName } }`, { t: token })).joinLinkInfo.workspaceName, 'roles');
+
+    const email = `e2e-roles-self-${run}@example.com`;
+    const reg = (await ok(REGISTER, { i: { name: 'Selfie', email, password: 'password123', joinToken: token } })).register;
+    created.userIds.push((await prisma.user.findUniqueOrThrow({ where: { email } })).id);
+    assert.equal(reg.workspace.id, ws.workspaceId);
+    assert.equal(await role(reg.token), 'agent');
+    // There is no role field to send
+    const withRole = await gql(REGISTER, { i: { name: 'Sneaky', email: `e2e-roles-sneaky-${run}@example.com`, password: 'password123', joinToken: token, role: 'admin' } });
+    assert.ok(withRole.errors?.length && !withRole.data);
+    assert.equal(await prisma.user.count({ where: { email: `e2e-roles-sneaky-${run}@example.com` } }), 0);
+
+    const bad = (t: string) => gql(REGISTER, { i: { name: 'Bad', email: `e2e-roles-bad-${run}@example.com`, password: 'password123', joinToken: t } });
+    assert.equal((await bad(token.slice(0, -2) + 'xx')).errors?.[0].extensions?.code, 'INVALID_JOIN_LINK'); // tampered
+    assert.equal((await bad(agent.token)).errors?.[0].extensions?.code, 'INVALID_JOIN_LINK'); // a sign-in token isn't a signup link
+    assert.equal((await gql(ME, undefined, token)).errors?.[0].extensions?.code, 'UNAUTHENTICATED'); // and a signup link isn't a sign-in
+    // Without a link: the original sign-up (own workspace, as its owner) still works, but needs a workspace name
+    assert.equal((await gql(REGISTER, { i: { name: 'No ws', email: `e2e-roles-nows-${run}@example.com`, password: 'password123' } })).errors?.[0].extensions?.code, 'BAD_USER_INPUT');
+    const own = await newWorkspace('roles-own');
+    assert.equal(await role(own.token), 'owner');
+  });
+
+  test('an existing account joins through the link as Agent without a duplicate account; members keep their role', async () => {
+    const { token } = (await ok(JOIN_LINK, undefined, owner.token)).createJoinLink;
+    const bUser = await prisma.user.findFirstOrThrow({ where: { members: { some: { workspaceId: B.workspaceId, role: 'owner' } } } });
+    const joined = (await ok(`mutation($t: String!) { joinWorkspace(token: $t) { token workspace { id } } }`, { t: token }, B.token)).joinWorkspace;
+    assert.equal(joined.workspace.id, ws.workspaceId);
+    assert.equal(await role(joined.token), 'agent');
+    assert.equal(await prisma.user.count({ where: { email: bUser.email } }), 1);
+    assert.equal(await role(B.token), 'owner');
+    await prisma.member.delete({ where: { userId_workspaceId: { userId: bUser.id, workspaceId: ws.workspaceId } } });
+    // Already a member: role unchanged (a supervisor isn't demoted by opening the link)
+    const again = (await ok(`mutation($t: String!) { joinWorkspace(token: $t) { token } }`, { t: token }, sup.token)).joinWorkspace;
+    assert.equal(await role(again.token), 'supervisor');
+  });
+
+  test('assignments by role: agents only take unassigned chats or release their own; supervisors and admins do anything', async () => {
+    const mk = async (name: string, userId?: string) =>
+      (await ok(`mutation($i: CreateAssigneeInput!) { createAssignee(input: $i) { id } }`, { i: { name, color: '#047857', userId } }, admin.token)).createAssignee.id;
+    const amanDesk = await mk('Aman desk', agent.id);
+    const saraDesk = await mk('Sara desk', sup.id);
+    const pool = await mk('Pool');
+
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: pool }, agent.token), 'FORBIDDEN'); // to someone else
+    assert.equal((await ok(ASSIGN, { c: conv, a: amanDesk }, agent.token)).assignConversation.assignee.name, 'Aman desk'); // take
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: pool }, agent.token), 'FORBIDDEN'); // reassign own to someone else
+    assert.equal((await ok(ASSIGN, { c: conv, a: null }, agent.token)).assignConversation.assignee, null); // release
+    await ok(ASSIGN, { c: conv, a: saraDesk }, sup.token);
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: amanDesk }, agent.token), 'FORBIDDEN'); // take someone else's chat
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: null }, agent.token), 'FORBIDDEN'); // unassign someone else
+    assert.equal((await ok(ASSIGN, { c: conv, a: amanDesk }, sup.token)).assignConversation.assignee.name, 'Aman desk'); // supervisor reassigns
+    assert.equal((await ok(ASSIGN, { c: conv, a: pool }, admin.token)).assignConversation.assignee.name, 'Pool');
+    // A label grant doesn't grant reassigning
+    await ok(`mutation($u: ID!) { setLabelPermission(userId: $u, canManageLabels: true) { userId } }`, { u: agent.id }, admin.token);
+    assert.equal(await errorCode(ASSIGN, { c: conv, a: amanDesk }, agent.token), 'FORBIDDEN');
+    // Every member still sees the chat and could reply to it
+    assert.ok((await ok(CONVERSATIONS, {}, agent.token)).conversations.nodes.some((c: any) => c.id === conv));
+  });
+
+  test('system settings and message moderation stay admin-only (GraphQL and REST)', async () => {
+    const connect = `mutation { connectWhatsApp(input: { wabaId: "1", phoneNumberId: "1", accessToken: "short" }) { wabaId } }`;
+    for (const t of [sup.token, agent.token]) {
+      assert.equal(await errorCode(connect, undefined, t), 'FORBIDDEN');
+      assert.equal((await rest('POST', '/settings/whatsapp', t, { wabaId: '1', phoneNumberId: '1', accessToken: 'short' })).status, 403);
+    }
+    assert.equal(await errorCode(connect, undefined, admin.token), 'BAD_USER_INPUT'); // past the permission check
+    const m = await prisma.message.create({ data: { conversationId: conv, direction: 'out', type: 'text', body: 'agent wrote', status: 'sent', sentById: agent.id } });
+    const edit = `mutation($i: EditMessageInput!) { editMessage(input: $i) { body } }`;
+    assert.equal(await errorCode(edit, { i: { messageId: m.id, body: 'supervisor edit', version: 0 } }, sup.token), 'FORBIDDEN');
+    assert.equal((await ok(edit, { i: { messageId: m.id, body: 'admin edit', version: 0 } }, admin.token)).editMessage.body, 'admin edit');
+  });
+});
+
+describe('assign to people (supervisors and agents) from the Assign dropdown', () => {
+  type U = { id: string; token: string };
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { id assignee { id name color userId } } }`;
+  const TO_ASSIGNEE = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { id assignee { id name userId } } }`;
+  let ws: { token: string; workspaceId: string };
+  let owner: U;
+  let sup: U;
+  let agent: U;
+  let other: U;
+  let c1: string;
+  let c2: string;
+  let c3: string;
+
+  async function member(name: string, role: string): Promise<U> {
+    const email = `e2e-people-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    const { login } = await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } });
+    return { id: user.id, token: login.token };
+  }
+  const linkedCount = (userId: string) => prisma.assignee.count({ where: { workspaceId: ws.workspaceId, userId } });
+
+  before(async () => {
+    ws = await newWorkspace('people');
+    owner = { id: (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id, token: ws.token };
+    sup = await member('Sana', 'supervisor');
+    agent = await member('Arun', 'agent');
+    other = await member('Omar', 'agent');
+    for (const [waId, name] of [['917000000001', 'C One'], ['917000000002', 'C Two'], ['917000000003', 'C Three']])
+      await ok(SIMULATE, { i: { waId, name, body: 'hi' } }, ws.token);
+    const nodes = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes;
+    [c1, c2, c3] = ['C One', 'C Two', 'C Three'].map((n) => nodes.find((c: any) => c.contact.name === n).id);
+  });
+
+  test('the dropdown lists live members with their roles; removed members disappear', async () => {
+    const names = async () => (await ok(`{ workspaceMembers { id name role } }`, undefined, agent.token)).workspaceMembers.map((m: any) => [m.name, m.role]);
+    assert.deepEqual(await names(), [['Arun', 'agent'], ['Omar', 'agent'], ['people', 'owner'], ['Sana', 'supervisor']]);
+    const temp = await member('Tina', 'agent');
+    assert.ok((await names()).some(([n]: string[]) => n === 'Tina'));
+    await ok(`mutation($u: ID!) { removeMember(userId: $u) }`, { u: temp.id }, owner.token);
+    assert.ok(!(await names()).some(([n]: string[]) => n === 'Tina'));
+    assert.equal(await errorCode(TO_MEMBER, { c: c1, m: temp.id }, owner.token), 'NOT_FOUND'); // removed: can't be assigned
+  });
+
+  test('supervisors and admins assign to either role; the person gets one linked assignee in their role colour', async () => {
+    const r = (await ok(TO_MEMBER, { c: c1, m: agent.id }, sup.token)).assignConversation.assignee;
+    assert.deepEqual([r.name, r.color, r.userId], ['Arun', '#047857', agent.id]);
+    const again = (await ok(TO_MEMBER, { c: c2, m: agent.id }, owner.token)).assignConversation.assignee;
+    assert.equal(again.id, r.id); // reused, not duplicated
+    assert.equal(await linkedCount(agent.id), 1);
+    const toSup = (await ok(TO_MEMBER, { c: c1, m: sup.id }, owner.token)).assignConversation.assignee; // reassign to a supervisor
+    assert.deepEqual([toSup.name, toSup.color, toSup.userId], ['Sana', '#1d4ed8', sup.id]);
+    assert.equal((await ok(TO_MEMBER, { c: c1, m: agent.id }, sup.token)).assignConversation.assignee.userId, agent.id); // and back
+
+    // Counts, filters and "Assigned to me" work exactly as for any assignee
+    const counts = (await ok(`{ assignees { name userId conversationCount } }`, undefined, owner.token)).assignees;
+    assert.deepEqual(counts.map((a: any) => [a.name, a.conversationCount]), [['Arun', 2], ['Sana', 0]]);
+    assert.deepEqual((await ok(`{ conversations(assignee: "me") { nodes { id } } }`, undefined, agent.token)).conversations.nodes.map((c: any) => c.id).sort(), [c1, c2].sort());
+    assert.deepEqual((await ok(`query($a: ID) { conversations(assignee: $a) { nodes { id } } }`, { a: r.id }, owner.token)).conversations.nodes.length, 2);
+  });
+
+  test('agents only take an unassigned chat for themselves or release their own; refused requests create nothing', async () => {
+    assert.equal(await errorCode(TO_MEMBER, { c: c3, m: other.id }, agent.token), 'FORBIDDEN'); // someone else
+    assert.equal(await linkedCount(other.id), 0);
+    assert.equal(await errorCode(TO_MEMBER, { c: c1, m: other.id }, agent.token), 'FORBIDDEN');
+    // Omar can't take Arun's chat (refused before his assignee is created)
+    assert.equal(await errorCode(TO_MEMBER, { c: c1, m: other.id }, other.token), 'FORBIDDEN');
+    assert.equal(await linkedCount(other.id), 0);
+    // Omar takes the unassigned chat: his assignee is created on first use
+    assert.equal((await ok(TO_MEMBER, { c: c3, m: other.id }, other.token)).assignConversation.assignee.userId, other.id);
+    assert.equal(await linkedCount(other.id), 1);
+    assert.equal((await ok(TO_MEMBER, { c: c3, m: other.id }, other.token)).assignConversation.assignee.userId, other.id); // no-op
+    assert.equal(await errorCode(TO_ASSIGNEE, { c: c3, a: null }, agent.token), 'FORBIDDEN'); // Arun can't release Omar's
+    assert.equal((await ok(TO_ASSIGNEE, { c: c3, a: null }, other.token)).assignConversation.assignee, null); // Omar releases his own
+  });
+
+  test('any member of this workspace can be assigned, admins included; outsiders and bad input are refused', async () => {
+    // Admins/owners too, so their chats show in their My Chats (purple, the admin colour)
+    const toOwner = (await ok(TO_MEMBER, { c: c3, m: owner.id }, sup.token)).assignConversation.assignee;
+    assert.deepEqual([toOwner.color, toOwner.userId], ['#6d28d9', owner.id]);
+    await ok(TO_ASSIGNEE, { c: c3, a: null }, owner.token);
+    const bUser = (await ok(`{ me { user { id } } }`, undefined, B.token)).me.user.id;
+    assert.equal(await errorCode(TO_MEMBER, { c: c3, m: bUser }, owner.token), 'NOT_FOUND'); // another workspace
+    assert.equal(await errorCode(TO_MEMBER, { c: c3, m: agent.id }, B.token), 'NOT_FOUND'); // their chat isn't visible to B
+    const desk = (await ok(`mutation { createAssignee(input: { name: "Desk", color: "#123456" }) { id } }`, undefined, owner.token)).createAssignee;
+    const both = await gql(`mutation($c: ID!, $a: ID, $m: ID) { assignConversation(conversationId: $c, assigneeId: $a, memberId: $m) { id } }`, { c: c3, a: desk.id, m: agent.id }, owner.token);
+    assert.equal(both.errors?.[0].extensions?.code, 'BAD_USER_INPUT');
+    // Assigning by assignee id (existing desks) still works as before
+    assert.equal((await ok(TO_ASSIGNEE, { c: c3, a: desk.id }, sup.token)).assignConversation.assignee.name, 'Desk');
+  });
+
+  test("a name already used by another assignee gets a number; notifications and events are the same as before", async () => {
+    await ok(`mutation { createAssignee(input: { name: "Nadia", color: "#123456" }) { id } }`, undefined, owner.token); // unlinked, same name
+    const nadia = await member('Nadia', 'agent');
+    const live = connectSocket(API, { auth: { token: nadia.token }, transports: ['websocket'], forceNew: true });
+    const events: { event: string; data: any }[] = [];
+    live.onAny((event, data) => events.push({ event, data }));
+    await new Promise<void>((resolve) => live.on('connect', () => resolve()));
+
+    const r = (await ok(TO_MEMBER, { c: c3, m: nadia.id }, sup.token)).assignConversation.assignee;
+    await new Promise((res) => setTimeout(res, 300));
+    live.disconnect();
+    assert.deepEqual([r.name, r.userId], ['Nadia (2)', nadia.id]);
+    assert.ok(events.some((e) => e.event === 'assignee:saved' && e.data.id === r.id && e.data.conversationCount === 0));
+    assert.deepEqual(events.filter((e) => e.event === 'conversation:assigned').map((e) => e.data.assignee.id), [r.id]);
+    assert.deepEqual(events.filter((e) => e.event === 'assignment:you').map((e) => [e.data.conversationId, e.data.actorName]), [[c3, 'Sana']]);
+    assert.ok(events.some((e) => e.event === 'activity:new' && e.data.type === 'reassigned' && JSON.parse(e.data.data).previous === 'Desk'));
+  });
+});
+
+describe('"Add person" from the Assign dropdown', () => {
+  const INVITE = `mutation($i: InviteMemberInput!) { inviteMember(input: $i) { invited emailSent member { userId name email role } } }`;
+  const MEMBERS = `{ workspaceMembers { id name role } }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { assignee { name color userId } } }`;
+  let ws: { token: string; workspaceId: string };
+  let sup: { id: string; token: string };
+  let conv: string;
+
+  before(async () => {
+    ws = await newWorkspace('addperson');
+    const email = `e2e-addperson-sup-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name: 'Suri', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'supervisor', workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    sup = { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
+    await ok(SIMULATE, { i: { waId: '917100000001', name: 'Kiran', body: 'hi' } }, ws.token);
+    conv = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+  });
+
+  test('an admin adds a new person: one account, password-setup invite, listed at once with the role, assignable straight away', async () => {
+    const email = `e2e-addperson-new-${run}@example.com`;
+    const r = (await ok(INVITE, { i: { name: 'Devi', email, role: 'agent' } }, ws.token)).inviteMember;
+    created.userIds.push(r.member.userId);
+    assert.deepEqual([r.invited, r.member.role], [true, 'agent']);
+    assert.equal(await prisma.user.count({ where: { email } }), 1);
+    const invite = await prisma.passwordResetToken.findFirstOrThrow({ where: { userId: r.member.userId, usedAt: null } });
+    assert.ok(invite.expiresAt.getTime() - Date.now() > 6 * 24 * 3600 * 1000); // the 7-day invite link
+    // Not signed in with a password nobody knows
+    assert.equal((await gql(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).errors?.[0].extensions?.code, 'INVALID_CREDENTIALS');
+
+    const listed = (await ok(MEMBERS, undefined, sup.token)).workspaceMembers.find((m: any) => m.id === r.member.userId);
+    assert.deepEqual(listed, { id: r.member.userId, name: 'Devi', role: 'agent' });
+    const a = (await ok(TO_MEMBER, { c: conv, m: r.member.userId }, sup.token)).assignConversation.assignee;
+    assert.deepEqual([a.name, a.color, a.userId], ['Devi', '#047857', r.member.userId]);
+  });
+
+  test('an existing account is added to the workspace (no duplicate) with the chosen role', async () => {
+    const bUser = await prisma.user.findFirstOrThrow({ where: { members: { some: { workspaceId: B.workspaceId, role: 'owner' } } } });
+    const r = (await ok(INVITE, { i: { name: 'ignored', email: bUser.email, role: 'supervisor' } }, ws.token)).inviteMember;
+    assert.deepEqual([r.invited, r.member.userId, r.member.name, r.member.role], [false, bUser.id, bUser.name, 'supervisor']);
+    assert.equal(await prisma.user.count({ where: { email: bUser.email } }), 1);
+    assert.ok((await ok(MEMBERS, undefined, ws.token)).workspaceMembers.some((m: any) => m.id === bUser.id && m.role === 'supervisor'));
+    assert.equal(await errorCode(INVITE, { i: { name: 'x', email: bUser.email, role: 'agent' } }, ws.token), 'MEMBER_EXISTS');
+    await prisma.member.delete({ where: { userId_workspaceId: { userId: bUser.id, workspaceId: ws.workspaceId } } });
+  });
+
+  test('only admins can add people; nothing is created when refused', async () => {
+    const email = `e2e-addperson-refused-${run}@example.com`;
+    assert.equal(await errorCode(INVITE, { i: { name: 'Nope', email, role: 'agent' } }, sup.token), 'FORBIDDEN');
+    assert.equal((await gql(INVITE, { i: { name: 'Nope', email, role: 'agent' } })).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+    assert.equal(await prisma.user.count({ where: { email } }), 0);
+  });
+});
+
+describe('My Chats (conversations assigned to the signed-in user)', () => {
+  const MINE = `query($l: ID) { conversations(assignee: "me", labelId: $l) { nodes { id unread lastMessageAt lastMessage { body } contact { name } assignee { userId } } } }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { id } }`;
+  const UNASSIGN = `mutation($c: ID!) { assignConversation(conversationId: $c, assigneeId: null) { id } }`;
+  let ws: { token: string; workspaceId: string };
+  let sup: { id: string; token: string };
+  let ana: { id: string; token: string };
+  let ben: { id: string; token: string };
+  const ids: Record<string, string> = {};
+  const mine = async (token: string, labelId?: string) => (await ok(MINE, { l: labelId ?? null }, token)).conversations.nodes;
+  const mineIds = async (token: string, labelId?: string) => (await mine(token, labelId)).map((c: any) => c.id);
+
+  async function member(name: string, role: string) {
+    const email = `e2e-mychats-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    return { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
+  }
+
+  before(async () => {
+    ws = await newWorkspace('mychats');
+    sup = await member('Sid', 'supervisor');
+    ana = await member('Ana', 'agent');
+    ben = await member('Ben', 'agent');
+    for (const [waId, name] of [['917200000001', 'P1'], ['917200000002', 'P2'], ['917200000003', 'P3'], ['917200000004', 'P4']]) {
+      await ok(SIMULATE, { i: { waId, name, body: `hello from ${name}` } }, ws.token);
+      await new Promise((r) => setTimeout(r, 15)); // distinct lastMessageAt for the sort check
+    }
+    for (const c of (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes) ids[c.contact.name] = c.id;
+  });
+
+  test('only chats assigned to you, newest first, with unread counts and previews; nothing before you are linked', async () => {
+    assert.deepEqual(await mineIds(ana.token), []); // not linked to any assignee yet
+    await ok(TO_MEMBER, { c: ids.P1, m: ana.id }, sup.token);
+    await ok(TO_MEMBER, { c: ids.P3, m: ana.id }, sup.token);
+    await ok(TO_MEMBER, { c: ids.P2, m: ben.id }, sup.token);
+    const list = await mine(ana.token);
+    assert.deepEqual(list.map((c: any) => c.contact.name), ['P3', 'P1']); // newest first; Ben's P2 and unassigned P4 left out
+    assert.ok(list.every((c: any) => c.assignee.userId === ana.id && c.unread === 1 && c.lastMessage.body.startsWith('hello from')));
+    assert.deepEqual(await mineIds(ben.token), [ids.P2]);
+    assert.deepEqual(await mineIds(sup.token), []); // the supervisor assigned them but owns none
+    // The Inbox (no assignee filter) is unchanged: every member still sees every chat
+    assert.equal((await ok(CONVERSATIONS, {}, ben.token)).conversations.nodes.length, 4);
+  });
+
+  test('label and unread information combine with My Chats', async () => {
+    const label = (await ok(`mutation { createLabel(input: { name: "Urgent", color: "#d63384" }) { id } }`, undefined, sup.token)).createLabel;
+    const add = `mutation($c: ID!, $l: ID!) { addConversationLabel(conversationId: $c, labelId: $l) { id } }`;
+    await ok(add, { c: ids.P1, l: label.id }, sup.token);
+    await ok(add, { c: ids.P2, l: label.id }, sup.token); // Ben's
+    assert.deepEqual(await mineIds(ana.token, label.id), [ids.P1]);
+    await ok(`mutation($id: ID!) { markConversationRead(id: $id) { id } }`, { id: ids.P3 }, ana.token);
+    assert.deepEqual((await mine(ana.token)).map((c: any) => [c.contact.name, c.unread]), [['P3', 0], ['P1', 1]]);
+  });
+
+  test('assigning, reassigning and unassigning move chats in and out of My Chats, with live socket updates', async () => {
+    const live = connectSocket(API, { auth: { token: ana.token }, transports: ['websocket'], forceNew: true });
+    const events: { event: string; data: any }[] = [];
+    live.onAny((event, data) => events.push({ event, data }));
+    await new Promise<void>((resolve) => live.on('connect', () => resolve()));
+
+    await ok(TO_MEMBER, { c: ids.P4, m: ana.id }, sup.token); // assigned to Ana
+    assert.ok((await mineIds(ana.token)).includes(ids.P4));
+    await ok(TO_MEMBER, { c: ids.P1, m: ben.id }, sup.token); // reassigned away from Ana
+    assert.ok(!(await mineIds(ana.token)).includes(ids.P1));
+    assert.ok((await mineIds(ben.token)).includes(ids.P1));
+    await ok(UNASSIGN, { c: ids.P3 }, ana.token); // Ana releases her own
+    assert.deepEqual(await mineIds(ana.token), [ids.P4]);
+    await new Promise((r) => setTimeout(r, 300));
+    live.disconnect();
+
+    const assigned = events.filter((e) => e.event === 'conversation:assigned').map((e) => [e.data.conversationId, e.data.assignee?.userId ?? null]);
+    assert.deepEqual(assigned, [[ids.P4, ana.id], [ids.P1, ben.id], [ids.P3, null]]);
+    assert.deepEqual(events.filter((e) => e.event === 'assignment:you').map((e) => e.data.conversationId), [ids.P4]);
+    assert.deepEqual(events.filter((e) => e.event === 'assignment:removed').map((e) => e.data.conversationId), [ids.P1]); // not P3: she did it herself
+  });
+
+  test("another workspace's chats never appear, and signed-out requests are refused", async () => {
+    assert.deepEqual(await mineIds(B.token), []);
+    assert.equal((await gql(MINE, { l: null })).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+  });
+});
+
+describe('My Chats regressions: admins, name-only assignees, same-named users', () => {
+  const MINE = `{ conversations(assignee: "me") { nodes { id } } }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { assignee { id name userId } } }`;
+  const TO_ASSIGNEE = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { assignee { id } } }`;
+  let ws: { token: string; workspaceId: string };
+  let ownerId: string;
+  let twin: { id: string; token: string }; // a different account with the owner's name
+  const ids: Record<string, string> = {};
+  const mine = async (token: string) => (await ok(MINE, undefined, token)).conversations.nodes.map((c: any) => c.id).sort();
+
+  before(async () => {
+    ws = await newWorkspace('Rhea'); // the owner's name is the label: "Rhea"
+    ownerId = (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id;
+    const email = `e2e-twin-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name: 'rhea', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'supervisor', workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    twin = { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
+    for (const [waId, name] of [['917500000001', 'R1'], ['917500000002', 'R2'], ['917500000003', 'R3']])
+      await ok(SIMULATE, { i: { waId, name, body: 'hi' } }, ws.token);
+    for (const c of (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes) ids[c.contact.name] = c.id;
+  });
+
+  test('an admin (the owner) can assign a chat to themselves and it shows in their My Chats', async () => {
+    assert.deepEqual(await mine(ws.token), []);
+    const a = (await ok(TO_MEMBER, { c: ids.R1, m: ownerId }, ws.token)).assignConversation.assignee;
+    assert.equal(a.userId, ownerId);
+    assert.deepEqual(await mine(ws.token), [ids.R1]);
+    assert.deepEqual(await mine(twin.token), []); // same name, different account: not theirs
+  });
+
+  test('a name-only assignee never counts as you, even with your exact name; linking it does', async () => {
+    const legacy = (await ok(`mutation { createAssignee(input: { name: "Rhea Desk", color: "#0f2919" }) { id } }`, undefined, ws.token)).createAssignee;
+    const named = (await ok(`mutation { createAssignee(input: { name: "rhea legacy", color: "#0f2919" }) { id } }`, undefined, ws.token)).createAssignee;
+    await ok(TO_ASSIGNEE, { c: ids.R2, a: legacy.id }, ws.token);
+    await ok(TO_ASSIGNEE, { c: ids.R3, a: named.id }, ws.token);
+    assert.deepEqual(await mine(ws.token), [ids.R1]); // R2/R3 are on unlinked assignees
+    assert.deepEqual(await mine(twin.token), []);
+    // Linking the name-only assignee to the twin makes its chats theirs, not the owner's
+    await ok(`mutation($id: ID!, $u: ID) { updateAssignee(id: $id, input: { userId: $u }) { id } }`, { id: named.id, u: twin.id }, ws.token);
+    assert.deepEqual(await mine(twin.token), [ids.R3]);
+    assert.deepEqual(await mine(ws.token), [ids.R1]);
+    // And assigning the twin as a person reuses that linked assignee (no "(2)" duplicate)
+    const again = (await ok(TO_MEMBER, { c: ids.R2, m: twin.id }, ws.token)).assignConversation.assignee;
+    assert.equal(again.id, named.id);
+    assert.deepEqual(await mine(twin.token), [ids.R2, ids.R3].sort());
+  });
+
+  test('reassigning away and unassigning take chats out of My Chats straight away', async () => {
+    await ok(TO_MEMBER, { c: ids.R1, m: twin.id }, ws.token);
+    assert.deepEqual(await mine(ws.token), []);
+    assert.ok((await mine(twin.token)).includes(ids.R1));
+    await ok(TO_ASSIGNEE, { c: ids.R1, a: null }, twin.token);
+    assert.ok(!(await mine(twin.token)).includes(ids.R1));
+  });
+});
+
+describe('quick replies ("/" in the message box)', () => {
+  const Q = `query($s: String, $f: Int) { quickReplies(search: $s, first: $f) { id shortcut description category } }`;
+  let ws: { token: string; workspaceId: string };
+  let agentToken: string;
+  const shortcuts = async (search?: string | null, token = ws.token, first?: number) =>
+    (await ok(Q, { s: search ?? null, f: first ?? null }, token)).quickReplies.map((r: any) => r.shortcut);
+
+  test('the dump parser reads rows as data: quotes, escapes, line breaks, NULLs, UTC dates; nothing executed', () => {
+    const sql = `DROP TABLE IF EXISTS \`klever_tyres_chat\`;
+CREATE TABLE \`klever_tyres_chat\` (\`id\` int);
+INSERT INTO \`klever_tyres_chat\` (\`id\`, \`shortcut\`, \`description\`, \`category\`, \`created_by\`, \`updated_by\`, \`status\`, \`sort_order\`, \`created_at\`, \`updated_at\`) VALUES
+(1, 'nostock', 'It\\'s out (for now), sorry; ask again', 'car_tyres', NULL, 6, 1, 2, '2026-07-16 15:38:14', NULL),
+(2, 'Hours', 'Open\\nFri: 09:00 - 18:00\\n''Closed'' Sunday', NULL, NULL, NULL, 0, 1, NULL, NULL),
+(3, '  ', 'blank shortcut skipped', 'other', NULL, NULL, 1, 3, NULL, NULL);`;
+    const rows = parseQuickReplyDump(sql);
+    assert.equal(rows.length, 2);
+    assert.deepEqual([rows[0].shortcut, rows[0].description, rows[0].category, rows[0].updatedBy, rows[0].status], ['nostock', "It's out (for now), sorry; ask again", 'car_tyres', 6n, 1]);
+    assert.equal(rows[0].createdAt?.toISOString(), '2026-07-16T15:38:14.000Z');
+    assert.deepEqual([rows[1].description, rows[1].category, rows[1].status, rows[1].createdAt], ["Open\nFri: 09:00 - 18:00\n'Closed' Sunday", null, 0, null]);
+  });
+
+  before(async () => {
+    ws = await newWorkspace('quick');
+    const email = `e2e-quick-agent-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name: 'Q Agent', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    agentToken = (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token;
+    const r = (shortcut: string, description: string, category: string, sortOrder: number, status = 1) => ({ workspaceId: ws.workspaceId, shortcut, description, category, sortOrder, status });
+    await prisma.quickReply.createMany({
+      data: [
+        r('greetings', 'Hi there! Welcome to TyresCart.ae.', 'car_tyres', 30),
+        r('tyrescart', 'TyresCart.ae are an independent online business.', 'car_tyres', 48),
+        r('Stockcheck', 'Kindly allow me a moment to confirm the stock.', 'car_tyres', 6),
+        r('Wheelalignment', 'Alignment check is free; fixing starts from AED 150+', 'car_services', 12),
+        r('Insurance Quote', 'Comprehensive or third party: 100% covered_', 'car_insurance', 66),
+        r('tyrescart-old', 'Disabled duplicate', 'other', 1, 0),
+        r('mytyrescartlink', 'Order at the shop', 'other', 5),
+      ],
+    });
+    // Another workspace's reply must never show here
+    await prisma.quickReply.create({ data: { workspaceId: B.workspaceId, shortcut: 'tyrescart', description: 'B only', category: 'other' } });
+  });
+
+  test('"/" alone lists the workspace\'s enabled replies in their sort order; disabled ones are hidden', async () => {
+    assert.deepEqual(await shortcuts(), ['mytyrescartlink', 'Stockcheck', 'Wheelalignment', 'greetings', 'tyrescart', 'Insurance Quote']);
+    assert.deepEqual(await shortcuts('', agentToken), await shortcuts()); // agents use them too
+  });
+
+  test('"/tyrescart": case-insensitive partial match on shortcut, text and category; exact shortcut first', async () => {
+    assert.deepEqual(await shortcuts('tyrescart'), ['tyrescart', 'mytyrescartlink', 'greetings']);
+    assert.deepEqual(await shortcuts('TYRESCART'), ['tyrescart', 'mytyrescartlink', 'greetings']);
+    assert.deepEqual(await shortcuts('tyresc'), ['tyrescart', 'mytyrescartlink', 'greetings']); // starts-with before contains
+    assert.deepEqual(await shortcuts('stock'), ['Stockcheck']); // shortcut and text
+    assert.deepEqual(await shortcuts('car_services'), ['Wheelalignment']); // category
+    assert.deepEqual(await shortcuts('car services'), ['Wheelalignment']); // as the menu shows it ("car services")
+    assert.deepEqual(await shortcuts('CAR  SERVICES'), ['Wheelalignment']);
+    assert.deepEqual(await shortcuts('car insurance'), ['Insurance Quote']);
+    assert.deepEqual(await shortcuts('  ALIGN '), ['Wheelalignment']); // trimmed
+    assert.deepEqual(await shortcuts('nothing-like-this'), []);
+  });
+
+  test('% and _ are matched literally, results can be limited, and input is validated', async () => {
+    assert.deepEqual(await shortcuts('100%'), ['Insurance Quote']);
+    assert.deepEqual(await shortcuts('d_'), ['Insurance Quote']); // "covered_", not any "d" + one character
+    assert.deepEqual(await shortcuts('%'), ['Insurance Quote']); // only the reply that really contains "%"
+    assert.deepEqual(await shortcuts('\\'), []); // a backslash is just a character too
+    assert.deepEqual(await shortcuts(null, ws.token, 2), ['mytyrescartlink', 'Stockcheck']);
+    assert.equal(await errorCode(Q, { s: 'x'.repeat(101) }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(Q, { f: 0 }, ws.token), 'BAD_USER_INPUT');
+  });
+
+  test('workspace isolation and sign-in are enforced', async () => {
+    assert.deepEqual((await ok(Q, { s: 'tyrescart' }, B.token)).quickReplies.map((r: any) => r.description), ['B only']);
+    assert.equal((await gql(Q, { s: 'tyrescart' })).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+  });
+});
+
+describe('multi-line messages (Shift+Enter and quick replies)', () => {
+  const FIELDS = 'id body status';
+  let ws: { token: string; workspaceId: string };
+  let conversationId: string;
+
+  before(async () => {
+    ws = await newWorkspace('multiline');
+    await prisma.whatsAppAccount.create({
+      data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-multiline-${run}`, accessToken: 'fake-token-e2e' },
+    });
+    await ok(SIMULATE, { i: { waId: '917800000001', name: 'Lines', body: 'hours?' } }, ws.token); // opens the 24h window
+    conversationId = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+  });
+
+  test('line breaks are stored and returned exactly, when sending and when editing', async () => {
+    // Like the "Hours" quick reply: several lines, including an empty one
+    const body = "We're currently open\nOur business hours are:\n\nThursday: 09:00 - 18:00\nSunday: Closed";
+    const sent = (await ok(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { ${FIELDS} } }`, { i: { conversationId, body } }, ws.token)).sendTextMessage;
+    assert.equal(sent.body, body); // Meta refuses the fake number, but the message is saved as typed
+    const page = (await ok(MESSAGES, { id: conversationId }, ws.token)).messages.nodes;
+    assert.equal(page.find((m: any) => m.id === sent.id).body, body);
+
+    const edited = (await ok(`mutation($i: EditMessageInput!) { editMessage(input: $i) { body } }`, { i: { messageId: sent.id, body: `  Line one\nLine two\n` , version: 0 } }, ws.token)).editMessage;
+    assert.equal(edited.body, 'Line one\nLine two'); // only the ends are trimmed; inner line breaks stay
+  });
+});
+
+describe('emojis (utf8mb4) survive storage, the API, quick replies and sending', () => {
+  // 4-byte emojis, a flag (two code points), a ZWJ sequence, a variation selector, and 3-byte symbols
+  const EMOJI = 'Welcome 😊🤗🚘🇦🇪 👨‍🔧 🛡️ ✅ ☎️ — بطاريات';
+  let ws: { token: string; workspaceId: string };
+  let conversationId: string;
+
+  before(async () => {
+    ws = await newWorkspace('emoji');
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-emoji-${run}`, accessToken: 'fake-token-e2e' } });
+    await ok(SIMULATE, { i: { waId: '917900000009', name: 'Emoji 🚗 Customer', body: 'Hi 👋' } }, ws.token);
+    conversationId = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+  });
+
+  test('the dump parser keeps emojis exactly, and keeps "?" from damaged exports as-is (never guesses)', () => {
+    const sql = `INSERT INTO \`klever_tyres_chat\` (\`id\`, \`shortcut\`, \`description\`, \`category\`, \`created_by\`, \`updated_by\`, \`status\`, \`sort_order\`, \`created_at\`, \`updated_at\`) VALUES
+(1, 'ok', '${EMOJI}', 'other', NULL, NULL, 1, 1, NULL, NULL),
+(2, 'damaged', 'Just to let you know ?\\n\\n?️ Insurance\\n? Battery', 'other', NULL, NULL, 1, 2, NULL, NULL);`;
+    const [good, damaged] = parseQuickReplyDump(sql);
+    assert.equal(good.description, EMOJI);
+    assert.ok(Buffer.from(good.description!).equals(Buffer.from(EMOJI)));
+    assert.equal(damaged.description, 'Just to let you know ?\n\n?️ Insurance\n? Battery');
+  });
+
+  test('lost-emoji detection: flags "?" left by a 3-byte connection, not real question marks', () => {
+    assert.equal(possibleLostEmojis('Just to let you know ?\n\n?️ Insurance\n? Battery'), 3);
+    assert.equal(possibleLostEmojis('Could you share it with us?\n\n? Car Make'), 1);
+    assert.equal(possibleLostEmojis('How can we help? Is it urgent?'), 0);
+    assert.equal(possibleLostEmojis(EMOJI), 0);
+    assert.equal(possibleLostEmojis(null), 0);
+  });
+
+  test('quick replies: emojis stored, returned by the API, and searchable exactly', async () => {
+    await prisma.quickReply.createMany({
+      data: [
+        { workspaceId: ws.workspaceId, shortcut: 'welcome😊', description: EMOJI, category: 'other', sortOrder: 1 },
+        { workspaceId: ws.workspaceId, shortcut: 'plain', description: 'No emoji here', category: 'other', sortOrder: 2 },
+        { workspaceId: ws.workspaceId, shortcut: 'hug', description: 'Thanks 🤗', category: 'other', sortOrder: 3 },
+      ],
+    });
+    const stored = await prisma.quickReply.findFirstOrThrow({ where: { workspaceId: ws.workspaceId, shortcut: 'welcome😊' } });
+    assert.equal(stored.description, EMOJI);
+    const hex = (await prisma.$queryRaw<any[]>`SELECT HEX(description) h FROM klever_tyres_chat WHERE id = ${stored.id}`)[0].h;
+    assert.equal(hex, Buffer.from(EMOJI).toString('hex').toUpperCase()); // the bytes on disk, not just the round trip
+
+    const Q = `query($s: String) { quickReplies(search: $s) { shortcut description } }`;
+    const all = (await ok(Q, { s: null }, ws.token)).quickReplies;
+    assert.equal(all.find((r: any) => r.shortcut === 'welcome😊').description, EMOJI);
+    assert.deepEqual((await ok(Q, { s: '🤗' }, ws.token)).quickReplies.map((r: any) => r.shortcut).sort(), ['hug', 'welcome😊']);
+    assert.deepEqual((await ok(Q, { s: '🇦🇪' }, ws.token)).quickReplies.map((r: any) => r.shortcut), ['welcome😊']);
+    assert.deepEqual((await ok(Q, { s: 'welcome😊' }, ws.token)).quickReplies[0].shortcut, 'welcome😊');
+  });
+
+  test('sending and editing a message keeps emojis (the inserted quick reply text is sent as-is)', async () => {
+    const sent = (await ok(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { id body } }`, { i: { conversationId, body: EMOJI } }, ws.token)).sendTextMessage;
+    assert.equal(sent.body, EMOJI);
+    const hex = (await prisma.$queryRaw<any[]>`SELECT HEX(body) h FROM Message WHERE id = ${sent.id}`)[0].h;
+    assert.equal(hex, Buffer.from(EMOJI).toString('hex').toUpperCase());
+    const listed = (await ok(MESSAGES, { id: conversationId }, ws.token)).messages.nodes;
+    assert.equal(listed.find((m: any) => m.id === sent.id).body, EMOJI);
+    assert.equal(listed.find((m: any) => m.direction === 'in').body, 'Hi 👋'); // incoming too
+    const edited = (await ok(`mutation($i: EditMessageInput!) { editMessage(input: $i) { body } }`, { i: { messageId: sent.id, body: `${EMOJI} 🔧`, version: 0 } }, ws.token)).editMessage;
+    assert.equal(edited.body, `${EMOJI} 🔧`);
+    const contact = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].contact;
+    assert.equal(contact.name, 'Emoji 🚗 Customer');
+  });
+});
+
+describe('regression: "Welcome TyresCart.ae Customer" quick reply (emojis lost before export)', () => {
+  // The row exactly as it is in klever_tyres_chat.sql (id 53 there). Its "?" are already plain 0x3F bytes.
+  const DUMP_ROW = "INSERT INTO `klever_tyres_chat` (`id`, `shortcut`, `description`, `category`, `created_by`, `updated_by`, `status`, `sort_order`, `created_at`, `updated_at`) VALUES\n(53, 'Welcome TyresCart.ae Customer', 'Welcome to TyresCart.ae \\n\\nWe’re more than just Tyres — we’ve got your car covered with:\\n\\n? Car Tyres having all major Brands \\n?️ Car Insurance (3rd Party & Comprehensive)\\n? Battery Replacement & Emergency Service\\n? Brake Pad Replacement & Service\\n?️ Essential Quick Car Services (Oil/AC/etc)\\n\\n? Need help anytime? Just drop us a message — Happy to assist ?', 'other', NULL, 6, 1, 52, '2026-07-16 15:38:15', '2026-07-22 12:17:56');";
+  let ws: { token: string; workspaceId: string };
+
+  before(async () => {
+    ws = await newWorkspace('welcome-regression');
+  });
+
+  test('parsed byte-for-byte from the dump, with its 7 lost emojis flagged and no emoji invented', () => {
+    const [r] = parseQuickReplyDump(DUMP_ROW);
+    assert.deepEqual([r.shortcut, r.category, r.status, r.sortOrder, Number(r.updatedBy)], ['Welcome TyresCart.ae Customer', 'other', 1, 52, 6]);
+    assert.ok(r.description!.startsWith('Welcome to TyresCart.ae \n\nWe\u2019re more than just Tyres'));
+    assert.equal(possibleLostEmojis(r.description), 7);
+    assert.equal((r.description!.match(/\?/g) ?? []).length, 8); // 7 lost emojis + the real "anytime?"
+    assert.equal((r.description!.match(/\?\uFE0F/g) ?? []).length, 2); // leftover variation selectors: the 3-byte-connection fingerprint
+    assert.ok(!/\p{Extended_Pictographic}/u.test(r.description!)); // nothing for the app to recover
+  });
+
+  test('stored and returned by the API exactly as imported: the app neither drops nor guesses characters', async () => {
+    const [r] = parseQuickReplyDump(DUMP_ROW);
+    await prisma.quickReply.create({ data: { ...r, workspaceId: ws.workspaceId } });
+    const api = (await ok(`query($s: String) { quickReplies(search: $s) { shortcut description } }`, { s: 'Welcome TyresCart' }, ws.token)).quickReplies;
+    assert.equal(api[0].shortcut, 'Welcome TyresCart.ae Customer');
+    assert.ok(Buffer.from(api[0].description).equals(Buffer.from(r.description!)));
+  });
+
+  test('once the original text is restored, emojis in those places come through intact', async () => {
+    // Placeholders only (the real emojis must come from the original reply); 4-byte, with variation selectors
+    const [r] = parseQuickReplyDump(DUMP_ROW);
+    const restored = r.description!.replace(/\?\uFE0F/g, '\u{1F6E1}\uFE0F').replace(/(^|\n)\? /g, '$1\u{1F697} ').replace(/assist \?$/, 'assist \u{1F60A}');
+    assert.equal(possibleLostEmojis(restored), 0);
+    const saved = await prisma.quickReply.create({ data: { ...r, shortcut: 'Welcome restored', description: restored, workspaceId: ws.workspaceId } });
+    const back = (await ok(`query($s: String) { quickReplies(search: $s) { description } }`, { s: 'Welcome restored' }, ws.token)).quickReplies[0].description;
+    assert.ok(Buffer.from(back).equals(Buffer.from(restored)));
+    const hex = (await prisma.$queryRaw<any[]>`SELECT HEX(description) h FROM klever_tyres_chat WHERE id = ${saved.id}`)[0].h;
+    assert.equal(hex, Buffer.from(restored).toString('hex').toUpperCase()); // 4-byte emojis on disk (utf8mb4)
+  });
+});
+
+describe('assignment audit fixes: link/unlink/delete rights, login workspace, assigning several chats', () => {
+  type U = { id: string; token: string; email: string };
+  const CREATE = `mutation($i: CreateAssigneeInput!) { createAssignee(input: $i) { id name color userId } }`;
+  const UPDATE = `mutation($id: ID!, $i: UpdateAssigneeInput!) { updateAssignee(id: $id, input: $i) { id name color userId } }`;
+  const DELETE = `mutation($id: ID!) { deleteAssignee(id: $id) }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { assignee { id userId } } }`;
+  let ws: { token: string; workspaceId: string };
+  let sup: U;
+  let granted: U; // agent with the label-management grant
+  let agent: U;
+  const chats: string[] = [];
+
+  async function member(name: string, role: string): Promise<U> {
+    const email = `e2e-auditfix-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    const { login } = await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } });
+    return { id: user.id, token: login.token, email };
+  }
+
+  before(async () => {
+    ws = await newWorkspace('auditfix');
+    sup = await member('Sumi', 'supervisor');
+    granted = await member('Gopal', 'agent');
+    agent = await member('Anil', 'agent');
+    await ok(`mutation($u: ID!) { setLabelPermission(userId: $u, canManageLabels: true) { userId } }`, { u: granted.id }, ws.token);
+    for (const n of [1, 2, 3, 4]) await ok(SIMULATE, { i: { waId: `91780000010${n}`, name: `Bulk ${n}`, body: 'hi' } }, ws.token);
+    chats.push(...(await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes.map((c: any) => c.id));
+  });
+
+  test('a label grant covers names and colours only: linking, unlinking, relinking and deleting need supervisor/admin', async () => {
+    // Allowed with the grant
+    const desk = (await ok(CREATE, { i: { name: 'Night desk', color: '#123456' } }, granted.token)).createAssignee;
+    assert.equal((await ok(UPDATE, { id: desk.id, i: { name: 'Night desk 2', color: '#654321' } }, granted.token)).updateAssignee.name, 'Night desk 2');
+    // Refused, and nothing changes
+    assert.equal(await errorCode(CREATE, { i: { name: 'Mine', color: '#000000', userId: granted.id } }, granted.token), 'FORBIDDEN');
+    assert.equal(await prisma.assignee.count({ where: { workspaceId: ws.workspaceId, name: 'Mine' } }), 0);
+    assert.equal(await errorCode(UPDATE, { id: desk.id, i: { userId: granted.id } }, granted.token), 'FORBIDDEN'); // link to self
+
+    const supDesk = (await ok(TO_MEMBER, { c: chats[0], m: sup.id }, sup.token)).assignConversation.assignee; // Sumi's chat
+    assert.equal(await errorCode(UPDATE, { id: supDesk.id, i: { userId: null } }, granted.token), 'FORBIDDEN'); // unlink
+    assert.equal(await errorCode(UPDATE, { id: supDesk.id, i: { userId: granted.id } }, granted.token), 'FORBIDDEN'); // relink to self
+    assert.equal(await errorCode(DELETE, { id: supDesk.id }, granted.token), 'FORBIDDEN'); // would unassign her chats
+    assert.equal(await errorCode(DELETE, { id: desk.id }, granted.token), 'FORBIDDEN');
+    const still = await prisma.assignee.findUniqueOrThrow({ where: { id: supDesk.id } });
+    assert.equal(still.userId, sup.id);
+    assert.equal((await prisma.conversation.findUniqueOrThrow({ where: { id: chats[0] } })).assignedToId, supDesk.id);
+    assert.deepEqual((await ok(`{ conversations(assignee: "me") { nodes { id } } }`, undefined, granted.token)).conversations.nodes, []);
+    // Saving the form without changing the link is fine (the UI always sends the current link)
+    assert.equal((await ok(UPDATE, { id: supDesk.id, i: { color: '#1d4ed8', userId: sup.id } }, granted.token)).updateAssignee.userId, sup.id);
+
+    // Supervisors can do all of it
+    assert.equal((await ok(UPDATE, { id: desk.id, i: { userId: agent.id } }, sup.token)).updateAssignee.userId, agent.id);
+    assert.equal((await ok(UPDATE, { id: desk.id, i: { userId: null } }, sup.token)).updateAssignee.userId, null);
+    assert.equal((await ok(DELETE, { id: desk.id }, sup.token)).deleteAssignee, desk.id);
+  });
+
+  test('assigning several chats to one person: counts, My Chats and the agent rules', async () => {
+    for (const c of chats.slice(1, 4)) await ok(TO_MEMBER, { c, m: agent.id }, sup.token);
+    const mine = (await ok(`{ conversations(assignee: "me") { nodes { id } } }`, undefined, agent.token)).conversations.nodes.map((c: any) => c.id).sort();
+    assert.deepEqual(mine, chats.slice(1, 4).sort());
+    const counts = (await ok(`{ assignees { userId conversationCount } }`, undefined, sup.token)).assignees;
+    assert.equal(counts.find((a: any) => a.userId === agent.id).conversationCount, 3);
+    // An agent picking chats for themselves: only unassigned ones
+    await ok(`mutation($c: ID!) { assignConversation(conversationId: $c, assigneeId: null) { id } }`, { c: chats[3] }, agent.token); // release one
+    assert.equal((await ok(TO_MEMBER, { c: chats[3], m: granted.id }, granted.token)).assignConversation.assignee.userId, granted.id);
+    assert.equal(await errorCode(TO_MEMBER, { c: chats[1], m: granted.id }, granted.token), 'FORBIDDEN'); // Anil's chat
+    assert.equal(await errorCode(TO_MEMBER, { c: chats[2], m: agent.id }, granted.token), 'FORBIDDEN'); // for someone else
+  });
+
+  test('login opens the remembered workspace if you belong to it, otherwise the first one you joined', async () => {
+    const LOGIN = `mutation($i: LoginInput!) { login(input: $i) { workspace { id } } }`;
+    const own = await newWorkspace('auditfix-own'); // Sumi will also join this one
+    await prisma.member.create({ data: { userId: sup.id, workspaceId: own.workspaceId, role: 'agent' } });
+    const as = (workspaceId?: string | null) => ok(LOGIN, { i: { email: sup.email, password: 'password123', workspaceId } });
+    assert.equal((await as()).login.workspace.id, ws.workspaceId); // first joined
+    assert.equal((await as(own.workspaceId)).login.workspace.id, own.workspaceId);
+    assert.equal((await as(ws.workspaceId)).login.workspace.id, ws.workspaceId);
+    assert.equal((await as(B.workspaceId)).login.workspace.id, ws.workspaceId); // not a member there: ignored
+    assert.equal((await as('nonsense')).login.workspace.id, ws.workspaceId);
+    assert.equal(await errorCode(LOGIN, { i: { email: sup.email, password: 'wrong-password', workspaceId: own.workspaceId } }), 'INVALID_CREDENTIALS');
+    const { workspaces } = await ok(`{ workspaces { id name createdAt } }`, undefined, sup.token);
+    assert.ok(workspaces.every((w: any) => w.createdAt)); // the switcher uses this to tell same-named workspaces apart
+  });
+});
+
+describe('Assign dropdown: live members with email and role, Unassigned, workspace isolation', () => {
+  type U = { id: string; token: string; email: string };
+  const MEMBERS = `{ workspaceMembers { id name email role } }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { id assignee { id name userId user { id name email role } } } }`;
+  const UNASSIGN = `mutation($c: ID!) { assignConversation(conversationId: $c, assigneeId: null) { id assignee { id } } }`;
+  let ws: { token: string; workspaceId: string };
+  let owner: U;
+  let admin: U;
+  let sup: U;
+  let agent: U;
+  let other: U;
+  let conv: string;
+
+  async function member(name: string, role: string): Promise<U> {
+    const email = `e2e-dropdown-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+    });
+    created.userIds.push(user.id);
+    const { login } = await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } });
+    return { id: user.id, token: login.token, email };
+  }
+
+  before(async () => {
+    ws = await newWorkspace('dropdown');
+    const me = (await ok(`{ me { user { id email } } }`, undefined, ws.token)).me.user;
+    owner = { id: me.id, token: ws.token, email: me.email };
+    admin = await member('Aditi', 'admin');
+    sup = await member('Sanjay', 'supervisor');
+    agent = await member('Arjun', 'agent');
+    other = await member('Bela', 'agent');
+    await ok(SIMULATE, { i: { waId: '917820000001', name: 'Dropdown chat', body: 'hi' } }, ws.token);
+    conv = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
+  });
+
+  test('members come live from the current workspace with name, email and role (all roles; the UI lists Supervisors and Agents)', async () => {
+    const list = (await ok(MEMBERS, undefined, agent.token)).workspaceMembers;
+    assert.deepEqual(
+      list.map((m: any) => [m.name, m.email, m.role]),
+      [
+        ['Aditi', admin.email, 'admin'],
+        ['Arjun', agent.email, 'agent'],
+        ['Bela', other.email, 'agent'],
+        ['dropdown', owner.email, 'owner'],
+        ['Sanjay', sup.email, 'supervisor'],
+      ],
+    );
+    // A role change shows on the next fetch (the menu refetches on open and on member:permissions)
+    await ok(`mutation($u: ID!) { updateMemberRole(userId: $u, role: "supervisor") { role } }`, { u: other.id }, owner.token);
+    assert.equal((await ok(MEMBERS, undefined, agent.token)).workspaceMembers.find((m: any) => m.id === other.id).role, 'supervisor');
+    await ok(`mutation($u: ID!) { updateMemberRole(userId: $u, role: "agent") { role } }`, { u: other.id }, owner.token);
+  });
+
+  test('workspace isolation: other workspaces never see these members or their emails', async () => {
+    const fromB = (await ok(MEMBERS, undefined, B.token)).workspaceMembers;
+    assert.ok(!fromB.some((m: any) => [admin.id, sup.id, agent.id, other.id, owner.id].includes(m.id)));
+    assert.ok(!fromB.some((m: any) => m.email.startsWith('e2e-dropdown-')));
+    assert.equal((await gql(MEMBERS)).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+    assert.equal(await errorCode(TO_MEMBER, { c: conv, m: agent.id }, B.token), 'NOT_FOUND'); // B can't reach this chat
+  });
+
+  test('assign to a Supervisor or Agent, then Unassigned; the linked person (with email) comes back on the chat', async () => {
+    let r = (await ok(TO_MEMBER, { c: conv, m: agent.id }, sup.token)).assignConversation.assignee;
+    assert.deepEqual(r.user, { id: agent.id, name: 'Arjun', email: agent.email, role: 'agent' });
+    r = (await ok(TO_MEMBER, { c: conv, m: sup.id }, admin.token)).assignConversation.assignee;
+    assert.deepEqual([r.userId, r.user.role], [sup.id, 'supervisor']);
+    assert.equal((await ok(UNASSIGN, { c: conv }, admin.token)).assignConversation.assignee, null); // "Unassigned"
+    const history = (await ok(`query($c: ID!) { conversationActivity(conversationId: $c) { type } }`, { c: conv }, owner.token)).conversationActivity.map((a: any) => a.type);
+    assert.deepEqual(history, ['assigned', 'reassigned', 'unassigned']);
+  });
+
+  test('Unassigned for agents: only their own chat, as before', async () => {
+    await ok(TO_MEMBER, { c: conv, m: other.id }, sup.token); // Bela's
+    assert.equal(await errorCode(UNASSIGN, { c: conv }, agent.token), 'FORBIDDEN'); // Arjun can't release Bela's
+    assert.equal((await ok(UNASSIGN, { c: conv }, other.token)).assignConversation.assignee, null); // Bela releases her own
+    assert.equal((await ok(UNASSIGN, { c: conv }, other.token)).assignConversation.assignee, null); // already unassigned: no-op
+  });
+});
+
+describe('Assign dropdown uses existing records: reuses the linked Assignee, never duplicates users, members or assignees', () => {
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { assignee { id name userId } } }`;
+  const UNASSIGN = `mutation($c: ID!) { assignConversation(conversationId: $c, assigneeId: null) { assignee { id } } }`;
+  let ws: { token: string; workspaceId: string };
+  let sup: { id: string; token: string };
+  let agent: { id: string };
+  let fresh: { id: string; token: string };
+  const chats: string[] = [];
+  const rowCounts = async () => ({
+    users: await prisma.user.count(),
+    members: await prisma.member.count({ where: { workspaceId: ws.workspaceId } }),
+    assignees: await prisma.assignee.count({ where: { workspaceId: ws.workspaceId } }),
+  });
+
+  before(async () => {
+    ws = await newWorkspace('reuse');
+    const mk = async (name: string, role: string) => {
+      const email = `e2e-reuse-${name.toLowerCase()}-${run}@example.com`;
+      const user = await prisma.user.create({
+        data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role, workspaceId: ws.workspaceId } } },
+      });
+      created.userIds.push(user.id);
+      return { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
+    };
+    sup = await mk('Sona', 'supervisor');
+    agent = await mk('Akash', 'agent');
+    fresh = await mk('Farah', 'agent');
+    for (const n of [1, 2, 3]) await ok(SIMULATE, { i: { waId: `91784000000${n}`, name: `Reuse ${n}`, body: 'hi' } }, ws.token);
+    chats.push(...(await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes.map((c: any) => c.id));
+  });
+
+  test("an existing linked Assignee is reused as-is (its own name and colour), for every chat", async () => {
+    // Set up earlier by an admin: "Akash – Tyres desk" linked to Akash
+    const desk = (await ok(`mutation($i: CreateAssigneeInput!) { createAssignee(input: $i) { id } }`, { i: { name: 'Akash - Tyres desk', color: '#0f2919', userId: agent.id } }, ws.token)).createAssignee;
+    const before = await rowCounts();
+    for (const c of chats) {
+      const a = (await ok(TO_MEMBER, { c, m: agent.id }, sup.token)).assignConversation.assignee;
+      assert.deepEqual([a.id, a.name, a.userId], [desk.id, 'Akash - Tyres desk', agent.id]);
+    }
+    assert.deepEqual(await rowCounts(), before); // no new users, memberships or assignees
+    assert.equal((await prisma.assignee.findUniqueOrThrow({ where: { id: desk.id } })).color, '#0f2919');
+    const mine = (await ok(`{ conversations(assignee: "me") { nodes { id } } }`, undefined, (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email: `e2e-reuse-akash-${run}@example.com`, password: 'password123' } })).login.token)).conversations.nodes;
+    assert.equal(mine.length, 3); // My Chats
+  });
+
+  test('someone with no linked Assignee gets exactly one, once; unassigning keeps it for next time', async () => {
+    const before = await rowCounts();
+    const first = (await ok(TO_MEMBER, { c: chats[0], m: fresh.id }, sup.token)).assignConversation.assignee;
+    const second = (await ok(TO_MEMBER, { c: chats[1], m: fresh.id }, sup.token)).assignConversation.assignee;
+    assert.equal(second.id, first.id);
+    assert.deepEqual(await rowCounts(), { ...before, assignees: before.assignees + 1 });
+    await ok(UNASSIGN, { c: chats[0] }, sup.token);
+    await ok(UNASSIGN, { c: chats[1] }, fresh.token); // Farah releases her own
+    assert.deepEqual((await ok(`{ conversations(assignee: "me") { nodes { id } } }`, undefined, fresh.token)).conversations.nodes, []);
+    assert.equal((await ok(TO_MEMBER, { c: chats[0], m: fresh.id }, sup.token)).assignConversation.assignee.id, first.id); // reused
+    assert.deepEqual(await rowCounts(), { ...before, assignees: before.assignees + 1 });
+  });
+});
+
+describe('My Chats regressions: login + workspace scoping, never by name or email, assign/reassign/unassign sync', () => {
+  const MINE = `{ conversations(assignee: "me") { nodes { id unread contact { name } assignee { userId } } } }`;
+  const TO_MEMBER = `mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, memberId: $m) { id } }`;
+  const UNASSIGN = `mutation($c: ID!) { assignConversation(conversationId: $c, assigneeId: null) { id } }`;
+  let ws1: { token: string; workspaceId: string };
+  let ws2: { token: string; workspaceId: string };
+  let mia: { id: string; email: string; token1: string; token2: string };
+  let leo: { id: string; token: string };
+  const chat: Record<string, string> = {};
+  const mine = async (token: string) => (await ok(MINE, undefined, token)).conversations.nodes;
+  const names = async (token: string) => (await mine(token)).map((c: any) => c.contact.name).sort();
+  const login = async (email: string, workspaceId?: string) =>
+    (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123', workspaceId } })).login.token as string;
+
+  before(async () => {
+    ws1 = await newWorkspace('mc-one');
+    ws2 = await newWorkspace('mc-two');
+    // Mia belongs to both workspaces; Leo only to the first
+    const email = `e2e-mc-mia-${run}@example.com`;
+    const user = await prisma.user.create({
+      data: {
+        name: 'Mia', email, passwordHash: await bcrypt.hash('password123', 4),
+        members: { create: [{ role: 'agent', workspaceId: ws1.workspaceId }, { role: 'agent', workspaceId: ws2.workspaceId }] },
+      },
+    });
+    created.userIds.push(user.id);
+    mia = { id: user.id, email, token1: await login(email, ws1.workspaceId), token2: await login(email, ws2.workspaceId) };
+    const leoUser = await prisma.user.create({
+      data: { name: 'Leo', email: `e2e-mc-leo-${run}@example.com`, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws1.workspaceId } } },
+    });
+    created.userIds.push(leoUser.id);
+    leo = { id: leoUser.id, token: await login(`e2e-mc-leo-${run}@example.com`) };
+    for (const [w, n] of [['917860000001', 'W1-a'], ['917860000002', 'W1-b'], ['917860000003', 'W1-c']]) await ok(SIMULATE, { i: { waId: w, name: n, body: 'hi' } }, ws1.token);
+    await ok(SIMULATE, { i: { waId: '917860000009', name: 'W2-a', body: 'hi' } }, ws2.token);
+    for (const t of [ws1.token, ws2.token]) for (const c of (await ok(CONVERSATIONS, {}, t)).conversations.nodes) chat[c.contact.name] = c.id;
+  });
+
+  test('only the current workspace: the same person sees each workspace\'s own chats', async () => {
+    await ok(TO_MEMBER, { c: chat['W1-a'], m: mia.id }, ws1.token);
+    await ok(TO_MEMBER, { c: chat['W2-a'], m: mia.id }, ws2.token);
+    assert.deepEqual(await names(mia.token1), ['W1-a']);
+    assert.deepEqual(await names(mia.token2), ['W2-a']);
+    // One linked assignee per workspace, each with Mia's real userId
+    const links = await prisma.assignee.findMany({ where: { userId: mia.id }, select: { workspaceId: true } });
+    assert.deepEqual(links.map((l) => l.workspaceId).sort(), [ws1.workspaceId, ws2.workspaceId].sort());
+  });
+
+  test('never by name or email: name-only assignees called "Leo" or Mia\'s email are nobody\'s', async () => {
+    // Leo has no linked assignee yet, so a name-only "Leo" can exist (names are unique per workspace)
+    const asName = (await ok(`mutation { createAssignee(input: { name: "Leo", color: "#000000" }) { id } }`, undefined, ws1.token)).createAssignee;
+    const asEmail = (await ok(`mutation($n: String!) { createAssignee(input: { name: $n, color: "#000000" }) { id } }`, { n: mia.email.slice(0, 50) }, ws1.token)).createAssignee;
+    const raw = `mutation($c: ID!, $a: ID) { assignConversation(conversationId: $c, assigneeId: $a) { id } }`;
+    await ok(raw, { c: chat['W1-b'], a: asName.id }, ws1.token);
+    await ok(raw, { c: chat['W1-c'], a: asEmail.id }, ws1.token);
+    assert.deepEqual(await names(mia.token1), ['W1-a']);
+    assert.deepEqual(await names(leo.token), []);
+    await ok(UNASSIGN, { c: chat['W1-b'] }, ws1.token);
+    await ok(UNASSIGN, { c: chat['W1-c'] }, ws1.token);
+  });
+
+  test('assign -> reassign -> unassign: each step shows in the right My Chats at once, with counts and unread in sync', async () => {
+    const counts = async () =>
+      Object.fromEntries((await ok(`{ assignees { userId conversationCount } }`, undefined, ws1.token)).assignees.filter((a: any) => a.userId).map((a: any) => [a.userId, a.conversationCount]));
+    await ok(TO_MEMBER, { c: chat['W1-b'], m: leo.id }, ws1.token); // assign
+    assert.deepEqual([await names(mia.token1), await names(leo.token)], [['W1-a'], ['W1-b']]);
+    assert.deepEqual(await counts(), { [mia.id]: 1, [leo.id]: 1 });
+    await ok(TO_MEMBER, { c: chat['W1-b'], m: mia.id }, ws1.token); // reassign to Mia
+    assert.deepEqual([await names(mia.token1), await names(leo.token)], [['W1-a', 'W1-b'], []]);
+    assert.deepEqual(await counts(), { [mia.id]: 2, [leo.id]: 0 });
+    await ok(SIMULATE, { i: { waId: '917860000002', name: 'W1-b', body: 'any news?' } }, ws1.token); // customer writes on W1-b
+    assert.equal((await mine(mia.token1)).find((c: any) => c.contact.name === 'W1-b').unread, 2);
+    await ok(UNASSIGN, { c: chat['W1-b'] }, ws1.token); // unassign
+    assert.deepEqual([await names(mia.token1), await names(leo.token)], [['W1-a'], []]);
+    assert.deepEqual(await counts(), { [mia.id]: 1, [leo.id]: 0 });
+    // Unassigned chats are in nobody's My Chats but still in everyone's Inbox
+    assert.ok((await ok(CONVERSATIONS, {}, leo.token)).conversations.nodes.some((c: any) => c.id === chat['W1-b']));
   });
 });
