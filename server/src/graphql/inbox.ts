@@ -1,4 +1,5 @@
 import { prisma } from '../prisma.js';
+import { toAssigneeRef } from '../services/assign.js';
 import { conversationLabels } from '../services/labels.js';
 import { clearConversation, clearedAt } from '../services/conversationClear.js';
 import { closeConversation, conversationCounts, reopenConversation } from '../services/conversationStatus.js';
@@ -172,6 +173,8 @@ type PageArgs = { first?: number | null; after?: string | null };
 type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null };
 const pageArgs = ({ first, after }: PageArgs) => ({ first: first ?? undefined, after: after ?? undefined });
 
+type AssigneeRefMember = { id: string; role: string; user: { id: string; name: string } };
+
 type ConversationParent = {
   id: string;
   contactId: string;
@@ -203,7 +206,7 @@ export const resolvers = {
     ),
   },
   Mutation: {
-    markConversationRead: authed(({ id }: { id: string }, { workspaceId }) => markConversationRead(workspaceId, id)),
+    markConversationRead: authed(({ id }: { id: string }, { workspaceId, userId }) => markConversationRead(workspaceId, id, userId)),
     sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string } }, { workspaceId, userId }) =>
       sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body }, userId),
     ),
@@ -231,7 +234,7 @@ export const resolvers = {
     restoreMessage: authed(({ messageId, version }: { messageId: string; version: number }, auth) =>
       restoreMessage(auth, messageId, { version }),
     ),
-    startConversation: authed(({ input }: { input: unknown }, { workspaceId }) => startConversation(workspaceId, input)),
+    startConversation: authed(({ input }: { input: unknown }, { workspaceId, userId }) => startConversation(workspaceId, input, userId)),
     simulateIncomingMessage: authed(async ({ input }: { input?: Record<string, unknown> | null }, { workspaceId }) => {
       // GraphQL sends explicit nulls for omitted fields; drop them so defaults apply
       const clean = Object.fromEntries(Object.entries(input ?? {}).filter(([, v]) => v != null));
@@ -262,11 +265,15 @@ export const resolvers = {
       c.labels
         ? c.labels.map((l) => l.label).sort((a, b) => a.name.localeCompare(b.name))
         : conversationLabels(c.id),
-    assignee: (c: ConversationParent) =>
-      c.assignedTo !== undefined
-        ? c.assignedTo
-        : c.assignedToId
-          ? prisma.assignee.findUnique({ where: { id: c.assignedToId } })
-          : null,
+    // The holding member, in the assignee shape (id = member id, name, role colour, userId)
+    assignee: async (c: ConversationParent) => {
+      const member =
+        c.assignedTo !== undefined
+          ? (c.assignedTo as AssigneeRefMember | null)
+          : c.assignedToId
+            ? await prisma.member.findUnique({ where: { id: c.assignedToId }, include: { user: { select: { id: true, name: true } } } })
+            : null;
+      return member ? toAssigneeRef(member) : null;
+    },
   },
 };

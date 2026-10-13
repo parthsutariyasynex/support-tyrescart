@@ -45,7 +45,7 @@ export async function setLabelPermission(auth: AuthPayload, userId: string, canM
     throw new AppError('Only owners and admins can change permissions', 403, 'FORBIDDEN');
   const where = { userId_workspaceId: { userId, workspaceId: auth.workspaceId } };
   if (!(await prisma.member.findUnique({ where }))) throw notFound('Member');
-  await prisma.member.update({ where, data: { canManageLabels } });
+  await prisma.member.update({ where, data: { canManageLabels, updatedBy: auth.userId } });
   return announcePermissions(auth.workspaceId, userId);
 }
 

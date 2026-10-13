@@ -117,7 +117,7 @@ export async function resetPassword(rawInput: unknown) {
       data: { usedAt: new Date() },
     });
     if (count === 0) throw new AppError('This reset link has already been used.', 400, 'INVALID_RESET_TOKEN');
-    await tx.user.update({ where: { id: record.userId }, data: { passwordHash, passwordChangedAt: new Date() } });
+    await tx.user.update({ where: { id: record.userId }, data: { passwordHash, passwordChangedAt: new Date(), updatedBy: record.userId } });
     await tx.passwordResetToken.deleteMany({ where: { userId: record.userId, id: { not: record.id } } });
   });
   await disconnectUser(record.userId); // open tabs stop receiving live updates right away

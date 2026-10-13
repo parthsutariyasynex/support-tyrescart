@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { getToken, setToken } from '@/lib/api';
-import { type WorkspaceSummary, createWorkspace, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
+import { type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
@@ -38,9 +38,6 @@ export function AppShell({
     setSidebarOpen(open);
   }
 
-  const [newWorkspace, setNewWorkspace] = useState('');
-  // The name field only appears after clicking "Create workspace"
-  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[] | null>(null);
   // Extra detail for workspaces that share a name (created date and the end of the id)
   const duplicateDetails = workspaceDetails(workspaces ?? []);
@@ -49,11 +46,7 @@ export function AppShell({
 
   // Load the user's workspaces when the switcher opens
   useEffect(() => {
-    if (!workspaceMenuOpen) {
-      setCreatingWorkspace(false);
-      setNewWorkspace('');
-      return;
-    }
+    if (!workspaceMenuOpen) return;
     setWorkspaceError('');
     fetchWorkspaces()
       .then(setWorkspaces)
@@ -572,7 +565,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/teams' ? 'Teams' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -588,7 +581,9 @@ export function AppShell({
                 )}
               </div>
               <p className="truncate text-[11px] text-faint -mt-0.5">
-                {pathname === '/teams'
+                {pathname === '/account'
+                  ? 'Your details and password'
+                  : pathname === '/teams'
                   ? 'Everyone in this workspace: name, email, role and status'
                   : pathname === '/my-chats'
                   ? 'Chats assigned to you'
@@ -697,63 +692,13 @@ export function AppShell({
                     <div className="mt-2 rounded-lg bg-danger-soft px-2.5 py-1.5 text-xs text-danger">{workspaceError}</div>
                   )}
 
-                  {/* Add New Workspace: a button first, the name field once it's clicked */}
-                  {!creatingWorkspace ? (
-                    <button
-                      type="button"
-                      onClick={() => setCreatingWorkspace(true)}
-                      className="mt-3 flex w-full items-center gap-2 rounded-xl border border-dashed border-line-strong px-3 py-2 text-xs font-semibold text-secondary hover:bg-surface-strong transition cursor-pointer"
-                    >
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-strong text-sm leading-none">+</span>
-                      Create workspace
-                    </button>
-                  ) : (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (!newWorkspace.trim() || workspaceBusy) return;
-                      enterWorkspace(() => createWorkspace(newWorkspace.trim()));
-                    }}
-                    className="mt-3"
-                  >
-                    <div className="rounded-xl border-2 border-secondary/80 p-0.5 bg-surface">
-                      <input
-                        type="text"
-                        placeholder="Workspace name"
-                        autoFocus
-                        value={newWorkspace}
-                        maxLength={191}
-                        onChange={(e) => setNewWorkspace(e.target.value)}
-                        className="w-full rounded-lg bg-transparent px-2.5 py-1.5 text-xs text-ink placeholder:text-faint outline-none"
-                      />
-                    </div>
-                    <div className="mt-2.5 flex items-center gap-2">
-                      <button
-                        type="submit"
-                        disabled={!newWorkspace.trim() || workspaceBusy}
-                        className="rounded-lg bg-secondary px-3.5 py-1 text-xs font-semibold text-on-primary shadow-2xs hover:bg-secondary-hover disabled:opacity-50 transition cursor-pointer"
-                      >
-                        {workspaceBusy ? 'Please wait…' : 'Create'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNewWorkspace('');
-                          setCreatingWorkspace(false);
-                        }}
-                        className="px-2 py-1 text-xs text-muted hover:text-body transition cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </form>
-                  )}
+                  {/* Creating workspaces is turned off: admins add people from the Teams page */}
                 </div>
               )}
             </div>
 
             {/* Round WhatsApp Icon Button */}
-            <button
+            {/* <button
               onClick={() => router.push('/teams')}
               title="WhatsApp Status"
               className="flex h-7.5 w-7.5 items-center justify-center rounded-full bg-accent text-on-primary shadow-2xs hover:scale-105 transition cursor-pointer"
@@ -761,7 +706,7 @@ export function AppShell({
               <svg className="h-4 w-4 fill-on-primary" viewBox="0 0 24 24">
                 <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z" />
               </svg>
-            </button>
+            </button> */}
 
             {/* Page-specific header controls (the inbox renders its Assign dropdown here) */}
             <div id="app-header-actions" className="flex items-center gap-3 shrink-0 min-w-[154px] justify-end" />
@@ -969,6 +914,21 @@ export function AppShell({
                       </p>
                       <p className="text-[11px] text-muted truncate">{me.user.email}</p>
                     </div>
+                  </div>
+
+                  {/* Your own account: change password */}
+                  <div className="p-1 pt-2 text-xs">
+                    <Link
+                      href="/account"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center gap-3 rounded-xl px-3 py-2 text-body hover:bg-surface-strong transition"
+                    >
+                      <svg className="h-4 w-4 text-faint shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                      </svg>
+                      <span>My account &amp; password</span>
+                    </Link>
                   </div>
 
                   {/* Section Title */}

@@ -1,0 +1,77 @@
+{
+  "id": "cmv0tct2q0005nr5zqias0wfi",
+  "name": "support-tyrescart",
+  "createdAt": "2026-10-09T10:19:28.947Z",
+  "createdBy": null,
+  "updatedAt": "2026-10-13T17:28:29.466Z",
+  "updatedBy": null,
+  "deletedAt": null,
+  "deletedBy": null,
+  "status": "active",
+  "members": [
+    {
+      "id": "cmv0tct2q0004nr5zim87bqdk",
+      "role": "owner",
+      "canManageLabels": false,
+      "active": true,
+      "notificationsSeenAt": null,
+      "userId": "cmv0tct2q0003nr5zzuq0uh4b",
+      "workspaceId": "cmv0tct2q0005nr5zqias0wfi",
+      "createdAt": "2026-10-13T17:28:29.441Z",
+      "createdBy": null,
+      "updatedAt": "2026-10-13T17:28:29.441Z",
+      "updatedBy": null,
+      "deletedAt": null,
+      "deletedBy": null,
+      "user": {
+        "id": "cmv0tct2q0003nr5zzuq0uh4b",
+        "email": "parthsutariya.synex@gmail.com",
+        "name": "Parth patel"
+      }
+    }
+  ],
+  "whatsapp": null,
+  "labels": [],
+  "quickReplies": [],
+  "contacts": [
+    {
+      "id": "cmv0tpdyy0007nrss5psqory3",
+      "workspaceId": "cmv0tct2q0005nr5zqias0wfi",
+      "waId": "9016312927",
+      "name": null,
+      "tags": "",
+      "createdAt": "2026-10-09T10:29:15.898Z",
+      "createdBy": null,
+      "updatedAt": "2026-10-13T17:28:29.381Z",
+      "updatedBy": null,
+      "deletedAt": null,
+      "deletedBy": null,
+      "status": "active"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "cmv0tpdz60009nrssh3vhzzmt",
+      "workspaceId": "cmv0tct2q0005nr5zqias0wfi",
+      "contactId": "cmv0tpdyy0007nrss5psqory3",
+      "assignedToId": null,
+      "lastMessageAt": "2026-10-09T10:29:15.906Z",
+      "lastInboundAt": null,
+      "unread": 0,
+      "status": "open",
+      "closedAt": null,
+      "closedById": null,
+      "createdAt": "2026-10-13T17:28:29.417Z",
+      "createdBy": null,
+      "updatedAt": "2026-10-13T17:28:29.417Z",
+      "updatedBy": null,
+      "deletedAt": null,
+      "deletedBy": null,
+      "messages": [],
+      "labels": [],
+      "activity": [],
+      "clears": []
+    }
+  ],
+  "activity": []
+}

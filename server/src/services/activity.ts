@@ -104,7 +104,7 @@ export async function listNotifications({ userId, workspaceId }: AuthPayload, fi
 export async function markNotificationsSeen({ userId, workspaceId }: AuthPayload) {
   await prisma.member.update({
     where: { userId_workspaceId: { userId, workspaceId } },
-    data: { notificationsSeenAt: new Date() },
+    data: { notificationsSeenAt: new Date(), updatedBy: userId },
   });
   return true;
 }

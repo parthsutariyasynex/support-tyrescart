@@ -5,6 +5,8 @@ import {
   joinWorkspace,
   listMembers,
   removeMember,
+  setMemberActive,
+  updateMember,
   updateMemberRole,
 } from '../services/members.js';
 import { withMe } from './auth.js';
@@ -20,7 +22,9 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     isOwner: Boolean!
     canManageLabels: Boolean!
-    "active: can sign in | invited: added by an admin and hasn't chosen a password yet"
+    "false: deactivated in this workspace by an admin"
+    active: Boolean!
+    "active: can sign in | invited: added by an admin and hasn't chosen a password yet | inactive: deactivated here"
     status: String!
   }
 
@@ -29,14 +33,24 @@ export const typeDefs = /* GraphQL */ `
     email: String!
     "admin | supervisor | agent"
     role: String!
+    "Optional first password (8-72 characters with a letter and a number). Without it, an invite email asks them to choose one."
+    password: String
   }
 
   type InviteResult {
     member: TeamMember!
-    "true: a new account was created and emailed a link to choose a password; false: an existing account was added"
+    "true: a new account was emailed a link to choose a password; false: it got the given password, or an existing account was added"
     invited: Boolean!
     "false if the invite email couldn't be sent (they can still use Forgot password)"
     emailSent: Boolean!
+    "true: a new account was created; false: an existing account was added to this workspace"
+    created: Boolean!
+  }
+
+  input UpdateMemberInput {
+    name: String
+    "A new password for them (same rule as above); signs them out everywhere"
+    password: String
   }
 
   "A team signup link: whoever opens it can join this workspace as an Agent"
@@ -61,6 +75,10 @@ export const typeDefs = /* GraphQL */ `
     inviteMember(input: InviteMemberInput!): InviteResult!
     "Admins only; not for the owner or yourself"
     updateMemberRole(userId: ID!, role: String!): TeamMember!
+    "Admins only: change a member's name or set them a new password (not the owner's, not your own password)"
+    updateMember(userId: ID!, input: UpdateMemberInput!): TeamMember!
+    "Admins only; not for the owner or yourself. false: they can't sign in here, sessions are cut, nothing is deleted."
+    setMemberActive(userId: ID!, active: Boolean!): TeamMember!
     "Admins only; not for the owner or yourself. Their account stays; they lose access to this workspace at once."
     removeMember(userId: ID!): ID!
     "Admins only"
@@ -78,6 +96,8 @@ export const resolvers = {
   Mutation: {
     inviteMember: authed(({ input }: { input: unknown }, auth) => inviteMember(auth, input)),
     updateMemberRole: authed(({ userId, role }: { userId: string; role: string }, auth) => updateMemberRole(auth, userId, role)),
+    updateMember: authed(({ userId, input }: { userId: string; input: unknown }, auth) => updateMember(auth, userId, input)),
+    setMemberActive: authed(({ userId, active }: { userId: string; active: boolean }, auth) => setMemberActive(auth, userId, active)),
     removeMember: authed(({ userId }: { userId: string }, auth) => removeMember(auth, userId)),
     createJoinLink: authed((_args, auth) => createJoinLink(auth)),
     joinWorkspace: authed(async ({ token }: { token: string }, auth) => withMe(await joinWorkspace(auth, token))),

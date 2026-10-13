@@ -622,6 +622,7 @@ function Inbox({ meName }: { meName: string }) {
       setMembersVersion((v) => v + 1);
       // e.g. an admin just granted (or removed) this supervisor's right to assign chats: applies without a reload
       if (userId === permissionsRef.current?.userId) setPermissions({ userId, role, canManageLabels, canManageAssignments });
+      loadAssignees(); // a role or name change alters the assignee shape (colour, name) in the Assign list
     });
     return () => {
       socketRef.current = null;

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { signToken, type AuthPayload } from '../auth.js';
+import { env } from '../env.js';
 import { prisma } from '../prisma.js';
+import { AppError } from './errors.js';
 import { notFound } from './errors.js';
 import { parse } from './validate.js';
 
@@ -22,9 +24,10 @@ export async function listWorkspaces({ userId }: AuthPayload) {
 
 // The creator becomes its owner
 export async function createWorkspace({ userId }: AuthPayload, rawInput: unknown) {
+  if (!env.allowWorkspaceCreation) throw new AppError('Creating workspaces is turned off', 403, 'WORKSPACE_CREATION_CLOSED');
   const { name } = parse(createSchema, rawInput);
   const workspace = await prisma.workspace.create({
-    data: { name, members: { create: { userId, role: 'owner' } } },
+    data: { name, createdBy: userId, members: { create: { userId, role: 'owner', createdBy: userId } } },
   });
   return { token: signToken({ userId, workspaceId: workspace.id }), userId };
 }

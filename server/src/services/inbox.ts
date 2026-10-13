@@ -35,12 +35,13 @@ const conversationInclude = {
   contact: true,
   messages: { orderBy: { createdAt: 'desc' as const }, take: 1 },
   labels: { include: { label: true } },
-  assignedTo: true,
+  // The holding member, with the person's name for the assignee shape
+  assignedTo: { include: { user: { select: { id: true, name: true } } } },
 };
 
 // Newest first. Omit `page` to get every conversation (REST behaviour).
-// `labelId` keeps only conversations that have that label; `assignee` is an assignee id, 'unassigned', or 'me'
-// (assigned to the assignee linked to `viewerId`); `status` is 'open' or 'closed' (omit for both).
+// `labelId` keeps only conversations that have that label; `assignee` is a member id, 'unassigned', or 'me'
+// (assigned to `viewerId`'s membership); `status` is 'open' or 'closed' (omit for both).
 export async function listConversations(workspaceId: string, page?: unknown, viewerId?: string) {
   const query = {
     where: { workspaceId },
@@ -77,9 +78,9 @@ export async function requireConversation(workspaceId: string, id: string) {
   return conversation;
 }
 
-export async function markConversationRead(workspaceId: string, id: string) {
+export async function markConversationRead(workspaceId: string, id: string, viewerId: string | null = null) {
   await requireConversation(workspaceId, id);
-  return prisma.conversation.update({ where: { id }, data: { unread: 0 }, include: conversationInclude });
+  return prisma.conversation.update({ where: { id }, data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}) }, include: conversationInclude });
 }
 
 // Newest page first; `after` walks back to older messages. Nodes are returned oldest -> newest.
@@ -102,9 +103,9 @@ export async function listMessages(workspaceId: string, conversationId: string, 
 }
 
 // REST: GET /inbox/conversations/:id/messages (marks read, returns full history)
-export async function openConversation(workspaceId: string, id: string) {
+export async function openConversation(workspaceId: string, id: string, viewerId: string | null = null) {
   const conversation = await requireConversation(workspaceId, id);
-  await prisma.conversation.update({ where: { id }, data: { unread: 0 } });
+  await prisma.conversation.update({ where: { id }, data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}) } });
   const messages = await prisma.message.findMany({ where: { conversationId: id }, orderBy: { createdAt: 'asc' } });
   return { conversation, messages };
 }
@@ -205,7 +206,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
       data: { status: 'failed', error: (err as Error).message },
     });
   }
-  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
+  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   return saved;
 }
@@ -228,17 +229,17 @@ const startSchema = z.object({
 });
 
 // Start a chat with a new number (first message must be a template)
-export async function startConversation(workspaceId: string, rawInput: unknown) {
+export async function startConversation(workspaceId: string, rawInput: unknown, createdBy: string | null = null) {
   const { waId, name } = parse(startSchema, rawInput);
   const contact = await prisma.contact.upsert({
     where: { workspaceId_waId: { workspaceId, waId } },
     update: {},
-    create: { workspaceId, waId, name: name || null },
+    create: { workspaceId, waId, name: name || null, createdBy },
   });
   return prisma.conversation.upsert({
     where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
     update: {},
-    create: { workspaceId, contactId: contact.id },
+    create: { workspaceId, contactId: contact.id, createdBy },
   });
 }
 

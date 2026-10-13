@@ -62,3 +62,9 @@ export async function requestPasswordReset(email: string) {
 export async function resetPassword(token: string, password: string) {
   await gql(`mutation ResetPassword($input: ResetPasswordInput!) { resetPassword(input: $input) }`, { input: { token, password } });
 }
+
+// Signed in: change your own password. Stores the returned token: other sessions are signed out, this one continues.
+export async function changeMyPassword(currentPassword: string, newPassword: string) {
+  const query = `mutation ChangeMyPassword($c: String!, $n: String!) { changeMyPassword(currentPassword: $c, newPassword: $n) { token } }`;
+  return (await gql<{ changeMyPassword: { token: string } }>(query, { c: currentPassword, n: newPassword })).changeMyPassword;
+}

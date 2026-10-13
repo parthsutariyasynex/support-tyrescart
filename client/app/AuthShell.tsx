@@ -5,9 +5,9 @@ export function AuthShell({
   subtitle,
   children,
   badge = 'Meta Business Partner compatible',
-  footerText = "Don't have an account?",
-  footerLinkText = 'Create workspace →',
-  footerLinkHref = '/register',
+  footerText,
+  footerLinkText,
+  footerLinkHref,
 }: {
   title: string;
   subtitle: string;
@@ -54,12 +54,15 @@ export function AuthShell({
 
             <div className="mt-7">{children}</div>
 
-            <div className="mt-6 text-center text-[13px] text-muted">
-              {footerText}{' '}
-              <Link href={footerLinkHref} className="font-semibold text-primary transition-colors hover:text-primary-hover">
-                {footerLinkText}
-              </Link>
-            </div>
+            {/* Footer link only when the page offers one (sign-up is by invitation, so no "Create workspace" by default) */}
+            {footerLinkText && footerLinkHref && (
+              <div className="mt-6 text-center text-[13px] text-muted">
+                {footerText}{' '}
+                <Link href={footerLinkHref} className="font-semibold text-primary transition-colors hover:text-primary-hover">
+                  {footerLinkText}
+                </Link>
+              </div>
+            )}
           </div>
 
           {/* Under-Card Feature Badges */}

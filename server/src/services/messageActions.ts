@@ -59,7 +59,7 @@ export async function editMessage(auth: AuthPayload, messageId: string, rawInput
   const updated = await prisma.$transaction(async (tx) => {
     const { count } = await tx.message.updateMany({
       where: { id: messageId, version, deletedAt: null },
-      data: { body, editedAt: new Date(), version: { increment: 1 } },
+      data: { body, editedAt: new Date(), updatedBy: auth.userId, version: { increment: 1 } },
     });
     if (count === 0) throw conflict();
     await tx.messageRevision.create({ data: { messageId, body: message.body, action: 'edit', userId: auth.userId } });
@@ -86,7 +86,7 @@ export async function deleteMessage(auth: AuthPayload, messageId: string, rawInp
   const updated = await prisma.$transaction(async (tx) => {
     const { count } = await tx.message.updateMany({
       where: { id: messageId, version: message.version, deletedAt: null },
-      data: { body: '', deletedAt: new Date(), deletedById: auth.userId, version: { increment: 1 } },
+      data: { body: '', deletedAt: new Date(), deletedById: auth.userId, updatedBy: auth.userId, version: { increment: 1 } },
     });
     if (count === 0) {
       const current = await tx.message.findUniqueOrThrow({ where: { id: messageId } });
@@ -134,7 +134,7 @@ export async function restoreMessage(auth: AuthPayload, messageId: string, rawIn
   const updated = await prisma.$transaction(async (tx) => {
     const { count } = await tx.message.updateMany({
       where: { id: messageId, version, deletedAt: { not: null } },
-      data: { body: deletion.body, deletedAt: null, deletedById: null, version: { increment: 1 } },
+      data: { body: deletion.body, deletedAt: null, deletedById: null, updatedBy: auth.userId, version: { increment: 1 } },
     });
     if (count === 0) throw conflict();
     await tx.messageRevision.create({

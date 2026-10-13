@@ -1,4 +1,5 @@
 import { listConversationActivity, listNotifications, markNotificationsSeen, unreadTotal } from '../services/activity.js';
+import { clearedAt } from '../services/conversationClear.js';
 import { authed } from './shared.js';
 
 export const typeDefs = /* GraphQL */ `
@@ -41,8 +42,9 @@ export const typeDefs = /* GraphQL */ `
 
 export const resolvers = {
   Query: {
-    conversationActivity: authed(({ conversationId }: { conversationId: string }, { workspaceId }) =>
-      listConversationActivity(workspaceId, conversationId),
+    // Like messages: a chat you cleared hides its earlier history from you only
+    conversationActivity: authed(async ({ conversationId }: { conversationId: string }, { workspaceId, userId }) =>
+      listConversationActivity(workspaceId, conversationId, undefined, await clearedAt(userId, conversationId)),
     ),
     notifications: authed((_args, auth) => listNotifications(auth)),
     unreadTotal: authed((_args, { workspaceId }) => unreadTotal(workspaceId)),

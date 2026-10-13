@@ -48,7 +48,7 @@ export async function createLabel(auth: AuthPayload, rawInput: unknown) {
   const { workspaceId } = auth;
   const data = parse(createSchema, rawInput);
   const label = toLabel(
-    await prisma.label.create({ data: { workspaceId, ...data }, include: labelInclude }).catch((err) => {
+    await prisma.label.create({ data: { workspaceId, ...data, createdBy: auth.userId }, include: labelInclude }).catch((err) => {
       throw duplicateName(err);
     }),
   );
@@ -62,7 +62,7 @@ export async function updateLabel(auth: AuthPayload, id: string, rawInput: unkno
   const data = parse(updateSchema, rawInput);
   await requireLabel(workspaceId, id);
   const label = toLabel(
-    await prisma.label.update({ where: { id }, data, include: labelInclude }).catch((err) => {
+    await prisma.label.update({ where: { id }, data: { ...data, updatedBy: auth.userId }, include: labelInclude }).catch((err) => {
       throw duplicateName(err);
     }),
   );
@@ -105,6 +105,7 @@ export async function addConversationLabel(
   const where = { conversationId_labelId: { conversationId, labelId } };
   const existed = await prisma.conversationLabel.findUnique({ where });
   await prisma.conversationLabel.upsert({ where, update: {}, create: { conversationId, labelId } });
+  if (!existed && actorId) await prisma.conversation.update({ where: { id: conversationId }, data: { updatedBy: actorId } });
   const result = await labelsChanged(workspaceId, conversationId);
   if (!existed)
     await recordActivity({
@@ -125,6 +126,7 @@ export async function removeConversationLabel(
 ) {
   const [, label] = await Promise.all([requireConversation(workspaceId, conversationId), requireLabel(workspaceId, labelId)]);
   const { count } = await prisma.conversationLabel.deleteMany({ where: { conversationId, labelId } });
+  if (count > 0 && actorId) await prisma.conversation.update({ where: { id: conversationId }, data: { updatedBy: actorId } });
   const result = await labelsChanged(workspaceId, conversationId);
   if (count > 0)
     await recordActivity({

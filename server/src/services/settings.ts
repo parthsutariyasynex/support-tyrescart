@@ -47,8 +47,8 @@ export async function connectWhatsApp(auth: AuthPayload, rawInput: unknown) {
   const data = { wabaId, phoneNumberId, accessToken, displayPhone: info.display_phone_number };
   return prisma.whatsAppAccount.upsert({
     where: { workspaceId },
-    update: data,
-    create: { workspaceId, ...data },
+    update: { ...data, updatedBy: auth.userId },
+    create: { workspaceId, ...data, createdBy: auth.userId },
     select: publicFields,
   });
 }

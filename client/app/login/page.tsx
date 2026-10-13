@@ -51,9 +51,9 @@ export default function LoginPage() {
     <AuthShell
       title="Welcome back"
       subtitle="Sign in to your support-tyrescart workspace."
-      footerText="Don't have an account?"
-      footerLinkText={joinToken ? 'Create your account →' : 'Create workspace →'}
-      footerLinkHref={joinToken ? `/register?join=${encodeURIComponent(joinToken)}` : '/register'}
+      footerText={joinToken ? "Don't have an account?" : undefined}
+      footerLinkText={joinToken ? 'Create your account →' : undefined}
+      footerLinkHref={joinToken ? `/register?join=${encodeURIComponent(joinToken)}` : undefined}
     >
       <form onSubmit={onSubmit} className="space-y-4">
         {/* Email Field */}

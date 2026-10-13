@@ -16,8 +16,8 @@ async function setStatus(auth: AuthPayload, conversationId: string, status: Conv
       where: { id: conversationId, workspaceId: auth.workspaceId, status: current.status },
       data:
         status === 'closed'
-          ? { status, closedAt: new Date(), closedById: auth.userId }
-          : { status, closedAt: null, closedById: null },
+          ? { status, closedAt: new Date(), closedById: auth.userId, updatedBy: auth.userId }
+          : { status, closedAt: null, closedById: null, updatedBy: auth.userId },
     });
   }
   const conversation = await requireConversation(auth.workspaceId, conversationId);

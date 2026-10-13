@@ -1,0 +1,18 @@
+[
+  {
+    "conversationId": "cmv0um0oa0003nrilsini6uz9",
+    "workspaceId": "cmv0tx3hr001wnrdeol6wofyo",
+    "assigneeId": "cmv6kvblm0001nr9zg3l7zith",
+    "assigneeName": "Alice",
+    "userId": "cmv69xjis0000nryu6xojgdgv",
+    "memberId": "cmv69xjis0002nryu0h5wi41v"
+  },
+  {
+    "conversationId": "cmv0vbz29004anrdedvsiqqu3",
+    "workspaceId": "cmv0tx3hr001wnrdeol6wofyo",
+    "assigneeId": "cmv6kvbm20005nr9zblcoyjuv",
+    "assigneeName": "Nikhil",
+    "userId": "cmv69xjis0006nryuxdr7dvzv",
+    "memberId": "cmv69xjis0008nryu5hh96fgg"
+  }
+]

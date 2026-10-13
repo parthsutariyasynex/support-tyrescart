@@ -14,4 +14,10 @@ export const env = {
   metaVerifyToken: required('META_VERIFY_TOKEN'),
   graphVersion: process.env.GRAPH_API_VERSION ?? 'v21.0',
   isProd: process.env.NODE_ENV === 'production',
+  // Creating new workspaces (sign-up without a team link, "Create workspace"): closed in production unless
+  // ALLOW_WORKSPACE_CREATION=true; open elsewhere so development and the e2e tests can set up workspaces.
+  // Admins add users from the Teams page instead.
+  allowWorkspaceCreation: process.env.ALLOW_WORKSPACE_CREATION
+    ? process.env.ALLOW_WORKSPACE_CREATION === 'true'
+    : process.env.NODE_ENV !== 'production',
 };

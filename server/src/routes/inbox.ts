@@ -19,7 +19,7 @@ inboxRouter.get('/conversations', async (req, res) => {
 });
 
 inboxRouter.get('/conversations/:id/messages', async (req, res) => {
-  res.json(await openConversation(req.auth!.workspaceId, req.params.id));
+  res.json(await openConversation(req.auth!.workspaceId, req.params.id, req.auth!.userId));
 });
 
 inboxRouter.post('/conversations/:id/messages', async (req, res) => {
@@ -28,7 +28,7 @@ inboxRouter.post('/conversations/:id/messages', async (req, res) => {
 
 // Start a chat with a new number (first message must be a template)
 inboxRouter.post('/contacts', async (req, res) => {
-  res.json(await startConversation(req.auth!.workspaceId, { waId: String(req.body?.waId ?? ''), name: req.body?.name }));
+  res.json(await startConversation(req.auth!.workspaceId, { waId: String(req.body?.waId ?? ''), name: req.body?.name }, req.auth!.userId));
 });
 
 // Dev only: fake an incoming customer message without Meta

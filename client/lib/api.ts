@@ -1,5 +1,13 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
+// A GraphQL error with the server's error code (e.g. ACCOUNT_EXISTS), so forms can offer the right next step
+export class GqlError extends Error {
+  constructor(message: string, public code?: string) {
+    super(message);
+  }
+}
+export const errorCode = (err: unknown) => (err instanceof GqlError ? err.code : undefined);
+
 export function getToken() {
   return typeof window === 'undefined' ? null : localStorage.getItem('token');
 }
@@ -46,7 +54,7 @@ export async function gql<T = any>(query: string, variables?: Record<string, unk
       setToken(null);
       window.location.href = '/login';
     }
-    throw new Error(error.message);
+    throw new GqlError(error.message, error.extensions?.code);
   }
   if (!res.ok || !json.data) throw new Error(`Request failed (${res.status})`);
   return json.data;

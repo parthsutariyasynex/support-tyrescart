@@ -4,14 +4,15 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { signToken, type AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
-import { disconnectMember, emitToWorkspace } from '../realtime.js';
-import { registerSchema } from './auth.js';
+import { disconnectMember, disconnectUser, emitToWorkspace } from '../realtime.js';
+import { findOrphanAccount, passwordSchema, registerSchema } from './auth.js';
 import { recordActivity } from './activity.js';
+import { announceAssignee } from './assign.js';
 import { AppError, notFound } from './errors.js';
 import { isInviteToken, sendInvite } from './passwordReset.js';
 import { announcePermissions, requireAdmin } from './permissions.js';
 import { readJoinLink, signJoinLink } from './joinLinks.js';
-import { ASSIGNABLE_ROLES, DEFAULT_ROLE } from './roles.js';
+import { ASSIGNABLE_ROLES, DEFAULT_ROLE, isAdminRole } from './roles.js';
 import { parse } from './validate.js';
 
 // Team management (admins only): who is in the workspace and with which role. A person has one User
@@ -23,6 +24,12 @@ const inviteSchema = z.object({
   name: registerSchema.shape.name.max(191, 'Name is too long'),
   email: registerSchema.shape.email,
   role: roleSchema,
+  // Optional first password set by the admin; without it, an invite email asks the person to choose one
+  password: passwordSchema.optional(),
+});
+const updateSchema = z.object({
+  name: registerSchema.shape.name.max(191, 'Name is too long').optional(),
+  password: passwordSchema.optional(),
 });
 
 // Status (Teams tab), from existing data only: "invited" is someone an admin added who hasn't chosen a password
@@ -39,7 +46,13 @@ const memberInclude = {
   },
 } as const;
 type MemberRow = Prisma.MemberGetPayload<{ include: typeof memberInclude }>;
-const memberStatus = (u: MemberRow['user']) => (!u.passwordChangedAt && u.resetTokens.some(isInviteToken) ? 'invited' : 'active');
+// "inactive" (deactivated here by an admin) wins over the account-level invited/active. "invited": an unused
+// invite link newer than the last password change (a re-invited account gets its old password voided first).
+const memberStatus = (m: MemberRow) => {
+  if (!m.active) return 'inactive';
+  const since = m.user.passwordChangedAt?.getTime() ?? 0;
+  return m.user.resetTokens.some((t) => isInviteToken(t) && t.createdAt.getTime() >= since) ? 'invited' : 'active';
+};
 const toMember = (m: MemberRow) => ({
   userId: m.user.id,
   name: m.user.name,
@@ -47,7 +60,8 @@ const toMember = (m: MemberRow) => ({
   role: m.role,
   isOwner: m.role === 'owner',
   canManageLabels: m.canManageLabels,
-  status: memberStatus(m.user),
+  active: m.active,
+  status: memberStatus(m),
 });
 
 export async function listMembers(auth: AuthPayload) {
@@ -56,29 +70,48 @@ export async function listMembers(auth: AuthPayload) {
   return rows.map(toMember).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// New email: creates the account and emails a link to choose a password. Existing email: adds that account
-// to this workspace (its name and password are untouched). Already a member: refused.
+// New email: creates the account with the admin's password (they can sign in at once) or, without one, emails a
+// link to choose a password. An email whose account was removed from every workspace counts as new again: that
+// row is reused (same user id, so old history still names them) with the new name and password. Existing email
+// still in some workspace: adds that account here with its own name and password untouched (an admin can't set a
+// password for an account that belongs elsewhere). Already a member: refused. Only the bcrypt hash is ever
+// stored; the API has no field that returns a password.
 export async function inviteMember(auth: AuthPayload, rawInput: unknown) {
   await requireAdmin(auth);
   const { workspaceId } = auth;
-  const { name, email, role } = parse(inviteSchema, rawInput);
+  const { name, email, role, password } = parse(inviteSchema, rawInput);
 
   const existing = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  if (existing && (await prisma.member.findUnique({ where: { userId_workspaceId: { userId: existing.id, workspaceId } } })))
+    throw new AppError('This person is already a member of this workspace', 409, 'MEMBER_EXISTS');
+  const orphan = existing ? await findOrphanAccount(email) : null;
+  if (existing && !orphan && password !== undefined)
+    throw new AppError(
+      'This email already has an account (it is a member of another workspace), so its password can only be changed by that person. Add them without a password: they keep their current one.',
+      409,
+      'ACCOUNT_EXISTS',
+    );
   let member: MemberRow;
   let invited = false;
+  let created = false;
   let emailSent = true;
   try {
-    if (existing) {
-      member = await prisma.member.create({ data: { userId: existing.id, workspaceId, role }, include: memberInclude });
+    if (existing && !orphan) {
+      member = await prisma.member.create({ data: { userId: existing.id, workspaceId, role, createdBy: auth.userId }, include: memberInclude });
     } else {
-      // Nobody knows this password; the invite link sets the real one
-      const passwordHash = await bcrypt.hash(randomBytes(32).toString('hex'), 10);
-      const user = await prisma.user.create({
-        data: { name, email, passwordHash, members: { create: { workspaceId, role } } },
-        include: { members: { where: { workspaceId }, include: memberInclude } },
-      });
+      // Without an admin-set password, nobody knows this one; the invite link sets the real one
+      const passwordHash = await bcrypt.hash(password ?? randomBytes(32).toString('hex'), 10);
+      const include = { members: { where: { workspaceId }, include: memberInclude } };
+      const user = orphan
+        ? await prisma.user.update({
+            where: { id: orphan.id },
+            data: { name, passwordHash, passwordChangedAt: new Date(), updatedBy: auth.userId, resetTokens: { deleteMany: {} }, members: { create: { workspaceId, role, createdBy: auth.userId } } },
+            include,
+          })
+        : await prisma.user.create({ data: { name, email, passwordHash, createdBy: auth.userId, members: { create: { workspaceId, role, createdBy: auth.userId } } }, include });
       member = user.members[0];
-      invited = true;
+      created = true;
+      invited = password === undefined;
     }
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')
@@ -99,7 +132,52 @@ export async function inviteMember(auth: AuthPayload, rawInput: unknown) {
     member = await prisma.member.findUniqueOrThrow({ where: { id: member.id }, include: memberInclude }); // now "invited"
   }
   await announcePermissions(workspaceId, member.user.id);
-  return { member: toMember(member), invited, emailSent };
+  return { member: toMember(member), invited, emailSent, created };
+}
+
+// Admins edit a member's name or set them a new password. Only the hash is stored, and a new password signs
+// that person out everywhere (like a reset) so the old sessions die. The owner's account is only the owner's
+// to change, and your own password isn't set here (use Forgot password).
+export async function updateMember(auth: AuthPayload, userId: string, rawInput: unknown) {
+  await requireAdmin(auth);
+  const { name, password } = parse(updateSchema, rawInput);
+  const where = { userId_workspaceId: { userId, workspaceId: auth.workspaceId } };
+  const member = await prisma.member.findUnique({ where, include: memberInclude });
+  if (!member) throw notFound('Member');
+  if (member.role === 'owner' && userId !== auth.userId)
+    throw new AppError("The workspace owner's account can only be changed by the owner", 400, 'OWNER_PROTECTED');
+  if (password !== undefined && userId === auth.userId)
+    throw new AppError("You can't set your own password here. Use Forgot password.", 400, 'CANNOT_CHANGE_SELF');
+  if (name === undefined && password === undefined) return toMember(member);
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      updatedBy: auth.userId,
+      ...(name !== undefined ? { name } : {}),
+      ...(password !== undefined ? { passwordHash: await bcrypt.hash(password, 10), passwordChangedAt: new Date() } : {}),
+    },
+  });
+  if (password !== undefined) await disconnectUser(userId);
+  await announcePermissions(auth.workspaceId, userId); // the new name reaches the team list and the Assign menu
+  if (name !== undefined) await announceAssignee(auth.workspaceId, member.id);
+  return toMember(await prisma.member.findUniqueOrThrow({ where, include: memberInclude }));
+}
+
+// Deactivate: they can't sign in to this workspace, their current token and Socket.IO connections to it stop at
+// once, and they can't be assigned chats. Nothing is deleted: their chats, history and assignee stay, and
+// reactivating restores everything. Never the owner or yourself.
+export async function setMemberActive(auth: AuthPayload, userId: string, active: boolean) {
+  await requireAdmin(auth);
+  const member = await requireOtherMember(auth, userId, active ? 'reactivate' : 'deactivate');
+  if (member.active === active) return toMember(member);
+  if (!active && isAdminRole(member.role)) await requireAnotherActiveAdmin(auth.workspaceId, userId, 'deactivate');
+  const updated = await prisma.member.update({ where: { id: member.id }, data: { active, updatedBy: auth.userId }, include: memberInclude });
+  if (!active) disconnectMember(auth.workspaceId, userId);
+  await announcePermissions(auth.workspaceId, userId);
+  // Deactivated: out of the Assign list (their chats keep them until reassigned); reactivated: back in it
+  if (active) await announceAssignee(auth.workspaceId, member.id);
+  else emitToWorkspace(auth.workspaceId, 'assignee:deleted', { id: member.id });
+  return toMember(updated);
 }
 
 async function requireOtherMember(auth: AuthPayload, userId: string, action: string) {
@@ -114,42 +192,51 @@ async function requireOtherMember(auth: AuthPayload, userId: string, action: str
   return member;
 }
 
+// A workspace must always keep at least one active admin (the owner counts), or nobody could manage it. The
+// owner can't be changed and nobody acts on themselves, so this normally can't trigger; it's the backstop for
+// odd states (e.g. a request racing with the actor's own deactivation).
+async function requireAnotherActiveAdmin(workspaceId: string, exceptUserId: string, action: string) {
+  const others = await prisma.member.count({
+    where: { workspaceId, active: true, role: { in: ['owner', 'admin'] }, userId: { not: exceptUserId } },
+  });
+  if (others === 0) throw new AppError(`You can't ${action} the last active admin`, 400, 'LAST_ADMIN');
+}
+
 // Only admins promote or demote, and never the owner or themselves (so a workspace can't lose its last admin)
 export async function updateMemberRole(auth: AuthPayload, userId: string, rawRole: unknown) {
   await requireAdmin(auth);
   const role = parse(roleSchema, rawRole);
   const member = await requireOtherMember(auth, userId, 'change the role of');
-  const updated = await prisma.member.update({ where: { id: member.id }, data: { role }, include: memberInclude });
+  if (isAdminRole(member.role) && !isAdminRole(role) && member.active) await requireAnotherActiveAdmin(auth.workspaceId, userId, 'demote');
+  const updated = await prisma.member.update({ where: { id: member.id }, data: { role, updatedBy: auth.userId }, include: memberInclude });
   await announcePermissions(auth.workspaceId, userId);
+  await announceAssignee(auth.workspaceId, member.id); // new role colour in chats and the Assign list
   return toMember(updated);
 }
 
 // Their account stays (they may be in other workspaces); they lose access to this one immediately. Their name
-// leaves the Assign list too: the assignee linked to them is deleted and any chats it held become unassigned
-// (New Leads), each with a history entry, exactly like deleting an assignee.
+// leaves the Assign list too, and any chats they held become unassigned (New Leads; onDelete: SetNull), each
+// with a history entry.
 export async function removeMember(auth: AuthPayload, userId: string) {
   await requireAdmin(auth);
   const { workspaceId } = auth;
   const member = await requireOtherMember(auth, userId, 'remove');
-  const dropped = await prisma.$transaction(async (tx) => {
-    const assignees = await tx.assignee.findMany({ where: { workspaceId, userId }, select: { id: true, name: true } });
-    const chats = assignees.length
-      ? await tx.conversation.findMany({ where: { workspaceId, assignedToId: { in: assignees.map((a) => a.id) } }, select: { id: true, assignedToId: true } })
-      : [];
-    await tx.assignee.deleteMany({ where: { workspaceId, userId } }); // chats fall back to unassigned (onDelete: SetNull)
+  if (isAdminRole(member.role) && member.active) await requireAnotherActiveAdmin(workspaceId, userId, 'remove');
+  const chats = await prisma.$transaction(async (tx) => {
+    const held = await tx.conversation.findMany({ where: { workspaceId, assignedToId: member.id }, select: { id: true } });
     await tx.member.delete({ where: { id: member.id } });
-    return { assignees, chats };
+    return held;
   });
   disconnectMember(workspaceId, userId);
   emitToWorkspace(workspaceId, 'member:removed', { userId });
-  for (const a of dropped.assignees) emitToWorkspace(workspaceId, 'assignee:deleted', { id: a.id });
-  for (const c of dropped.chats)
+  emitToWorkspace(workspaceId, 'assignee:deleted', { id: member.id });
+  for (const c of chats)
     await recordActivity({
       workspaceId,
       conversationId: c.id,
       actorId: auth.userId,
       type: 'unassigned',
-      data: { assignee: dropped.assignees.find((a) => a.id === c.assignedToId)?.name ?? member.user.name, reason: 'member_removed' },
+      data: { assignee: member.user.name, reason: 'member_removed' },
     });
   return userId;
 }
@@ -172,7 +259,7 @@ export async function joinWorkspace(auth: AuthPayload, token: unknown) {
   await prisma.member.upsert({
     where: { userId_workspaceId: { userId: auth.userId, workspaceId: workspace.id } },
     update: {},
-    create: { userId: auth.userId, workspaceId: workspace.id, role: DEFAULT_ROLE },
+    create: { userId: auth.userId, workspaceId: workspace.id, role: DEFAULT_ROLE, createdBy: auth.userId },
   });
   await announcePermissions(workspace.id, auth.userId);
   return { token: signToken({ userId: auth.userId, workspaceId: workspace.id }), userId: auth.userId };

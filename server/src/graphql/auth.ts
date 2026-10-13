@@ -1,5 +1,5 @@
 import { verifyToken } from '../auth.js';
-import { getMe, login, register } from '../services/auth.js';
+import { changePassword, getMe, login, register } from '../services/auth.js';
 import { requestPasswordReset, resetPassword } from '../services/passwordReset.js';
 import { createWorkspace, listWorkspaces, switchWorkspace } from '../services/workspaces.js';
 import { authed, run, type Context } from './shared.js';
@@ -77,6 +77,8 @@ export const typeDefs = /* GraphQL */ `
     createWorkspace(name: String!): AuthPayload!
     "Returns a token for another workspace the current user is a member of"
     switchWorkspace(id: ID!): AuthPayload!
+    "Change your own password (current one required; 8-72 characters with a letter and a number). Other sessions are signed out; returns a fresh token for this one."
+    changeMyPassword(currentPassword: String!, newPassword: String!): AuthPayload!
   }
 `;
 
@@ -99,5 +101,6 @@ export const resolvers = {
     resetPassword: (_: unknown, { input }: { input: unknown }) => run(() => resetPassword(input)),
     createWorkspace: authed(async ({ name }: { name: string }, auth) => withMe(await createWorkspace(auth, { name }))),
     switchWorkspace: authed(async ({ id }: { id: string }, auth) => withMe(await switchWorkspace(auth, id))),
+    changeMyPassword: authed(async (input: { currentPassword: string; newPassword: string }, auth) => withMe(await changePassword(auth, input))),
   },
 };

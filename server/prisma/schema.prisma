@@ -10,45 +10,75 @@ datasource db {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  name         String
-  passwordHash String
-  createdAt    DateTime @default(now())
-  members      Member[]
+  id                String               @id @default(cuid())
+  email             String               @unique
+  name              String
+  passwordHash      String
+  createdAt         DateTime             @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy         String?
+  updatedAt         DateTime             @default(now()) @updatedAt
+  updatedBy         String?
+  deletedAt         DateTime?
+  deletedBy         String?
+  // active | inactive (record status)
+  status            String               @default("active")
+  members           Member[]
   // Set when the password is reset; login tokens issued before it stop working
   passwordChangedAt DateTime?
   resetTokens       PasswordResetToken[]
-  assignees         Assignee[]
 }
 
 model Workspace {
   id            String           @id @default(cuid())
   name          String
   createdAt     DateTime         @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy     String?
+  updatedAt     DateTime         @default(now()) @updatedAt
+  updatedBy     String?
+  deletedAt     DateTime?
+  deletedBy     String?
+  // active | inactive (record status)
+  status        String           @default("active")
   members       Member[]
   whatsapp      WhatsAppAccount?
   contacts      Contact[]
   conversations Conversation[]
   labels        Label[]
-  assignees     Assignee[]
   activity      ActivityEvent[]
   quickReplies  QuickReply[]
 }
 
 model Member {
-  id          String    @id @default(cuid())
-  role        String    @default("agent") // owner | admin | supervisor | agent
+  id                    String         @id @default(cuid())
+  role                  String         @default("agent") // owner | admin | supervisor | agent
   // Agents need this to create, edit or delete labels and assignees (owners and admins always can)
-  canManageLabels Boolean @default(false)
+  canManageLabels       Boolean        @default(false)
+  // false: deactivated by an admin for this workspace. They can't sign in to it, their sessions and Socket.IO
+  // connections are closed, and they can't be assigned chats. Their account and other workspaces are untouched.
+  active                Boolean        @default(true)
   // Bell: events after this time count as unseen for this member
-  notificationsSeenAt DateTime?
-  userId      String
-  workspaceId String
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  notificationsSeenAt   DateTime?
+  userId                String
+  workspaceId           String
+  createdAt             DateTime       @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy             String?
+  updatedAt             DateTime       @default(now()) @updatedAt
+  updatedBy             String?
+  deletedAt             DateTime?
+  deletedBy             String?
+  user                  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace             Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Chats assigned to this member (Conversation.assignedToId); removing the member unassigns them
+  assignedConversations Conversation[]
 
   @@unique([userId, workspaceId])
+  @@map("Role")
 }
 
 // One connected WhatsApp number per workspace (from Embedded Signup or manual setup)
@@ -59,6 +89,16 @@ model WhatsAppAccount {
   phoneNumberId String    @unique
   displayPhone  String?
   accessToken   String    @db.Text // encrypt at rest in production
+  createdAt     DateTime  @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy     String?
+  updatedAt     DateTime  @default(now()) @updatedAt
+  updatedBy     String?
+  deletedAt     DateTime?
+  deletedBy     String?
+  // active | inactive (record status)
+  status        String    @default("active")
   workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
@@ -69,6 +109,15 @@ model Contact {
   name          String?
   tags          String         @default("") // comma separated; use a Tag table later
   createdAt     DateTime       @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy     String?
+  updatedAt     DateTime       @default(now()) @updatedAt
+  updatedBy     String?
+  deletedAt     DateTime?
+  deletedBy     String?
+  // active | inactive (record status)
+  status        String         @default("active")
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
@@ -76,25 +125,34 @@ model Contact {
 }
 
 model Conversation {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  contactId      String
-  assignedToId   String?
-  lastMessageAt  DateTime  @default(now())
+  id            String              @id @default(cuid())
+  workspaceId   String
+  contactId     String
+  // The workspace member (Member.id, table Role) who holds this chat; null = unassigned (a New Lead)
+  assignedToId  String?
+  lastMessageAt DateTime            @default(now())
   // Customer's last inbound message: free-form replies allowed for 24h after this
-  lastInboundAt  DateTime?
-  unread         Int       @default(0)
+  lastInboundAt DateTime?
+  unread        Int                 @default(0)
   // open | closed. Closing keeps messages, labels and the assignee; new customer messages don't reopen it
-  status         String    @default("open")
-  closedAt       DateTime?
-  closedById     String?
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  contact        Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  messages       Message[]
-  labels         ConversationLabel[]
-  assignedTo     Assignee? @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
-  activity       ActivityEvent[]
-  clears         ConversationClear[]
+  status        String              @default("open")
+  closedAt      DateTime?
+  closedById    String?
+  createdAt     DateTime            @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy     String?
+  updatedAt     DateTime            @default(now()) @updatedAt
+  updatedBy     String?
+  deletedAt     DateTime?
+  deletedBy     String?
+  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact       Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages      Message[]
+  labels        ConversationLabel[]
+  assignedTo    Member?             @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  activity      ActivityEvent[]
+  clears        ConversationClear[]
 
   @@unique([workspaceId, contactId])
   @@index([workspaceId, lastMessageAt])
@@ -102,15 +160,15 @@ model Conversation {
 }
 
 model Message {
-  id             String       @id @default(cuid())
+  id             String            @id @default(cuid())
   conversationId String
-  waMessageId    String?      @unique
+  waMessageId    String?           @unique
   direction      String // in | out
   type           String // text | template | image | ...
-  body           String       @db.Text
-  status         String       @default("sent") // pending | sent | delivered | read | failed
-  error          String?      @db.Text
-  createdAt      DateTime     @default(now())
+  body           String            @db.Text
+  status         String            @default("sent") // pending | sent | delivered | read | failed
+  error          String?           @db.Text
+  createdAt      DateTime          @default(now())
   // Outgoing messages: the agent (user id) who sent it; null for customer messages and older rows
   sentById       String?
   editedAt       DateTime?
@@ -118,8 +176,11 @@ model Message {
   deletedAt      DateTime?
   deletedById    String?
   // Bumped on every edit/delete so concurrent edits and late socket events can't overwrite newer content
-  version        Int          @default(0)
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  version        Int               @default(0)
+  // --- standard audit fields (sentById = createdBy, deletedById = deletedBy, status = delivery status) ---
+  updatedAt      DateTime          @default(now()) @updatedAt
+  updatedBy      String?
+  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   revisions      MessageRevision[]
 
   @@index([conversationId, createdAt])
@@ -146,6 +207,15 @@ model Label {
   name          String              @db.VarChar(50)
   color         String              @db.VarChar(7) // #rrggbb
   createdAt     DateTime            @default(now())
+  // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
+  // --- deletes stay as they are) ---
+  createdBy     String?
+  updatedAt     DateTime            @default(now()) @updatedAt
+  updatedBy     String?
+  deletedAt     DateTime?
+  deletedBy     String?
+  // active | inactive (record status)
+  status        String              @default("active")
   workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversations ConversationLabel[]
 
@@ -161,25 +231,6 @@ model ConversationLabel {
 
   @@id([conversationId, labelId])
   @@index([labelId])
-}
-
-// Who a conversation is assigned to: a named, coloured entry managed like labels (one per conversation)
-model Assignee {
-  id            String         @id @default(cuid())
-  workspaceId   String
-  name          String         @db.VarChar(50)
-  color         String         @db.VarChar(7) // #rrggbb
-  createdAt     DateTime       @default(now())
-  // Optional: the workspace member this assignee stands for ("Assigned to me", assignment notifications).
-  // Unlinked assignees keep working as plain names.
-  userId        String?
-  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
-  conversations Conversation[]
-
-  @@unique([workspaceId, name])
-  @@unique([workspaceId, userId])
-  @@index([userId])
 }
 
 // "Forgot password" links. Only a SHA-256 hash of the secret is stored; each link expires and works once.
@@ -221,6 +272,8 @@ model ConversationClear {
   userId         String
   conversationId String
   clearedAt      DateTime
+  // Append-only: clearedAt is when the row was made; the composite key is the identity
+  createdAt      DateTime     @default(now())
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([userId, conversationId])
@@ -228,7 +281,8 @@ model ConversationClear {
 }
 
 // WhatsApp Business-style quick replies: typing "/shortcut" in the message box offers these texts.
-// Same columns as the TyresCart site's klever_tyres_chat table (imported with scripts/importQuickReplies.ts),
+// Table Shortchat. Same columns as the TyresCart site's klever_tyres_chat table (its SQL dump is imported with
+// scripts/importQuickReplies.ts),
 // plus workspaceId so each workspace has its own set.
 model QuickReply {
   id          Int       @id @default(autoincrement()) @db.UnsignedInt
@@ -244,8 +298,11 @@ model QuickReply {
   sortOrder   Int       @default(0) @map("sort_order")
   createdAt   DateTime? @map("created_at")
   updatedAt   DateTime? @updatedAt @map("updated_at")
+  // Standard soft-delete columns (our user id; created_by/updated_by hold TyresCart site ids as imported)
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?   @map("deleted_by")
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, status, sortOrder])
-  @@map("klever_tyres_chat")
+  @@map("Shortchat")
 }

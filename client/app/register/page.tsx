@@ -15,9 +15,14 @@ export default function RegisterPage() {
   const [showPassword, setShowPassword] = useState(false);
   // Opened from a team signup link (?join=...): join that workspace as an Agent instead of creating one
   const [join, setJoin] = useState<{ token: string; workspaceName: string | null } | null>(null);
+  // No signup link: workspace creation is closed, accounts are made by an admin on the Teams page
+  const [closed, setClosed] = useState(false);
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get('join');
-    if (!token) return;
+    if (!token) {
+      setClosed(true);
+      return;
+    }
     setJoin({ token, workspaceName: null });
     fetchJoinLinkInfo(token)
       .then(({ workspaceName }) => setJoin({ token, workspaceName }))
@@ -34,39 +39,35 @@ export default function RegisterPage() {
         name: String(form.get('name')),
         email: String(form.get('email')),
         password: String(form.get('password')),
-        ...(join ? { joinToken: join.token } : { workspaceName: String(form.get('workspaceName')) }),
+        ...(join ? { joinToken: join.token } : {}),
       });
       setToken(token);
-      router.push(join ? '/inbox' : '/settings');
+      router.push('/inbox');
     } catch (err) {
       setError((err as Error).message);
       setLoading(false);
     }
   }
 
+  if (closed)
+    return (
+      <AuthShell title="Invitation needed" subtitle="Accounts are created by your admin." footerText="Already have an account?" footerLinkText="Sign in →" footerLinkHref="/login">
+        <p className="text-sm leading-relaxed text-body">
+          New users are added by an admin on the <span className="font-semibold">Teams</span> page, or through a team signup
+          link. Ask your admin for an invite.
+        </p>
+      </AuthShell>
+    );
+
   return (
     <AuthShell
-      title={join ? `Join ${join.workspaceName ?? 'your team'}` : 'Create workspace'}
-      subtitle={join ? "You'll join as an Agent. An admin can change your role later." : 'Set up your WhatsApp SaaS in 5 minutes.'}
+      title={`Join ${join?.workspaceName ?? 'your team'}`}
+      subtitle="You'll join as an Agent. An admin can change your role later."
       footerText="Already have an account?"
-      footerLinkText={join ? 'Sign in to join →' : 'Sign in →'}
+      footerLinkText="Sign in to join →"
       footerLinkHref={join ? `/login?join=${encodeURIComponent(join.token)}` : '/login'}
     >
       <form onSubmit={onSubmit} className="space-y-3.5">
-        {!join && (
-        <div>
-          <label className="block text-[13px] font-medium text-body">
-            Business name <span className="text-danger-icon">*</span>
-          </label>
-          <input
-            name="workspaceName"
-            type="text"
-            required
-            placeholder="Acme Corp"
-            className={`${inputClass} mt-1.5`}
-          />
-        </div>
-        )}
 
         <div>
           <label className="block text-[13px] font-medium text-body">
@@ -105,7 +106,7 @@ export default function RegisterPage() {
               type={showPassword ? 'text' : 'password'}
               required
               minLength={8}
-              placeholder="Min 8 characters"
+              placeholder="Min 8 characters, with a letter and a number"
               className={`${inputClass} pr-10`}
             />
             <button
@@ -132,7 +133,7 @@ export default function RegisterPage() {
         <FormMessage>{error}</FormMessage>
 
         <button disabled={loading} className={buttonClass}>
-          <span>{join ? (loading ? 'Joining…' : 'Create account & join') : loading ? 'Creating workspace…' : 'Create workspace'}</span>
+          <span>{loading ? 'Joining…' : 'Create account & join'}</span>
           {!loading && (
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M5 12h14" />
