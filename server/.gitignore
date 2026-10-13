@@ -4,3 +4,7 @@ node_modules
 *.db-journal
 .env.*
 !.env.example
+
+# Raw DB dumps and migration backups contain real emails and password hashes -- never commit these.
+# Already-tracked files under backups/ need a separate, explicit cleanup (see deployment plan).
+backups/
