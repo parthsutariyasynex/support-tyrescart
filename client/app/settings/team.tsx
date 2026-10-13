@@ -1,13 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
+import { API_URL, getToken } from '@/lib/api';
 import { fetchWorkspaceMembers } from '@/lib/assignees';
 import { type TeamMember, createJoinLink, fetchMembers, inviteMember, removeMember, updateMemberRole } from '@/lib/members';
 import { ASSIGNABLE_ROLES, ROLE_STYLES, isAdminRole } from '@/lib/roles';
 import { buttonClass, inputClass } from '../AuthShell';
 import { RoleBadge } from '../RoleBadge';
 
-type Row = { userId: string; name: string; email?: string; role: string; isOwner: boolean };
+type Row = { userId: string; name: string; email?: string; role: string; isOwner: boolean; status?: string };
 
 // Team: everyone sees who is in the workspace and their role. Admins also invite people, change roles,
 // remove members and create a signup link (the server enforces all of it).
@@ -26,6 +28,18 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
     request.then(setRows).catch((err) => setError((err as Error).message));
   }, [admin]);
   useEffect(load, [load]);
+
+  // Admins' list stays live: the server announces every member added, role change (member:permissions) and
+  // removal (member:removed), so the Teams tab reloads from the database instead of guessing
+  useEffect(() => {
+    if (!admin) return;
+    const socket = io(API_URL, { auth: { token: getToken() } });
+    socket.on('member:permissions', load);
+    socket.on('member:removed', load);
+    return () => {
+      socket.disconnect();
+    };
+  }, [admin, load]);
 
   async function attempt(key: string, fn: () => Promise<void>) {
     setBusy(key);
@@ -88,6 +102,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
                   <RoleBadge role={m.role} />
                   {m.isOwner && <span className="text-[10px] font-medium text-faint">Owner</span>}
                   {m.userId === meId && <span className="text-[10px] font-medium text-faint">You</span>}
+                  {m.status && <StatusBadge status={m.status} />}
                 </p>
                 {m.email && <p className="truncate text-[11px] text-muted">{m.email}</p>}
               </div>
@@ -196,5 +211,18 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
         </>
       )}
     </section>
+  );
+}
+
+// active: can sign in · invited: added by an admin, hasn't chosen a password from the invite email yet
+function StatusBadge({ status }: { status: string }) {
+  const invited = status === 'invited';
+  return (
+    <span
+      title={invited ? 'Added by an admin; waiting for them to choose a password from the invite email' : 'Can sign in'}
+      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${invited ? 'bg-warning-soft text-warning' : 'bg-success-soft text-success'}`}
+    >
+      {invited ? 'Invited' : 'Active'}
+    </span>
   );
 }

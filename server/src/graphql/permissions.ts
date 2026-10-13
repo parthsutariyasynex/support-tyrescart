@@ -8,6 +8,8 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     "Owners and admins always can; agents only when granted"
     canManageLabels: Boolean!
+    "Assign, reassign and unassign chats: owners and admins only (the Assign list shows checkboxes to them alone)"
+    canManageAssignments: Boolean!
   }
 
   extend type Me {
@@ -15,6 +17,8 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     "Can create, rename, recolour and delete labels and assignees"
     canManageLabels: Boolean!
+    "Can assign, reassign and unassign chats: owners and admins only (everyone can still Assign to Me on New Leads)"
+    canManageAssignments: Boolean!
   }
 
   extend type Mutation {
@@ -28,6 +32,8 @@ export const resolvers = {
     role: async (_me: unknown, _args: unknown, ctx: Context) => (await getPermissions(requireAuth(ctx))).role,
     canManageLabels: async (_me: unknown, _args: unknown, ctx: Context) =>
       (await getPermissions(requireAuth(ctx))).canManageLabels,
+    canManageAssignments: async (_me: unknown, _args: unknown, ctx: Context) =>
+      (await getPermissions(requireAuth(ctx))).canManageAssignments,
   },
   Mutation: {
     setLabelPermission: authed(({ userId, canManageLabels }: { userId: string; canManageLabels: boolean }, auth) =>

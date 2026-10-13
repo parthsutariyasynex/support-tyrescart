@@ -32,6 +32,12 @@ export async function deleteAssignee(id: string) {
   await gql(`mutation DeleteAssignee($id: ID!) { deleteAssignee(id: $id) }`, { id });
 }
 
+// "Assign to Me" on a New Lead: take an unassigned chat for yourself (fails if someone else got it first)
+export async function claimConversation(conversationId: string) {
+  const query = `mutation Claim($c: ID!) { claimConversation(conversationId: $c) { id assignee { id name color userId } } }`;
+  return (await gql<{ claimConversation: { id: string; assignee: AssigneeRef | null } }>(query, { c: conversationId })).claimConversation;
+}
+
 // Pass assigneeId null to unassign. memberId (instead): assign to that Supervisor or Agent; the server uses
 // the assignee linked to them, creating it the first time.
 export async function assignConversation(conversationId: string, assigneeId: string | null, memberId?: string) {

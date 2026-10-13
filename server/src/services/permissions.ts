@@ -11,8 +11,12 @@ export async function getPermissions({ userId, workspaceId }: AuthPayload) {
   if (!member) throw new AppError('You are not a member of this workspace', 403, 'FORBIDDEN');
   const role = member.role;
   const isAdmin = isAdminRole(role);
-  const canManageAssignments = isSupervisorOrAbove(role);
-  return { role, isAdmin, canManageAssignments, canManageLabels: canManageAssignments || member.canManageLabels };
+  // Assigning, reassigning and unassigning chats: owners and admins only. Supervisors and agents never, and
+  // there is no grant for it; they only "Assign to Me" an unassigned chat on New Leads (claimConversation)
+  const canManageAssignments = isAdmin;
+  // Labels and assignee names/colours: admins and supervisors, or anyone an admin granted it to (unchanged)
+  const canManageLabels = isSupervisorOrAbove(role) || member.canManageLabels;
+  return { role, isAdmin, canManageAssignments, canManageLabels };
 }
 
 // Users, roles and system settings (WhatsApp connection)
@@ -28,11 +32,11 @@ export async function requireLabelManager(auth: AuthPayload) {
 }
 
 // Linking an assignee to a person, unlinking it, or deleting it moves chats between people (My Chats,
-// notifications) just like reassigning, so it needs the same right: supervisors and admins only. A label grant
+// notifications) just like reassigning, so it needs the same right: owners and admins only. A label grant
 // only covers names and colours.
 export async function requireAssignmentManager(auth: AuthPayload) {
   if (!(await getPermissions(auth)).canManageAssignments)
-    throw new AppError('Only supervisors and admins can link, unlink or delete assignees', 403, 'FORBIDDEN');
+    throw new AppError('Only admins can link, unlink or delete assignees', 403, 'FORBIDDEN');
 }
 
 // Owners and admins grant or revoke label management for a member
@@ -47,7 +51,7 @@ export async function setLabelPermission(auth: AuthPayload, userId: string, canM
 
 // Tells every open tab in the workspace about a member's current role and permissions
 export async function announcePermissions(workspaceId: string, userId: string) {
-  const { role, canManageLabels } = await getPermissions({ userId, workspaceId });
-  emitToWorkspace(workspaceId, 'member:permissions', { userId, role, canManageLabels });
-  return { userId, role, canManageLabels };
+  const { role, canManageLabels, canManageAssignments } = await getPermissions({ userId, workspaceId });
+  emitToWorkspace(workspaceId, 'member:permissions', { userId, role, canManageLabels, canManageAssignments });
+  return { userId, role, canManageLabels, canManageAssignments };
 }

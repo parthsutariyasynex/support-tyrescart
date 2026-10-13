@@ -182,6 +182,9 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
       400,
       'INVALID_PHONE',
     );
+  // New Leads: someone has to take the chat (Assign to Me) before anyone messages the customer
+  if (!conversation.assignedToId)
+    throw new AppError('Assign this chat to yourself before replying (New Leads → Assign to Me).', 409, 'NOT_ASSIGNED');
   const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;

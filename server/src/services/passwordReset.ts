@@ -73,6 +73,9 @@ export async function requestPasswordReset(rawInput: unknown, ip: string) {
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Invite links live for days; "forgot password" links for minutes. Tells the two apart from the stored row.
+export const isInviteToken = (t: { createdAt: Date; expiresAt: Date }) => t.expiresAt.getTime() - t.createdAt.getTime() > TOKEN_TTL_MS;
+
 // An admin added someone who had no account: email them a link to choose their password (same single-use
 // link as "Forgot password", valid for 7 days). Returns false if the email couldn't be sent.
 export async function sendInvite(user: { id: string; name: string; email: string }, workspaceName: string, inviter: string) {

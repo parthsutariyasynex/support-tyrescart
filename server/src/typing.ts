@@ -45,9 +45,11 @@ function attachTyping(socket: Socket) {
     if (!allowed.has(conversationId)) {
       const ok = await prisma.conversation.findFirst({
         where: { id: conversationId, workspaceId },
-        select: { id: true },
+        select: { id: true, assignedToId: true },
       });
       if (!ok) return; // someone else's conversation, or made up
+      // New Leads can't be replied to until someone takes them, so nobody "types" in one either
+      if (!ok.assignedToId) return;
       allowed.add(conversationId);
     }
     if (name === null) {

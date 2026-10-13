@@ -3,6 +3,7 @@ import { AppError } from '../services/errors.js';
 import {
   assignConversation,
   assignConversationToMember,
+  claimConversation,
   createAssignee,
   deleteAssignee,
   listAssignees,
@@ -64,6 +65,8 @@ export const typeDefs = /* GraphQL */ `
     deleteAssignee(id: ID!): ID!
     "Pass assigneeId: null to unassign. Assigning the current assignee again changes nothing. memberId (instead of assigneeId): assign to that Supervisor or Agent, using the assignee linked to them (created on first use)."
     assignConversation(conversationId: ID!, assigneeId: ID, memberId: ID): Conversation!
+    "Assign to Me (New Leads): take an unassigned chat for yourself. Fails with ALREADY_ASSIGNED if someone else has it."
+    claimConversation(conversationId: ID!): Conversation!
   }
 `;
 
@@ -82,6 +85,7 @@ export const resolvers = {
       updateAssignee(auth, id, Object.fromEntries(Object.entries(input).filter(([k, v]) => v != null || k === 'userId'))),
     ),
     deleteAssignee: authed(({ id }: { id: string }, auth) => deleteAssignee(auth, id)),
+    claimConversation: authed(({ conversationId }: { conversationId: string }, auth) => claimConversation(auth, conversationId)),
     assignConversation: authed(
       async (
         { conversationId, assigneeId, memberId }: { conversationId: string; assigneeId?: string | null; memberId?: string | null },

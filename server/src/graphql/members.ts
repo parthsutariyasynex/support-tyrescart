@@ -20,6 +20,8 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     isOwner: Boolean!
     canManageLabels: Boolean!
+    "active: can sign in | invited: added by an admin and hasn't chosen a password yet"
+    status: String!
   }
 
   input InviteMemberInput {

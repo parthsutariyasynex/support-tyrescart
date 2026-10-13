@@ -8,7 +8,7 @@ import {
   fetchWorkspaceMembers,
 } from '@/lib/assignees';
 import type { Conversation } from '@/lib/inbox';
-import { assignableMembers, roleStyle } from '@/lib/roles';
+import { assignableMembers, otherAssigneesToList, roleStyle } from '@/lib/roles';
 import { RoleBadge } from '../RoleBadge';
 
 type AssigneeRef = NonNullable<Conversation['assignee']>;
@@ -45,7 +45,7 @@ export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { ass
 const inputClass =
   'w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-xs text-ink-soft placeholder:text-faint outline-hidden focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary';
 
-// Top-header "Assign" dropdown: assign the open chat to a person (or Unassigned). Without a chat it just lists them.
+// Top-header "Assign" dropdown: assign the open chat to a person (click them again to unassign). Without a chat it just lists them.
 export function AssignDropdown({
   conversation,
   assignees,
@@ -96,13 +96,21 @@ export function AssignDropdown({
     };
   }, [open]);
 
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      requestAnimationFrame(() => {
+        inputRef.current?.focus({ preventScroll: true });
+      });
+    }
+  }, [open]);
+
   // Switching chats closes the menu
   useEffect(close, [conversation?.id]);
 
-  // Members (with roles) for People, the badges and the "Linked user" picker: fetched every time the menu opens,
-  // and again while it's open if someone joins, leaves or changes role
+  // Preload workspace members on mount and refetch on membersVersion to prevent layout shifts on open
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
     fetchWorkspaceMembers()
       .then((list) => !cancelled && setMembers(list))
@@ -110,7 +118,19 @@ export function AssignDropdown({
     return () => {
       cancelled = true;
     };
-  }, [open, membersVersion]);
+  }, [membersVersion]);
+
+  // If opened before initial preload finished, ensure it fetches
+  useEffect(() => {
+    if (!open || members !== null) return;
+    let cancelled = false;
+    fetchWorkspaceMembers()
+      .then((list) => !cancelled && setMembers(list))
+      .catch(() => !cancelled && setMembers((m) => m ?? []));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, members]);
 
   async function attempt(fn: () => Promise<void>) {
     setBusy(true);
@@ -124,22 +144,12 @@ export function AssignDropdown({
     }
   }
 
-  // Like a label checkbox: tick to assign, untick the ticked one to unassign. The menu stays open.
+  // Like a label checkbox: tick to assign, untick the ticked one to unassign (asks first). The menu stays open.
   function toggle(assigneeId: string) {
     if (!conversation) return;
     if (conversation.assignee?.id === assigneeId && !confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
     attempt(async () => {
       const c = await assignConversation(conversation.id, conversation.assignee?.id === assigneeId ? null : assigneeId);
-      onAssigned(c.id, c.assignee);
-    });
-  }
-
-  // "Unassigned" row: release the chat from whoever has it (asks first, like unticking them)
-  function unassign() {
-    if (!conversation?.assignee) return;
-    if (!confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
-    attempt(async () => {
-      const c = await assignConversation(conversation.id, null);
       onAssigned(c.id, c.assignee);
     });
   }
@@ -160,19 +170,22 @@ export function AssignDropdown({
   const term = query.trim();
   const matches = (name: string) => name.toLowerCase().includes(term.toLowerCase());
   // People who can be assigned chats: this workspace's owner, Supervisors and Agents (live from the API; removed
-  // members aren't in it). Their linked assignee carries the count; other assignees are listed below them.
+  // members aren't in it). Their linked assignee carries the count. Stale names (no current member behind them)
+  // are listed below only while they still hold chats.
   const eligible = assignableMembers(members ?? []);
   const people = eligible.filter((m) => matches(m.name) || matches(m.email));
   const linkedTo = (userId: string) => assignees.find((a) => a.userId === userId);
-  const visible = assignees.filter((a) => !(a.userId && eligible.some((m) => m.id === a.userId)) && matches(a.name));
+  const visible = otherAssigneesToList(assignees, eligible).filter((a) => matches(a.name));
 
 
 
   const current = conversation?.assignee;
   const memberRole = (userId: string | null) => (userId ? members?.find((m) => m.id === userId)?.role : undefined);
-  const allowed = (a: Assignee) => canAssignOthers || (!!meId && a.userId === meId && (!current || current.id === a.id));
-  const allowedPerson = (userId: string) => canAssignOthers || (userId === meId && (!current || current.userId === meId));
-  const sectionTitle = (text: string) => <li className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-faint">{text}</li>;
+  // Only owners and admins see the checkboxes and assign or unassign here. Supervisors and agents see the list
+  // read-only and take new chats with "Assign to Me" on New Leads. The server enforces the same rule.
+  const allowed = (_a: Assignee) => canAssignOthers;
+  const allowedPerson = (_userId: string) => canAssignOthers;
+  // const sectionTitle = (text: string) => <li className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-faint">{text}</li>;
 
   return (
     <div ref={ref} className="relative">
@@ -180,17 +193,19 @@ export function AssignDropdown({
         data-assign-dropdown
         onClick={() => (open ? close() : setOpen(true))}
         title={conversation ? 'Assign this chat' : 'Manage assignees'}
-        className={`flex items-center gap-1.5 rounded-full border bg-surface py-1 pl-1.5 pr-2.5 text-xs hover:bg-surface-muted transition cursor-pointer ${open ? 'border-primary text-primary' : 'border-line text-muted'}`}
+        className={`flex items-center gap-1.5 rounded-full border bg-surface py-1 pl-1.5 pr-2.5 text-xs hover:bg-surface-muted transition cursor-pointer w-28 justify-between shrink-0 ${open ? 'border-primary text-primary' : 'border-line text-muted'}`}
       >
-        {current ? (
-          <AssigneeAvatar assignee={current} />
-        ) : (
-          <span className="flex h-5 w-5 items-center justify-center text-faint">
-            <PersonIcon className="h-4 w-4" />
-          </span>
-        )}
-        <span className="max-w-[90px] truncate font-medium">{current ? current.name : 'Assign'}</span>
-        <svg className="h-3 w-3 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {current ? (
+            <AssigneeAvatar assignee={current} />
+          ) : (
+            <span className="flex h-5 w-5 items-center justify-center text-faint shrink-0">
+              <PersonIcon className="h-4 w-4" />
+            </span>
+          )}
+          <span className="truncate font-medium">{current ? current.name : 'Assign'}</span>
+        </div>
+        <svg className="h-3 w-3 text-faint shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="m6 9 6 6 6-6" />
         </svg>
       </button>
@@ -217,7 +232,7 @@ export function AssignDropdown({
             <>
               <div className="p-2">
                 <input
-                  autoFocus
+                  ref={inputRef}
                   value={query}
                   maxLength={50}
                   onChange={(e) => setQuery(e.target.value)}
@@ -225,41 +240,27 @@ export function AssignDropdown({
                   className={inputClass}
                 />
               </div>
-              <ul className="min-h-0 flex-1 overflow-y-auto pb-1">
-                {/* Unassigned: the chat belongs to nobody (choosing it releases the current assignee) */}
-                {conversation && !term && (
-                  <li className="px-1">
-                    <button
-                      disabled={busy || (!!current && !(canAssignOthers || current.userId === meId))}
-                      title={current && !(canAssignOthers || current.userId === meId) ? 'Agents can only release their own chats' : undefined}
-                      onClick={unassign}
-                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
-                        current && !(canAssignOthers || current.userId === meId) ? 'opacity-50' : ''
-                      }`}
-                    >
-                      <Checkbox on={!current} />
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-faint">
-                        <PersonIcon className="h-4 w-4" />
-                      </span>
-                      <span className="text-body">Unassigned</span>
-                    </button>
-                  </li>
+              <ul className="min-h-[140px] flex-1 overflow-y-auto pb-1">
+                {members === null && !people.length && (
+                  <li className="px-3 py-4 text-center text-muted">Loading people…</li>
                 )}
-                {people.length > 0 && sectionTitle('People')}
+                {/* {people.length > 0 && sectionTitle('People')} */}
                 {people.map((m) => {
                   const linked = linkedTo(m.id);
                   const ok = allowedPerson(m.id);
+                  const isAssigned = !!current?.userId && current.userId === m.id;
                   return (
                     <li key={`member:${m.id}`} className="flex items-center gap-1 px-1">
                       <button
                         disabled={busy || !conversation || !ok}
-                        title={conversation && !ok ? 'Agents can only take unassigned chats or release their own' : undefined}
+                        title={conversation && !ok ? 'Only admins can assign chats. Use Assign to Me on New Leads.' : undefined}
                         onClick={() => toggleMember(m.id)}
-                        className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
-                          conversation && !ok ? 'opacity-50' : ''
-                        }`}
+                        className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
+                          isAssigned
+                            ? 'bg-primary-subtle text-primary font-medium'
+                            : 'hover:bg-surface-muted disabled:hover:bg-transparent'
+                        } ${conversation && !ok ? 'opacity-50' : ''}`}
                       >
-                        {conversation && <Checkbox on={!!current?.userId && current.userId === m.id} color={roleStyle(m.role).color} />}
                         <AssigneeAvatar assignee={{ name: m.name, color: roleStyle(m.role).color }} />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-1.5">
@@ -269,30 +270,40 @@ export function AssignDropdown({
                           </span>
                           <span className="block truncate text-[10px] text-muted">{m.email}</span>
                         </span>
-                        <span className="text-[10px] text-faint">{linked?.conversationCount ?? 0}</span>
+                        <span className="flex items-center gap-1 text-[10px] text-faint">
+                          {isAssigned && <span className="font-bold text-primary">✓</span>}
+                          <span>{linked?.conversationCount ?? 0}</span>
+                        </span>
                       </button>
                     </li>
                   );
                 })}
-                {people.length > 0 && visible.length > 0 && sectionTitle('Other assignees')}
-                {visible.map((a) => (
-                  <li key={a.id} className="flex items-center gap-1 px-1">
-                    <button
-                      disabled={busy || !conversation || !allowed(a)}
-                      title={conversation && !allowed(a) ? 'Only supervisors and admins can assign chats to others' : undefined}
-                      onClick={() => toggle(a.id)}
-                      className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent ${
-                        conversation && !allowed(a) ? 'opacity-50' : ''
-                      }`}
-                    >
-                      {conversation && <Checkbox on={current?.id === a.id} color={a.color} />}
-                      <AssigneeAvatar assignee={a} />
-                      <span className="truncate text-body">{a.name}</span>
-                      <RoleBadge role={memberRole(a.userId)} />
-                      <span className="ml-auto text-[10px] text-faint">{a.conversationCount}</span>
-                    </button>
-                  </li>
-                ))}
+                {/* {people.length > 0 && visible.length > 0 && sectionTitle('Other assignees')} */}
+                {visible.map((a) => {
+                  const isAssigned = current?.id === a.id;
+                  return (
+                    <li key={a.id} className="flex items-center gap-1 px-1">
+                      <button
+                        disabled={busy || !conversation || !allowed(a)}
+                        title={conversation && !allowed(a) ? 'Only admins can assign chats. Use Assign to Me on New Leads.' : undefined}
+                        onClick={() => toggle(a.id)}
+                        className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
+                          isAssigned
+                            ? 'bg-primary-subtle text-primary font-medium'
+                            : 'hover:bg-surface-muted disabled:hover:bg-transparent'
+                        } ${conversation && !allowed(a) ? 'opacity-50' : ''}`}
+                      >
+                        <AssigneeAvatar assignee={a} />
+                        <span className="truncate text-body">{a.name}</span>
+                        <RoleBadge role={memberRole(a.userId)} />
+                        <span className="ml-auto flex items-center gap-1 text-[10px] text-faint">
+                          {isAssigned && <span className="font-bold text-primary">✓</span>}
+                          <span>{a.conversationCount}</span>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
                 {assignees.length === 0 && eligible.length === 0 && !term && (
                   <li className="px-3 py-2 text-muted">
                     No assignees yet.
@@ -307,17 +318,5 @@ export function AssignDropdown({
         </div>
       )}
     </div>
-  );
-}
-
-// Same checkbox as the label picker. Only one can be ticked: picking another moves the tick.
-function Checkbox({ on, color }: { on: boolean; color?: string }) {
-  return (
-    <span
-      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-bold ${on ? `border-transparent text-on-primary ${color ? '' : 'bg-primary'}` : 'border-line-strong'}`}
-      style={on && color ? { backgroundColor: color } : undefined}
-    >
-      {on && '✓'}
-    </span>
   );
 }

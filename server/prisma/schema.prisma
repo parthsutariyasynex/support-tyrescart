@@ -38,7 +38,7 @@ model Workspace {
 
 model Member {
   id          String    @id @default(cuid())
-  role        String    @default("agent") // owner | admin | agent
+  role        String    @default("agent") // owner | admin | supervisor | agent
   // Agents need this to create, edit or delete labels and assignees (owners and admins always can)
   canManageLabels Boolean @default(false)
   // Bell: events after this time count as unseen for this member

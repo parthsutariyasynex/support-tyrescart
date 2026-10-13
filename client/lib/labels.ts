@@ -51,11 +51,13 @@ export async function removeConversationLabel(conversationId: string, labelId: s
 }
 
 // Owners and admins can always manage labels and assignees; agents only when granted
-export type Permissions = { userId: string; role: string; canManageLabels: boolean };
+// canManageAssignments: assign/reassign/unassign chats and see the Assign checkboxes (owners and admins only;
+// supervisors and agents never). The server decides; the client only shows or hides controls.
+export type Permissions = { userId: string; role: string; canManageLabels: boolean; canManageAssignments: boolean };
 
 export async function fetchPermissions(): Promise<Permissions> {
-  const { me } = await gql<{ me: { user: { id: string }; role: string; canManageLabels: boolean } }>(
-    `query Permissions { me { user { id } role canManageLabels } }`,
+  const { me } = await gql<{ me: { user: { id: string }; role: string; canManageLabels: boolean; canManageAssignments: boolean } }>(
+    `query Permissions { me { user { id } role canManageLabels canManageAssignments } }`,
   );
-  return { userId: me.user.id, role: me.role, canManageLabels: me.canManageLabels };
+  return { userId: me.user.id, role: me.role, canManageLabels: me.canManageLabels, canManageAssignments: me.canManageAssignments };
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
 import { API_URL, getToken } from '@/lib/api';
@@ -33,15 +33,15 @@ import {
   fetchUnreadTotal,
   markNotificationsSeen,
 } from '@/lib/activity';
-import { type Assignee, fetchAssignees } from '@/lib/assignees';
+import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
+import { showsAssignCheckboxes } from '@/lib/roles';
 import { AppShell } from '../AppShell';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
 import { dayKey, dayLabel, formatTime, listTimestamp } from '@/lib/time';
-import { canManageAssignments } from '@/lib/roles';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog } from './chatOptions';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
@@ -84,28 +84,99 @@ type ConversationFilter = { labelId: string | null; assignee: string | null };
 const filterKey = (f: ConversationFilter) => `${f.labelId}|${f.assignee}`;
 type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string };
 
+// Module-level caches across client-side page transitions
+let cachedConversationsByPath: Record<string, Conversation[]> = {};
+let cachedLabels: Label[] = [];
+let cachedAssignees: Assignee[] = [];
+let cachedPermissions: Permissions | null = null;
+let cachedFeed: NotificationFeed | null = null;
+let cachedUnreadTotal = 0;
+let cachedActiveIdByPath: Record<string, string | null> = {};
+const messagesCache = new Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>();
+
+function patchAllCachedConversations(fn: (c: Conversation) => Conversation) {
+  for (const path of Object.keys(cachedConversationsByPath)) {
+    cachedConversationsByPath[path] = cachedConversationsByPath[path].map(fn);
+  }
+}
+
 function Inbox({ meName }: { meName: string }) {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const pathname = usePathname();
+  const mine = pathname === '/my-chats';
+  const leads = pathname === '/leads';
+
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    if (cachedConversationsByPath[pathname]?.length) {
+      return cachedConversationsByPath[pathname];
+    }
+    if (cachedConversationsByPath['/inbox']?.length) {
+      if (pathname === '/leads') {
+        return cachedConversationsByPath['/inbox'].filter((c) => !c.assignee);
+      }
+      const me = cachedPermissions; // a local so TypeScript keeps the null check inside the filter
+      if (pathname === '/my-chats' && me) {
+        return cachedConversationsByPath['/inbox'].filter((c) => isAssignedTo(c, me.userId));
+      }
+      if (pathname === '/inbox') {
+        return cachedConversationsByPath['/inbox'];
+      }
+    }
+    return [];
+  });
+
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    return cachedActiveIdByPath[pathname] ?? null;
+  });
+
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const initId = cachedActiveIdByPath[pathname];
+    if (initId && messagesCache.has(initId)) {
+      return messagesCache.get(initId)!.messages;
+    }
+    return [];
+  });
+
+  const [messagesChatId, setMessagesChatId] = useState<string | null>(() => {
+    const initId = cachedActiveIdByPath[pathname];
+    if (initId && messagesCache.has(initId)) {
+      return initId;
+    }
+    return null;
+  });
+
+  const [olderCursor, setOlderCursor] = useState<string | null>(() => {
+    const initId = cachedActiveIdByPath[pathname];
+    if (initId && messagesCache.has(initId)) {
+      return messagesCache.get(initId)!.cursor;
+    }
+    return null;
+  });
+
   const [conversationsCursor, setConversationsCursor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all');
   const [loading, setLoading] = useState(false);
-  const [labels, setLabels] = useState<Label[]>([]);
+  const [labels, setLabels] = useState<Label[]>(cachedLabels);
   const [picker, setPicker] = useState<PickerTarget | null>(null);
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
-  const [assignees, setAssignees] = useState<Assignee[]>([]);
-  // Bumped when someone joins, leaves or changes role, so the open Assign menu refetches the people list
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(() => {
+    if (typeof document !== 'undefined') {
+      return document.getElementById('app-header-actions');
+    }
+    return null;
+  });
+  const [assignees, setAssignees] = useState<Assignee[]>(cachedAssignees);
   const [membersVersion, setMembersVersion] = useState(0);
-  // Who may create/edit/delete labels and assignees; null until loaded (treated as "can't")
-  const [permissions, setPermissions] = useState<Permissions | null>(null);
+  const [permissions, setPermissions] = useState<Permissions | null>(cachedPermissions);
   const permissionsRef = useRef(permissions);
-  // Activity timeline of the open chat, the header bell, and unread total for the tab title
-  const [activity, setActivity] = useState<Activity[]>([]);
-  const [feed, setFeed] = useState<NotificationFeed | null>(null);
-  const [unreadTotal, setUnreadTotal] = useState(0);
+  const [activity, setActivity] = useState<Activity[]>(() => {
+    const initId = cachedActiveIdByPath[pathname];
+    if (initId && messagesCache.has(initId)) {
+      return messagesCache.get(initId)!.activity;
+    }
+    return [];
+  });
+  const [feed, setFeed] = useState<NotificationFeed | null>(cachedFeed);
+  const [unreadTotal, setUnreadTotal] = useState(cachedUnreadTotal);
   permissionsRef.current = permissions;
   const canManage = !!permissions?.canManageLabels;
   const activeIdRef = useRef(activeId);
@@ -113,43 +184,52 @@ function Inbox({ meName }: { meName: string }) {
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
-  // filterType is 'all' | 'unread' | 'label:<id>' | 'assigned:me' | 'assigned:unassigned' | 'assigned:<assigneeId>'.
-  // Label and assignee filters are applied by the API.
-  // My Chats (/my-chats) is this same inbox limited to chats assigned to you (through the assignee linked to
-  // you; the server resolves "me" from your login). Search, Unread and label filters still apply on top.
-  const mine = usePathname() === '/my-chats';
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = mine ? 'me' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : leads ? 'unassigned' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   const filterRef = useRef<ConversationFilter>({ labelId: labelFilter, assignee: assigneeFilter });
   filterRef.current = { labelId: labelFilter, assignee: assigneeFilter };
-  // Keeps the open chat visible when a filter or edit drops it from the list
   const lastActiveRef = useRef<Conversation | null>(null);
 
-  const loadedMoreRef = useRef(false); // true once "Load more" fetched pages past the first
-  const loadSeqRef = useRef(0); // only the most recently started refresh may update the list
+  const loadedMoreRef = useRef(false);
+  const loadSeqRef = useRef(0);
 
-  // Refresh the newest page. If older pages were loaded, merge so they stay in the list.
+  const updateConversations = useCallback((action: React.SetStateAction<Conversation[]>) => {
+    setConversations((prev) => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      cachedConversationsByPath[pathname] = next;
+      return next;
+    });
+  }, [pathname]);
+
+  const patchConversations = useCallback((fn: (c: Conversation) => Conversation) => {
+    patchAllCachedConversations(fn);
+    updateConversations((prev) => prev.map(fn));
+    if (lastActiveRef.current) lastActiveRef.current = fn(lastActiveRef.current);
+  }, [updateConversations]);
+
   const loadConversations = useCallback(() => {
-    setLoading(true);
+    if (!cachedConversationsByPath[pathname]?.length) {
+      setLoading(true);
+    }
     const filter = filterRef.current;
     const seq = ++loadSeqRef.current;
     return fetchConversations(null, filter)
       .then((page) => {
-        if (filterKey(filter) !== filterKey(filterRef.current)) return; // filter changed while loading
-        if (seq !== loadSeqRef.current) return; // a newer refresh started; this one may hold stale data
+        if (filterKey(filter) !== filterKey(filterRef.current)) return;
+        if (seq !== loadSeqRef.current) return;
         if (!loadedMoreRef.current) {
-          setConversations(page.nodes);
+          updateConversations(page.nodes);
           setConversationsCursor(page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null);
           return;
         }
-        setConversations((prev) => {
+        updateConversations((prev) => {
           const fresh = new Set(page.nodes.map((c) => c.id));
           return [...page.nodes, ...prev.filter((c) => !fresh.has(c.id))].sort(byLatest);
         });
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [updateConversations, pathname]);
 
   const loadMoreConversations = useCallback(async () => {
     if (!conversationsCursor) return;
@@ -159,7 +239,7 @@ function Inbox({ meName }: { meName: string }) {
       const page = await fetchConversations(conversationsCursor, filter);
       if (filterKey(filter) !== filterKey(filterRef.current)) return;
       loadedMoreRef.current = true;
-      setConversations((prev) => {
+      updateConversations((prev) => {
         const seen = new Set(prev.map((c) => c.id));
         return [...prev, ...page.nodes.filter((c) => !seen.has(c.id))];
       });
@@ -169,18 +249,17 @@ function Inbox({ meName }: { meName: string }) {
     } finally {
       setLoading(false);
     }
-  }, [conversationsCursor]);
+  }, [conversationsCursor, updateConversations]);
 
   const loadLabels = useCallback(() => {
     fetchLabels()
-      .then(setLabels)
+      .then((l) => {
+        cachedLabels = l;
+        setLabels(l);
+      })
       .catch(() => {});
   }, []);
 
-  const patchConversations = useCallback((fn: (c: Conversation) => Conversation) => {
-    setConversations((prev) => prev.map(fn));
-    if (lastActiveRef.current) lastActiveRef.current = fn(lastActiveRef.current);
-  }, []);
 
   // Shared by the label picker (own changes) and Socket.IO (changes from other agents)
   const onConversationLabels = useCallback(
@@ -227,6 +306,7 @@ function Inbox({ meName }: { meName: string }) {
       .then((list) => {
         if (seq !== assigneesSeqRef.current) return;
         assigneesLoadedRef.current = true;
+        cachedAssignees = list;
         setAssignees(list);
       })
       .catch(() => {});
@@ -250,7 +330,11 @@ function Inbox({ meName }: { meName: string }) {
 
   const onAssigneeSaved = useCallback(
     (assignee: Assignee) => {
-      setAssignees((prev) => [...prev.filter((a) => a.id !== assignee.id), assignee].sort(byName));
+      setAssignees((prev) => {
+        const next = [...prev.filter((a) => a.id !== assignee.id), assignee].sort(byName);
+        cachedAssignees = next;
+        return next;
+      });
       patchConversations((c) =>
         c.assignee?.id === assignee.id
           ? { ...c, assignee: { id: assignee.id, name: assignee.name, color: assignee.color, userId: assignee.userId } }
@@ -264,7 +348,11 @@ function Inbox({ meName }: { meName: string }) {
   // The server unassigns their chats too
   const onAssigneeDeleted = useCallback(
     (id: string) => {
-      setAssignees((prev) => prev.filter((a) => a.id !== id));
+      setAssignees((prev) => {
+        const next = prev.filter((a) => a.id !== id);
+        cachedAssignees = next;
+        return next;
+      });
       patchConversations((c) => (c.assignee?.id === id ? { ...c, assignee: null } : c));
       setFilterType((f) => (f === `assigned:${id}` ? 'all' : f));
       if (filterRef.current.assignee === 'unassigned') loadConversations();
@@ -279,6 +367,9 @@ function Inbox({ meName }: { meName: string }) {
       patchConversations((c) =>
         c.lastMessage?.id === updated.id ? { ...c, lastMessage: newerMessage(c.lastMessage, updated) } : c,
       );
+      for (const entry of messagesCache.values()) {
+        entry.messages = entry.messages.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m));
+      }
     },
     [patchConversations],
   );
@@ -295,6 +386,7 @@ function Inbox({ meName }: { meName: string }) {
   // Cleared (for this user only) here or in another of their tabs: empty the chat view and the list preview
   const onCleared = useCallback(
     (conversationId: string) => {
+      messagesCache.delete(conversationId);
       if (conversationId === activeIdRef.current) {
         setMessages([]);
         setActivity([]);
@@ -309,6 +401,7 @@ function Inbox({ meName }: { meName: string }) {
   const [reopenError, setReopenError] = useState<{ id: string; message: string } | null>(null);
   const selectConversation = useCallback(
     (id: string) => {
+      cachedActiveIdByPath[pathname] = id;
       setActiveId(id);
       setReopenError(null);
       const c = conversations.find((x) => x.id === id);
@@ -317,7 +410,7 @@ function Inbox({ meName }: { meName: string }) {
         .then((r) => onStatusChanged({ conversationId: r.id, status: r.status, closedAt: r.closedAt, closedById: r.closedById }))
         .catch((err) => setReopenError({ id, message: (err as Error).message }));
     },
-    [conversations, onStatusChanged],
+    [conversations, onStatusChanged, pathname],
   );
 
   // The assignee linked to you, if any: "Assigned to me" is only offered when there is one
@@ -340,28 +433,42 @@ function Inbox({ meName }: { meName: string }) {
   }, [labelFilter, assigneeFilter, loadConversations]);
 
   // AppShell's top header leaves a slot for page controls
-  useEffect(() => setHeaderSlot(document.getElementById('app-header-actions')), []);
+  useEffect(() => {
+    if (!headerSlot && typeof document !== 'undefined') {
+      setHeaderSlot(document.getElementById('app-header-actions'));
+    }
+  }, [headerSlot]);
 
   useEffect(() => {
     fetchPermissions()
-      .then(setPermissions)
+      .then((p) => {
+        cachedPermissions = p;
+        setPermissions(p);
+      })
       .catch(() => {});
   }, []);
 
   const loadFeed = useCallback(() => {
     fetchNotifications()
-      .then(setFeed)
+      .then((f) => {
+        cachedFeed = f;
+        setFeed(f);
+      })
       .catch(() => {});
   }, []);
   const loadUnreadTotal = useCallback(() => {
     fetchUnreadTotal()
-      .then(setUnreadTotal)
+      .then((t) => {
+        cachedUnreadTotal = t;
+        setUnreadTotal(t);
+      })
       .catch(() => {});
   }, []);
 
   // Open a chat from the bell or a desktop pop-up, even if it isn't in the loaded part of the list
   const openConversation = useCallback(
     (id: string) => {
+      cachedActiveIdByPath[pathname] = id;
       if (!conversationsRef.current.some((c) => c.id === id))
         fetchConversation(id)
           .then((c) => {
@@ -371,7 +478,32 @@ function Inbox({ meName }: { meName: string }) {
           .catch(() => {});
       else setActiveId(id);
     },
-    [],
+    [pathname],
+  );
+
+  // Opened with ?chat=<id> (e.g. after "Assign to Me" moves a lead to My Chats): open that chat
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('chat');
+    if (id) openConversation(id);
+  }, [pathname, openConversation]);
+
+  // "Assign to Me" on a New Lead. Only works while it's still unassigned (the server makes sure exactly one person
+  // gets it); then it's yours and opens in My Chats. Nobody's role changes.
+  const router = useRouter();
+  const [claimError, setClaimError] = useState<{ id: string; message: string } | null>(null);
+  const claim = useCallback(
+    async (conversationId: string) => {
+      setClaimError(null);
+      try {
+        const c = await claimConversation(conversationId);
+        onAssigned(c.id, c.assignee);
+        router.push(`/my-chats?chat=${encodeURIComponent(c.id)}`);
+      } catch (err) {
+        setClaimError({ id: conversationId, message: (err as Error).message });
+        loadConversations(); // someone else took it: refresh
+      }
+    },
+    [onAssigned, router, loadConversations],
   );
 
   // Unread customer messages in the browser tab title, e.g. "(3) Inbox"
@@ -486,9 +618,10 @@ function Inbox({ meName }: { meName: string }) {
     socket.on('assignee:deleted', ({ id }: { id: string }) => onAssigneeDeleted(id));
     // An owner/admin granted or removed this user's label-management permission
     socket.on('member:removed', () => setMembersVersion((v) => v + 1));
-    socket.on('member:permissions', ({ userId, role, canManageLabels }: Permissions) => {
+    socket.on('member:permissions', ({ userId, role, canManageLabels, canManageAssignments }: Permissions) => {
       setMembersVersion((v) => v + 1);
-      if (userId === permissionsRef.current?.userId) setPermissions({ userId, role, canManageLabels });
+      // e.g. an admin just granted (or removed) this supervisor's right to assign chats: applies without a reload
+      if (userId === permissionsRef.current?.userId) setPermissions({ userId, role, canManageLabels, canManageAssignments });
     });
     return () => {
       socketRef.current = null;
@@ -512,34 +645,60 @@ function Inbox({ meName }: { meName: string }) {
   ]);
 
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId) {
+      setMessagesChatId(null);
+      return;
+    }
+    if (messagesCache.has(activeId)) {
+      const cached = messagesCache.get(activeId)!;
+      setMessages(cached.messages);
+      setActivity(cached.activity);
+      setOlderCursor(cached.cursor);
+      setMessagesChatId(activeId);
+    }
     let cancelled = false; // ignore late responses after switching chats
-    setMessages([]);
-    setActivity([]);
     setOlderCursor(null);
-    Promise.all([fetchMessages(activeId), markConversationRead(activeId)])
-      .then(([page]) => {
+    patchConversations((c) => (c.id === activeId ? { ...c, unread: 0 } : c));
+    Promise.all([
+      fetchMessages(activeId),
+      fetchConversationActivity(activeId),
+      markConversationRead(activeId),
+    ])
+      .then(([page, activityItems]) => {
         if (cancelled) return;
+        const cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+        messagesCache.set(activeId, {
+          messages: page.nodes,
+          activity: activityItems,
+          cursor,
+        });
         setMessages(page.nodes);
-        setOlderCursor(page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null);
-        loadConversations();
+        setActivity(activityItems);
+        setOlderCursor(cursor);
+        setMessagesChatId(activeId);
         loadUnreadTotal();
       })
-      .catch(() => {});
-    fetchConversationActivity(activeId)
-      .then((items) => !cancelled && setActivity(items))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [activeId, loadConversations, loadUnreadTotal]);
+  }, [activeId, patchConversations, loadUnreadTotal]);
 
   async function loadOlderMessages() {
     if (!activeId || !olderCursor) return;
     try {
       const page = await fetchMessages(activeId, olderCursor);
-      setMessages((prev) => [...page.nodes.filter((m) => !prev.some((p) => p.id === m.id)), ...prev]);
-      setOlderCursor(page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null);
+      const cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+      setMessages((prev) => {
+        const next = [...page.nodes.filter((m) => !prev.some((p) => p.id === m.id)), ...prev];
+        const c = messagesCache.get(activeId);
+        if (c) {
+          c.messages = next;
+          c.cursor = cursor;
+        }
+        return next;
+      });
+      setOlderCursor(cursor);
     } catch (err) {
       alert((err as Error).message);
     }
@@ -557,6 +716,7 @@ function Inbox({ meName }: { meName: string }) {
     // A chat reassigned away from you leaves My Chats at once (the socket update patches it before any refetch)
     // (Until your permissions load, the server's "me" filter alone decides, so My Chats doesn't flash empty)
     if (mine && permissions && !isAssignedTo(c, permissions.userId)) return false;
+    if (leads && c.assignee) return false; // taken by someone: no longer a lead
     if (filterType === 'unread') return matchesSearch && c.unread > 0;
     if (labelFilter) return matchesSearch && c.labels.some((l) => l.id === labelFilter);
     if (assigneeFilter === 'me') return matchesSearch && isAssignedTo(c, permissions?.userId);
@@ -591,6 +751,9 @@ function Inbox({ meName }: { meName: string }) {
         myAssignee={myAssignee}
         unlinkedNamesake={unlinkedNamesake}
         mine={mine}
+        leads={leads}
+        onClaim={claim}
+        claimError={claimError}
         typing={typing}
         onOpenLabels={openPicker}
         pickerConversationId={picker?.conversationId}
@@ -600,20 +763,33 @@ function Inbox({ meName }: { meName: string }) {
       {/* Right Chat Panel with WhatsApp Doodle Background */}
       {active ? (
         <ChatPanel
-          key={active.id}
           conversation={active}
-          messages={messages}
+          messages={messagesChatId === active.id ? messages : []}
           onLoadOlder={olderCursor ? loadOlderMessages : undefined}
-          onSent={(m) => setMessages((p) => (p.some((x) => x.id === m.id) ? p : [...p, m]))}
+          onSent={(m) => {
+            setMessages((p) => {
+              const next = p.some((x) => x.id === m.id) ? p : [...p, m];
+              if (activeIdRef.current) {
+                const c = messagesCache.get(activeIdRef.current);
+                if (c) c.messages = next;
+              }
+              return next;
+            });
+          }}
           onOpenLabels={(anchor) => openPicker(active.id, anchor)}
           viewer={permissions && { userId: permissions.userId, isAdmin: ['owner', 'admin'].includes(permissions.role) }}
           onMessageUpdated={onMessageUpdated}
           onStatusChanged={onStatusChanged}
-          onClosed={() => setActiveId(null)}
+          onClosed={() => {
+            cachedActiveIdByPath[pathname] = null;
+            setActiveId(null);
+          }}
           onCleared={() => onCleared(active.id)}
+          onClaim={() => claim(active.id)}
+          claimError={claimError?.id === active.id ? claimError.message : null}
           reopenError={reopenError?.id === active.id ? reopenError.message : null}
           typingNames={typingNames(typing, active.id)}
-          activity={activity}
+          activity={messagesChatId === active.id ? activity : []}
           meId={permissions?.userId ?? null}
           onTyping={(isTyping) => sendTyping(active.id, isTyping)}
         />
@@ -640,7 +816,7 @@ function Inbox({ meName }: { meName: string }) {
             conversation={active}
             assignees={assignees}
             meId={permissions?.userId ?? null}
-            canAssignOthers={canManageAssignments(permissions?.role)}
+            canAssignOthers={showsAssignCheckboxes(permissions)}
             membersVersion={membersVersion}
             onAssigned={onAssigned}
           />,
@@ -680,6 +856,9 @@ function ConversationList({
   myAssignee,
   unlinkedNamesake,
   mine,
+  leads,
+  onClaim,
+  claimError,
   onOpenLabels,
   pickerConversationId,
   loading,
@@ -700,6 +879,9 @@ function ConversationList({
   myAssignee: Assignee | null;
   unlinkedNamesake: Assignee | null;
   mine: boolean;
+  leads: boolean;
+  onClaim: (conversationId: string) => void;
+  claimError: { id: string; message: string } | null;
   onOpenLabels: (conversationId: string | null, anchor: HTMLElement) => void;
   pickerConversationId?: string | null;
   loading: boolean;
@@ -778,7 +960,7 @@ function ConversationList({
             <option value="all">All</option>
             <option value="unread">Unread</option>
             {/* My Chats is already "assigned to me" */}
-            {!mine && (
+            {!mine && !leads && (
               <optgroup label="Assigned">
                 {myAssignee && <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>}
                 <option value="assigned:unassigned">Unassigned</option>
@@ -818,6 +1000,10 @@ function ConversationList({
       <div className="flex-1 overflow-y-auto">
         {conversations.length === 0 && filterType !== 'all' ? (
           <p className="p-5 text-xs leading-relaxed text-muted">No conversations match this filter.</p>
+        ) : conversations.length === 0 && leads ? (
+          <p className="p-5 text-xs leading-relaxed text-muted">
+            No new leads right now. New customer chats that nobody has taken yet appear here.
+          </p>
         ) : conversations.length === 0 && mine ? (
           <div className="space-y-2 p-5 text-xs leading-relaxed text-muted">
             <p>
@@ -859,6 +1045,9 @@ function ConversationList({
           </div>
         ) : (
           <ul className="divide-y divide-line-soft">
+            {leads && claimError && (
+              <li className="bg-danger-soft px-3.5 py-2 text-[11px] text-danger">{claimError.message}</li>
+            )}
             {conversations.map((c) => {
               const contactName = contactDisplayName(c.contact);
               const isSelected = activeId === c.id;
@@ -909,6 +1098,7 @@ function ConversationList({
                       </span>
                     )}
                   </button>
+                  
                 </li>
               );
             })}
@@ -943,6 +1133,7 @@ function EmptyChatState() {
 function ChatPanel({
   conversation,
   messages,
+  isChatLoading = false,
   onLoadOlder,
   onSent,
   onOpenLabels,
@@ -951,6 +1142,8 @@ function ChatPanel({
   onStatusChanged,
   onClosed,
   onCleared,
+  onClaim,
+  claimError,
   reopenError,
   typingNames: typers,
   onTyping,
@@ -959,6 +1152,7 @@ function ChatPanel({
 }: {
   conversation: Conversation;
   messages: Message[];
+  isChatLoading?: boolean;
   onLoadOlder?: () => void;
   onSent: (m: Message) => void;
   onOpenLabels: (anchor: HTMLElement) => void;
@@ -969,6 +1163,9 @@ function ChatPanel({
   onClosed: () => void;
   // "Clear chat" succeeded (for this user only)
   onCleared: () => void;
+  // "Assign to Me" for an unassigned chat (New Lead), and why it failed if it did
+  onClaim: () => void;
+  claimError: string | null;
   // Opening a closed chat reopens it; this is set if that failed
   reopenError: string | null;
   // Other agents typing in this chat right now
@@ -980,7 +1177,7 @@ function ChatPanel({
 }) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Message actions: open menu, message being edited in the composer, message awaiting delete confirmation
   const [menu, setMenu] = useState<{ message: Message; anchor: HTMLElement } | null>(null);
@@ -989,6 +1186,16 @@ function ChatPanel({
   // Just deleted by this agent: offered for undo for a few seconds
   const [undo, setUndo] = useState<Message | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setText('');
+    setError('');
+    setMenu(null);
+    setEditing(null);
+    setConfirmDelete(null);
+    setUndo(null);
+  }, [conversation.id]);
+
   const typingSender = useTypingSender(onTyping);
   // "/" at the start of the message box opens the quick replies menu; Esc hides it until you type again
   const [quickClosed, setQuickClosed] = useState(false);
@@ -1142,11 +1349,12 @@ function ChatPanel({
       .map((a) => ({ kind: 'activity' as const, at: a.createdAt, id: a.id, a })),
   ].sort((x, y) => x.at.localeCompare(y.at));
 
-  // Scroll only when something newer arrives, not when older messages are prepended
+  // Scroll only when something newer arrives or conversation changes, not when older messages are prepended
   const lastId = stream.at(-1)?.id;
   useEffect(() => {
-    bottomRef.current?.scrollIntoView();
-  }, [lastId]);
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [conversation.id, lastId]);
 
   async function send(body: string) {
     setError('');
@@ -1239,8 +1447,8 @@ function ChatPanel({
         </div>
       </header>
 
-      {/* Messages Stream */}
-      <div className="relative z-10 flex-1 space-y-2.5 overflow-y-auto px-6 py-4">
+      {/* Messages Stream (the ref scrolls it to the newest message) */}
+      <div ref={messagesContainerRef} className="relative z-10 flex-1 space-y-2.5 overflow-y-auto px-6 py-4">
         {onLoadOlder && (
           <div className="flex justify-center">
             <button
@@ -1286,7 +1494,6 @@ function ChatPanel({
             </Fragment>
           );
         })}
-        <div ref={bottomRef} />
       </div>
 
       {/* Bottom Message Composer */}
@@ -1327,6 +1534,21 @@ function ChatPanel({
               ? `Couldn't reopen this chat: ${reopenError}. Click it in the chat list to try again.`
               : 'This chat is closed. Click it in the chat list to reopen it.'}
           </p>
+        ) : !conversation.assignee && !editing ? (
+          // New Lead: someone has to take it before anyone replies (the server refuses replies too)
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-3 rounded-xl bg-primary-subtle px-4 py-2.5 text-xs">
+              <span className="text-body">New lead: assign it to yourself to reply to the customer.</span>
+              <button
+                type="button"
+                onClick={onClaim}
+                className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-on-primary hover:bg-primary-hover"
+              >
+                Assign to Me
+              </button>
+            </div>
+            {claimError && <p className="rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger">{claimError}</p>}
+          </div>
         ) : (
         <form
           onSubmit={(e) => {

@@ -60,6 +60,7 @@ export function activityText(a: Activity, meId: string | null, where: 'chat' | '
       return `${who} reassigned ${chat} from ${d.previous ?? 'someone'} to ${assignedTo(d, meId)}`;
     case 'unassigned':
       if (d.reason === 'assignee_deleted') return `${who} deleted ${d.assignee ?? 'the assignee'}, so ${chat} is now unassigned`;
+      if (d.reason === 'member_removed') return `${who} removed ${d.assignee ?? 'a member'} from the team, so ${chat} is now unassigned`;
       return d.assignee ? `${who} unassigned ${d.assignee} from ${chat}` : `${who} unassigned ${chat}`;
     case 'label_added':
       return `${who} added label "${d.label}" to ${chat}`;

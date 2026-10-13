@@ -6,8 +6,9 @@ import { signToken, type AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
 import { disconnectMember, emitToWorkspace } from '../realtime.js';
 import { registerSchema } from './auth.js';
+import { recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
-import { sendInvite } from './passwordReset.js';
+import { isInviteToken, sendInvite } from './passwordReset.js';
 import { announcePermissions, requireAdmin } from './permissions.js';
 import { readJoinLink, signJoinLink } from './joinLinks.js';
 import { ASSIGNABLE_ROLES, DEFAULT_ROLE } from './roles.js';
@@ -24,7 +25,21 @@ const inviteSchema = z.object({
   role: roleSchema,
 });
 
-type MemberRow = Prisma.MemberGetPayload<{ include: { user: { select: { id: true; name: true; email: true } } } }>;
+// Status (Teams tab), from existing data only: "invited" is someone an admin added who hasn't chosen a password
+// yet (their invite link is still unused and they never set one); everyone else is "active" and can sign in.
+const memberInclude = {
+  user: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      passwordChangedAt: true,
+      resetTokens: { where: { usedAt: null }, select: { createdAt: true, expiresAt: true } },
+    },
+  },
+} as const;
+type MemberRow = Prisma.MemberGetPayload<{ include: typeof memberInclude }>;
+const memberStatus = (u: MemberRow['user']) => (!u.passwordChangedAt && u.resetTokens.some(isInviteToken) ? 'invited' : 'active');
 const toMember = (m: MemberRow) => ({
   userId: m.user.id,
   name: m.user.name,
@@ -32,8 +47,8 @@ const toMember = (m: MemberRow) => ({
   role: m.role,
   isOwner: m.role === 'owner',
   canManageLabels: m.canManageLabels,
+  status: memberStatus(m.user),
 });
-const memberInclude = { user: { select: { id: true, name: true, email: true } } } as const;
 
 export async function listMembers(auth: AuthPayload) {
   await requireAdmin(auth);
@@ -81,6 +96,7 @@ export async function inviteMember(auth: AuthPayload, rawInput: unknown) {
       prisma.user.findUnique({ where: { id: auth.userId }, select: { name: true } }),
     ]);
     emailSent = await sendInvite(member.user, workspace?.name ?? 'your team', inviter?.name ?? 'An admin');
+    member = await prisma.member.findUniqueOrThrow({ where: { id: member.id }, include: memberInclude }); // now "invited"
   }
   await announcePermissions(workspaceId, member.user.id);
   return { member: toMember(member), invited, emailSent };
@@ -108,23 +124,33 @@ export async function updateMemberRole(auth: AuthPayload, userId: string, rawRol
   return toMember(updated);
 }
 
-// Their account stays (they may be in other workspaces); they lose access to this one immediately
+// Their account stays (they may be in other workspaces); they lose access to this one immediately. Their name
+// leaves the Assign list too: the assignee linked to them is deleted and any chats it held become unassigned
+// (New Leads), each with a history entry, exactly like deleting an assignee.
 export async function removeMember(auth: AuthPayload, userId: string) {
   await requireAdmin(auth);
+  const { workspaceId } = auth;
   const member = await requireOtherMember(auth, userId, 'remove');
-  const unlinked = await prisma.$transaction(async (tx) => {
-    const assignees = await tx.assignee.findMany({ where: { workspaceId: auth.workspaceId, userId }, select: { id: true } });
-    await tx.assignee.updateMany({ where: { workspaceId: auth.workspaceId, userId }, data: { userId: null } });
+  const dropped = await prisma.$transaction(async (tx) => {
+    const assignees = await tx.assignee.findMany({ where: { workspaceId, userId }, select: { id: true, name: true } });
+    const chats = assignees.length
+      ? await tx.conversation.findMany({ where: { workspaceId, assignedToId: { in: assignees.map((a) => a.id) } }, select: { id: true, assignedToId: true } })
+      : [];
+    await tx.assignee.deleteMany({ where: { workspaceId, userId } }); // chats fall back to unassigned (onDelete: SetNull)
     await tx.member.delete({ where: { id: member.id } });
-    return assignees.map((a) => a.id);
+    return { assignees, chats };
   });
-  disconnectMember(auth.workspaceId, userId);
-  emitToWorkspace(auth.workspaceId, 'member:removed', { userId });
-  // Their assignee stays (chats keep it) but is no longer linked to them
-  for (const id of unlinked) {
-    const a = await prisma.assignee.findUnique({ where: { id }, include: { _count: { select: { conversations: true } } } });
-    if (a) emitToWorkspace(auth.workspaceId, 'assignee:saved', { id: a.id, name: a.name, color: a.color, userId: a.userId, createdAt: a.createdAt, conversationCount: a._count.conversations });
-  }
+  disconnectMember(workspaceId, userId);
+  emitToWorkspace(workspaceId, 'member:removed', { userId });
+  for (const a of dropped.assignees) emitToWorkspace(workspaceId, 'assignee:deleted', { id: a.id });
+  for (const c of dropped.chats)
+    await recordActivity({
+      workspaceId,
+      conversationId: c.id,
+      actorId: auth.userId,
+      type: 'unassigned',
+      data: { assignee: dropped.assignees.find((a) => a.id === c.assignedToId)?.name ?? member.user.name, reason: 'member_removed' },
+    });
   return userId;
 }
 

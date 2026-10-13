@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getToken, setToken } from '@/lib/api';
 import { type WorkspaceSummary, createWorkspace, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
 import { RoleBadge } from './RoleBadge';
+import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 
 export type Me = {
@@ -15,6 +16,9 @@ export type Me = {
   workspace: { id: string; name: string; whatsapp: { displayPhone: string | null; phoneNumberId?: string; wabaId?: string } | null };
 };
 
+let cachedMe: Me | null = null;
+let cachedSidebarOpen = true;
+
 // Slim Left Icon Rail + Full App Shell
 export function AppShell({
   children,
@@ -23,11 +27,17 @@ export function AppShell({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [me, setMe] = useState<Me | null>(null);
+  const [me, setMe] = useState<Me | null>(cachedMe);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [automationMenuOpen, setAutomationMenuOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(cachedSidebarOpen);
+
+  function toggleSidebar(open: boolean) {
+    cachedSidebarOpen = open;
+    setSidebarOpen(open);
+  }
+
   const [newWorkspace, setNewWorkspace] = useState('');
   // The name field only appears after clicking "Create workspace"
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
@@ -56,6 +66,7 @@ export function AppShell({
     setWorkspaceError('');
     try {
       const { token } = await request();
+      cachedMe = null;
       setToken(token);
       window.location.assign('/inbox');
     } catch (err) {
@@ -88,15 +99,18 @@ export function AppShell({
 
   useEffect(() => {
     if (!getToken()) {
+      cachedMe = null;
       router.replace('/login');
       return;
     }
     fetchMe<Me>()
       .then((m) => {
+        cachedMe = m;
         setMe(m);
         rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
       })
       .catch(() => {
+        cachedMe = null;
         router.replace('/login');
       });
   }, [router]);
@@ -136,7 +150,7 @@ export function AppShell({
                 </span>
               </div>
               <button
-                onClick={() => setSidebarOpen(false)}
+                onClick={() => toggleSidebar(false)}
                 title="Collapse sidebar"
                 className="flex h-7 w-7 items-center justify-center rounded-lg text-faint hover:bg-surface-strong hover:text-body transition cursor-pointer"
               >
@@ -175,6 +189,7 @@ export function AppShell({
                 <div className="space-y-0.5">
                   <Link
                     href="/inbox"
+                    scroll={false}
                     className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
                       pathname === '/inbox'
                         ? 'bg-secondary text-on-primary shadow-2xs'
@@ -188,9 +203,27 @@ export function AppShell({
                     <span>Inbox</span>
                   </Link>
 
+                  {/* Unassigned customer chats waiting for someone to "Assign to Me" */}
+                  <Link
+                    href="/leads"
+                    scroll={false}
+                    className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                      pathname === '/leads'
+                        ? 'bg-secondary text-on-primary shadow-2xs'
+                        : 'text-body hover:bg-surface-strong'
+                    }`}
+                  >
+                    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+                      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                    </svg>
+                    <span>New Leads</span>
+                  </Link>
+
                   {/* Same inbox, only the chats assigned to you */}
                   <Link
                     href="/my-chats"
+                    scroll={false}
                     className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
                       pathname === '/my-chats'
                         ? 'bg-secondary text-on-primary shadow-2xs'
@@ -204,6 +237,27 @@ export function AppShell({
                     </svg>
                     <span>My Chats</span>
                   </Link>
+
+                  {/* Teams: owners and admins only (the server refuses the members list to everyone else) */}
+                  {isAdminRole(me.role) && (
+                    <Link
+                      href="/teams"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/teams'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                      <circle cx="9" cy="7" r="4" />
+                      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                      </svg>
+                      <span>Teams</span>
+                    </Link>
+                  )}
 
                   {/* Future Contacts / Leads menus
                   <button
@@ -371,7 +425,7 @@ export function AppShell({
             <div className="flex flex-col items-center gap-4 w-full">
               {/* Expand Chevron Button */}
               <button
-                onClick={() => setSidebarOpen(true)}
+                onClick={() => toggleSidebar(true)}
                 title="Expand sidebar"
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-faint hover:bg-surface-strong hover:text-body transition cursor-pointer"
               >
@@ -385,6 +439,7 @@ export function AppShell({
               <div className="flex flex-col items-center gap-2 w-full">
                 <Link
                   href="/inbox"
+                  scroll={false}
                   title="Inbox"
                   className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
                     pathname === '/inbox'
@@ -398,7 +453,23 @@ export function AppShell({
                   </svg>
                 </Link>
                 <Link
+                  href="/leads"
+                  scroll={false}
+                  title="New Leads"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/leads'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+                      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                  </svg>
+                </Link>
+                <Link
                   href="/my-chats"
+                  scroll={false}
                   title="My Chats"
                   className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
                     pathname === '/my-chats'
@@ -412,6 +483,25 @@ export function AppShell({
                     <path d="M8.5 13.5a4 4 0 0 1 7 0" />
                   </svg>
                 </Link>
+                {isAdminRole(me.role) && (
+                  <Link
+                    href="/teams"
+                    scroll={false}
+                    title="Teams"
+                    className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                      pathname === '/teams'
+                        ? 'bg-secondary text-on-primary shadow-2xs'
+                        : 'text-faint hover:bg-surface-strong hover:text-body'
+                    }`}
+                  >
+                    <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                      <circle cx="9" cy="7" r="4" />
+                      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                    </svg>
+                  </Link>
+                )}
 
                 {/* Future Slim Icons (Hidden for now)
                 <button
@@ -482,7 +572,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/my-chats' ? 'My Chats' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/teams' ? 'Teams' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -498,7 +588,13 @@ export function AppShell({
                 )}
               </div>
               <p className="truncate text-[11px] text-faint -mt-0.5">
-                {pathname === '/my-chats' ? 'Chats assigned to you' : 'Conversations with your customers'}
+                {pathname === '/teams'
+                  ? 'Everyone in this workspace: name, email, role and status'
+                  : pathname === '/my-chats'
+                  ? 'Chats assigned to you'
+                  : pathname === '/leads'
+                    ? 'Unassigned customer chats: Assign to Me to take one'
+                    : 'Conversations with your customers'}
               </p>
             </div>
 
@@ -658,7 +754,7 @@ export function AppShell({
 
             {/* Round WhatsApp Icon Button */}
             <button
-              onClick={() => router.push('/settings')}
+              onClick={() => router.push('/teams')}
               title="WhatsApp Status"
               className="flex h-7.5 w-7.5 items-center justify-center rounded-full bg-accent text-on-primary shadow-2xs hover:scale-105 transition cursor-pointer"
             >
@@ -668,7 +764,7 @@ export function AppShell({
             </button>
 
             {/* Page-specific header controls (the inbox renders its Assign dropdown here) */}
-            <div id="app-header-actions" className="contents" />
+            <div id="app-header-actions" className="flex items-center gap-3 shrink-0 min-w-[154px] justify-end" />
 
             {/* Automation Menu Button */}
             <div ref={automationMenuRef} className="relative">
@@ -812,8 +908,8 @@ export function AppShell({
             </div>
 
             {/* Settings Gear Button */}
-            <Link
-              href="/settings"
+            {/* <Link
+              href="/teams"
               title="Settings"
               className="flex h-7.5 w-7.5 items-center justify-center rounded-full border border-line text-muted hover:bg-surface-muted transition"
             >
@@ -821,7 +917,24 @@ export function AppShell({
                 <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
                 <circle cx="12" cy="12" r="3" />
               </svg>
-            </Link>
+            </Link> */}
+
+            <button
+  type="button"
+  title="Settings"
+  className="flex h-7.5 w-7.5 items-center justify-center rounded-full border border-line text-muted hover:bg-surface-muted transition"
+>
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+  >
+    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+</button>
 
             {/* Vertical Separator */}
             <div className="h-5 w-px bg-line" />
@@ -928,6 +1041,7 @@ export function AppShell({
                   <div className="border-t border-line-soft p-1">
                     <button
                       onClick={() => {
+                        cachedMe = null;
                         setToken(null);
                         router.replace('/login');
                       }}

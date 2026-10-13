@@ -139,20 +139,41 @@ export async function deleteAssignee(auth: AuthPayload, id: string) {
   return id;
 }
 
+// Orphaned assignees: names with no member behind them (removed before removal cleaned up, or never linked).
+// Deletes only the ones holding no chats; the rest are reported and kept, since deleting them would unassign
+// chats. Nothing else is touched. Returns what was deleted and what was kept, for the cleanup script's report.
+export async function removeOrphanAssignees(workspaceId: string) {
+  const orphans = await prisma.assignee.findMany({
+    where: { workspaceId, userId: null },
+    include: { _count: { select: { conversations: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  const summary = (a: (typeof orphans)[number]) => ({ id: a.id, name: a.name, chats: a._count.conversations, createdAt: a.createdAt });
+  const deleted = [];
+  for (const a of orphans.filter((o) => o._count.conversations === 0)) {
+    // Re-checked inside the delete so a chat assigned to it meanwhile keeps its assignee
+    const { count } = await prisma.assignee.deleteMany({ where: { id: a.id, userId: null, conversations: { none: {} } } });
+    if (count === 0) continue;
+    deleted.push(summary(a));
+    emitToWorkspace(workspaceId, 'assignee:deleted', { id: a.id });
+  }
+  const deletedIds = new Set(deleted.map((d) => d.id));
+  return { deleted, kept: orphans.filter((o) => !deletedIds.has(o.id)).map(summary) };
+}
+
 // Assigning a chat to a person (a Supervisor or Agent of this workspace) uses the assignee linked to them,
 // created the first time, so filters, counts, "Assigned to me" and notifications work exactly as for any
 // assignee. Agents may only do this for themselves (taking an unassigned chat); the rest of the rules are
 // in assignConversation.
 export async function assignConversationToMember(auth: AuthPayload, conversationId: string, memberId: string) {
   const { workspaceId, userId } = auth;
-  const conversation = await requireConversation(workspaceId, conversationId);
-  if (!(await getPermissions(auth)).canManageAssignments) {
-    // Checked before anything is created, so a refused request leaves no new assignee behind
-    const own = await prisma.assignee.findFirst({ where: { workspaceId, userId }, select: { id: true } });
-    const taking = memberId === userId && (conversation.assignedToId === null || conversation.assignedToId === own?.id);
-    if (!taking)
-      throw new AppError('Agents can only take unassigned chats or release their own. Ask a supervisor to reassign it.', 403, 'FORBIDDEN');
-  }
+  await requireConversation(workspaceId, conversationId);
+  // Checked before anything is created, so a refused request leaves no new assignee behind
+  if (!(await getPermissions(auth)).canManageAssignments) throw new AppError(
+      'Only admins can assign or unassign chats. Use Assign to Me on New Leads.',
+      403,
+      'FORBIDDEN',
+    );
   const assignee = await assigneeForMember(workspaceId, memberId);
   return assignConversation(workspaceId, conversationId, assignee.id, userId);
 }
@@ -189,6 +210,27 @@ async function assigneeForMember(workspaceId: string, userId: string) {
   throw new AppError('Could not create an assignee for this person', 409, 'ASSIGNEE_EXISTS');
 }
 
+// "Assign to Me" on a New Lead: take an unassigned chat for yourself. The write only applies while the chat is
+// still unassigned (compare-and-set), so when two people click at the same moment exactly one gets it and the
+// other is told who has it. Nobody's role changes; the chat simply moves to your My Chats.
+export async function claimConversation(auth: AuthPayload, conversationId: string) {
+  const { workspaceId, userId } = auth;
+  await getPermissions(auth); // a current member of this workspace (any role)
+  const conversation = await requireConversation(workspaceId, conversationId);
+  if (conversation.assignedToId) {
+    const own = await prisma.assignee.findFirst({ where: { workspaceId, userId }, select: { id: true } });
+    if (conversation.assignedToId === own?.id) return conversation; // already yours
+    throw await alreadyAssigned(conversation.assignedToId);
+  }
+  const assignee = await assigneeForMember(workspaceId, userId);
+  return assignConversation(workspaceId, conversationId, assignee.id, userId, { claim: true });
+}
+
+async function alreadyAssigned(assigneeId: string) {
+  const a = await prisma.assignee.findUnique({ where: { id: assigneeId }, select: { name: true } });
+  return new AppError(`This chat was already taken by ${a?.name ?? 'someone else'}.`, 409, 'ALREADY_ASSIGNED');
+}
+
 const ASSIGN_ATTEMPTS = 3;
 
 // Pass null to unassign. `actorId` is the agent doing it (history and notifications).
@@ -200,27 +242,19 @@ export async function assignConversation(
   conversationId: string,
   assigneeId: string | null,
   actorId: string | null = null,
+  // claim: "Assign to Me" on a New Lead (the caller checked it's the actor's own assignee); succeeds only while
+  // the chat is still unassigned, for every role
+  options: { claim?: boolean } = {},
 ) {
   const assignee = assigneeId ? await requireAssignee(workspaceId, assigneeId) : null;
-  // Supervisors and admins assign anyone. Agents may only take an unassigned chat (to the assignee linked
-  // to them) or release their own.
-  const restricted = actorId ? !(await getPermissions({ userId: actorId, workspaceId })).canManageAssignments : false;
-  const ownAssigneeId = restricted
-    ? ((await prisma.assignee.findFirst({ where: { workspaceId, userId: actorId! }, select: { id: true } }))?.id ?? null)
-    : null;
+  // Owners and admins assign, reassign and unassign. Everyone else (supervisors and agents) can only "Assign to
+  // Me" an unassigned chat (claimConversation). getPermissions also refuses non-members.
+  if (actorId && !options.claim && !(await getPermissions({ userId: actorId, workspaceId })).canManageAssignments)
+    throw new AppError('Only admins can assign or unassign chats. Use Assign to Me on New Leads.', 403, 'FORBIDDEN');
   for (let attempt = 0; attempt < ASSIGN_ATTEMPTS; attempt++) {
     const before = await requireConversation(workspaceId, conversationId);
     if (before.assignedToId === assigneeId) return before;
-    if (restricted) {
-      const taking = !!assignee && assignee.id === ownAssigneeId && before.assignedToId === null;
-      const releasing = !assignee && !!ownAssigneeId && before.assignedToId === ownAssigneeId;
-      if (!taking && !releasing)
-        throw new AppError(
-          'Agents can only take unassigned chats or release their own. Ask a supervisor to reassign it.',
-          403,
-          'FORBIDDEN',
-        );
-    }
+    if (options.claim && before.assignedToId !== null) throw await alreadyAssigned(before.assignedToId);
     const previous = before.assignedToId
       ? await prisma.assignee.findUnique({ where: { id: before.assignedToId }, select: { name: true, userId: true } })
       : null;
