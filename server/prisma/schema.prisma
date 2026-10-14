@@ -50,6 +50,7 @@ model Workspace {
   labels        Label[]
   activity      ActivityEvent[]
   quickReplies  QuickReply[]
+  assignments   AssignmentRecord[]
 }
 
 model Member {
@@ -130,6 +131,9 @@ model Conversation {
   contactId     String
   // The workspace member (Member.id, table Role) who holds this chat; null = unassigned (a New Lead)
   assignedToId  String?
+  // When the current assignee first opened the chat after it was assigned to them; null = not yet. Cleared on
+  // every assignment change, so reminders (services/assignmentReminders.ts) run until they open it.
+  assigneeOpenedAt DateTime?
   lastMessageAt DateTime            @default(now())
   // Customer's last inbound message: free-form replies allowed for 24h after this
   lastInboundAt DateTime?
@@ -153,6 +157,8 @@ model Conversation {
   assignedTo    Member?             @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
   activity      ActivityEvent[]
   clears        ConversationClear[]
+  // Assignment report rows (reasons). Never read by the chat API; see services/assignmentReports.ts
+  assignments   AssignmentRecord[]
 
   @@unique([workspaceId, contactId])
   @@index([workspaceId, lastMessageAt])
@@ -264,6 +270,36 @@ model ActivityEvent {
 
   @@index([conversationId, createdAt])
   @@index([workspaceId, createdAt])
+}
+
+// One row per assignment, reassignment or unassignment of a chat, with the optional reason the person gave.
+// Append-only: a reassignment adds a row, it never changes or removes earlier ones. This is report data: it is
+// NOT part of the chat history (ActivityEvent), is never included in conversation/message queries or socket
+// events, and is only read by the admin-only assignment report (services/assignmentReports.ts).
+// Names are copied at the time so the report still reads correctly after a member is removed.
+model AssignmentRecord {
+  id             String       @id @default(cuid())
+  workspaceId    String
+  conversationId String
+  // Member ids (table Role) and user ids; null = the chat was unassigned before / after
+  previousMemberId String?
+  previousUserId   String?
+  previousName     String?
+  newMemberId      String?
+  newUserId        String?
+  newName          String?
+  // Who did it (user id); null for a system change (e.g. a member being removed unassigns their chats)
+  assignedById   String?
+  assignedByName String?
+  // Optional reason typed in the Assign box; report-only
+  reason         String?      @db.Text
+  // The assignment timestamp
+  createdAt      DateTime     @default(now())
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([conversationId, createdAt])
 }
 
 // "Clear chat" (only for the person who did it, like WhatsApp): messages and activity up to clearedAt are

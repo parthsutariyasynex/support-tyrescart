@@ -20,8 +20,10 @@ function Teams({ me }: { me: Me }) {
   }, [admin, router]);
   if (!admin) return null;
   return (
-    <div className="mx-auto w-full max-w-3xl p-4 sm:p-6">
-      <TeamSection meId={me.user.id} role={me.role} />
+    <div className="h-full overflow-y-auto bg-page/40 p-4 sm:p-6 lg:p-8">
+      <div className="mx-auto w-full max-w-6xl">
+        <TeamSection meId={me.user.id} role={me.role} />
+      </div>
     </div>
   );
 }

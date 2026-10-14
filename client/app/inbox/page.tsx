@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
@@ -12,10 +12,13 @@ import {
   deleteMessage,
   editMessage,
   fetchConversation,
+  fetchConversationCounts,
   fetchConversations,
   isAssignedTo,
   fetchMessages,
   markConversationRead,
+  matchesSearch,
+  needsAttention,
   newerMessage,
   clearConversation,
   restoreMessage,
@@ -35,8 +38,12 @@ import {
 } from '@/lib/activity';
 import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
+import { findMessageMatches } from '@/lib/messageSearch';
+import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
+import { revalidateOnReturn } from '@/lib/revalidate';
 import { showsAssignCheckboxes } from '@/lib/roles';
 import { AppShell } from '../AppShell';
+import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
@@ -63,6 +70,7 @@ import {
   MessageMenu,
   type MessageAction,
   UndoToast,
+  AssignedToast,
   messageActions,
 } from './messages';
 
@@ -80,8 +88,8 @@ export default function InboxPage() {
   return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
 }
 
-type ConversationFilter = { labelId: string | null; assignee: string | null };
-const filterKey = (f: ConversationFilter) => `${f.labelId}|${f.assignee}`;
+type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null };
+const filterKey = (f: ConversationFilter) => `${f.labelId}|${f.assignee}|${f.search ?? ''}`;
 type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string };
 
 // Module-level caches across client-side page transitions
@@ -90,6 +98,8 @@ let cachedLabels: Label[] = [];
 let cachedAssignees: Assignee[] = [];
 let cachedPermissions: Permissions | null = null;
 let cachedFeed: NotificationFeed | null = null;
+// "You took this chat." after Assign to Me: set before the jump to My Chats and shown by the page that mounts there
+let pendingAssignmentToast: { conversationId: string; message: string; detail: string } | null = null;
 let cachedUnreadTotal = 0;
 let cachedActiveIdByPath: Record<string, string | null> = {};
 const messagesCache = new Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>();
@@ -158,16 +168,32 @@ function Inbox({ meName }: { meName: string }) {
   const [loading, setLoading] = useState(false);
   const [labels, setLabels] = useState<Label[]>(cachedLabels);
   const [picker, setPicker] = useState<PickerTarget | null>(null);
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(() => {
-    if (typeof document !== 'undefined') {
-      return document.getElementById('app-header-actions');
-    }
-    return null;
-  });
+  // AppShell's header slot for the bell and the Assign box. Resolved after mount (see the effect below): during the
+  // first render of a page reached by in-app navigation the previous page's header is still in the DOM, so a slot
+  // looked up here would be the old, soon-removed one and the bell would vanish until a full refresh.
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>(cachedAssignees);
   const [membersVersion, setMembersVersion] = useState(0);
   const [permissions, setPermissions] = useState<Permissions | null>(cachedPermissions);
   const permissionsRef = useRef(permissions);
+  // Assignment toasts: "This chat has been assigned to you by …" (assignment:you, to the new assignee) and
+  // "… reassigned this chat to …" / "… unassigned you from this chat" (assignment:removed, to the previous
+  // holder). One at a time; the same event arriving twice within a few seconds (e.g. a reconnect) shows it once.
+  const [assignedToast, setAssignedToast] = useState<{ key: string; conversationId: string; message: string; detail: string } | null>(null);
+  const lastAssignedToastRef = useRef<{ key: string; at: number } | null>(null);
+  const clearAssignedToast = useCallback(() => setAssignedToast(null), []);
+  const showAssignmentToast = useCallback((key: string, conversationId: string, message: string, detail: string) => {
+    const last = lastAssignedToastRef.current;
+    if (last && last.key === key && Date.now() - last.at < 5000) return; // duplicate
+    lastAssignedToastRef.current = { key, at: Date.now() };
+    setAssignedToast({ key: `${key}:${Date.now()}`, conversationId, message, detail });
+  }, []);
+  useEffect(() => {
+    if (!pendingAssignmentToast) return;
+    const t = pendingAssignmentToast;
+    pendingAssignmentToast = null;
+    showAssignmentToast(`claim:${t.conversationId}`, t.conversationId, t.message, t.detail);
+  }, [showAssignmentToast]);
   const [activity, setActivity] = useState<Activity[]>(() => {
     const initId = cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
@@ -186,8 +212,15 @@ function Inbox({ meName }: { meName: string }) {
 
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
   const assigneeFilter = mine ? 'me' : leads ? 'unassigned' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
-  const filterRef = useRef<ConversationFilter>({ labelId: labelFilter, assignee: assigneeFilter });
-  filterRef.current = { labelId: labelFilter, assignee: assigneeFilter };
+  // The search box: applied to the loaded chats at once; the server search (every message, label, name…) runs a
+  // moment after you stop typing
+  const [searchTerm, setSearchTerm] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setSearchTerm(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+  const filterRef = useRef<ConversationFilter>({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null });
+  filterRef.current = { labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null };
   const lastActiveRef = useRef<Conversation | null>(null);
 
   const loadedMoreRef = useRef(false);
@@ -321,7 +354,9 @@ function Inbox({ meName }: { meName: string }) {
         conversationsRef.current.find((c) => c.id === conversationId) ??
         (lastActiveRef.current?.id === conversationId ? lastActiveRef.current : undefined);
       if (known && (known.assignee?.id ?? null) === (ref?.id ?? null)) return;
-      patchConversations((c) => (c.id === conversationId ? { ...c, assignee: ref } : c));
+      // A new assignment is unopened (bold for the assignee) unless they are looking at the chat right now
+      const openedNow = !!ref && ref.userId === permissionsRef.current?.userId && conversationId === activeIdRef.current;
+      patchConversations((c) => (c.id === conversationId ? { ...c, assignee: ref, assigneeOpenedAt: openedNow ? new Date().toISOString() : null } : c));
       loadAssignees(); // counts changed
       if (filterRef.current.assignee) loadConversations(); // may have joined the filtered list
     },
@@ -425,19 +460,32 @@ function Inbox({ meName }: { meName: string }) {
     if (filterType === 'assigned:me' && permissions && assigneesLoadedRef.current && !myAssignee) setFilterType('all');
   }, [filterType, permissions, myAssignee]);
 
-  // Changing the filter starts over from the newest page
+  // Changing the filter or the search starts over from the newest page
   useEffect(() => {
     loadedMoreRef.current = false;
     setConversationsCursor(null);
     loadConversations();
-  }, [labelFilter, assigneeFilter, loadConversations]);
+  }, [labelFilter, assigneeFilter, searchTerm, loadConversations]);
 
-  // AppShell's top header leaves a slot for page controls
+  // AppShell's top header leaves a slot for page controls. Look it up once this page is in the DOM (per path), and
+  // if the header isn't rendered yet (first sign-in, before "me" loads) wait for it to appear.
   useEffect(() => {
-    if (!headerSlot && typeof document !== 'undefined') {
-      setHeaderSlot(document.getElementById('app-header-actions'));
-    }
-  }, [headerSlot]);
+    const find = () => {
+      const el = document.getElementById('app-header-actions');
+      if (el && document.contains(el)) {
+        setHeaderSlot(el);
+        return true;
+      }
+      setHeaderSlot(null);
+      return false;
+    };
+    if (find()) return;
+    const observer = new MutationObserver(() => {
+      if (find()) observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [pathname]);
 
   useEffect(() => {
     fetchPermissions()
@@ -462,6 +510,13 @@ function Inbox({ meName }: { meName: string }) {
         cachedUnreadTotal = t;
         setUnreadTotal(t);
       })
+      .catch(() => {});
+  }, []);
+  // "Unassigned (n)" in the filter: live count from the server (refreshed on every assignment change and new chat)
+  const [unassignedCount, setUnassignedCount] = useState<number | null>(null);
+  const loadUnassignedCount = useCallback(() => {
+    fetchConversationCounts()
+      .then((c) => setUnassignedCount(c.unassigned))
       .catch(() => {});
   }, []);
 
@@ -497,6 +552,8 @@ function Inbox({ meName }: { meName: string }) {
       try {
         const c = await claimConversation(conversationId);
         onAssigned(c.id, c.assignee);
+        const known = conversationsRef.current.find((x) => x.id === c.id) ?? lastActiveRef.current;
+        pendingAssignmentToast = { conversationId: c.id, message: 'You took this chat. It is now in your My Chats.', detail: known?.contact ? known.contact.name || `+${known.contact.waId}` : '' };
         router.push(`/my-chats?chat=${encodeURIComponent(c.id)}`);
       } catch (err) {
         setClaimError({ id: conversationId, message: (err as Error).message });
@@ -544,8 +601,19 @@ function Inbox({ meName }: { meName: string }) {
     loadAssignees();
     loadFeed();
     loadUnreadTotal();
+    loadUnassignedCount();
     const socket = io(API_URL, { auth: { token: getToken() } });
     socketRef.current = socket;
+    const unbindPresence = bindPresence(socket); // online / away / offline dots
+    // Coming back to this browser tab, or the connection re-establishing: pull what may have been missed
+    const stopRevalidate = revalidateOnReturn(() => {
+      loadConversations();
+      loadLabels();
+      loadAssignees();
+      loadFeed();
+      loadUnreadTotal();
+      loadUnassignedCount();
+    }, socket);
     socket.on('typing', (e: TypingEvent) => {
       if (e.userId === permissionsRef.current?.userId) return; // yourself in another tab
       setTyping((s) => applyTypingEvent(s, e));
@@ -555,6 +623,7 @@ function Inbox({ meName }: { meName: string }) {
         setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
       loadConversations();
       loadUnreadTotal();
+      loadUnassignedCount(); // a brand-new chat arrives unassigned
       // Customer wrote while this tab is in the background: sound + desktop pop-up
       if (message.direction === 'in' && document.hidden) {
         playPing();
@@ -564,9 +633,13 @@ function Inbox({ meName }: { meName: string }) {
         );
       }
     });
+    // Timeline of the open chat: every event in the workspace
     socket.on('activity:new', (a: Activity) => {
       if (a.conversationId && a.conversationId === activeIdRef.current && a.type !== 'message_received')
         setActivity((prev) => (prev.some((x) => x.id === a.id) ? prev : [...prev, a]));
+    });
+    // Bell: only what the server decided this person may see (admins everything, others their own chats)
+    socket.on('notification:new', (a: Activity) => {
       if (a.actorId === null || a.actorId !== permissionsRef.current?.userId)
         setFeed((f) => (f && !f.items.some((x) => x.id === a.id) ? { unseen: f.unseen + 1, items: [a, ...f.items].slice(0, 30) } : f));
     });
@@ -585,14 +658,20 @@ function Inbox({ meName }: { meName: string }) {
     );
     socket.on(
       'conversation:assigned',
-      ({ conversationId, assignee }: { conversationId: string; assignee: Conversation['assignee'] }) =>
-        onAssigned(conversationId, assignee),
+      ({ conversationId, assignee }: { conversationId: string; assignee: Conversation['assignee'] }) => {
+        onAssigned(conversationId, assignee);
+        loadUnassignedCount();
+      },
     );
     // A teammate assigned a chat to you (sent only to you): sound + desktop pop-up while this tab is in the background.
     // The bell gets it through activity:new like everything else.
     socket.on(
       'assignment:you',
       ({ conversationId, actorName, contactName }: { conversationId: string; actorName: string | null; contactName: string }) => {
+        // In-app toast, whether or not the tab is visible (the existing sound + desktop pop-up below stay as they were)
+        showAssignmentToast(`you:${conversationId}:${actorName ?? ''}`, conversationId, 'This chat has been assigned to you and is waiting for your attention.', `${contactName}${actorName ? ` · by ${actorName}` : ''}`);
+        // Already looking at it: tell the server it is opened, so the 5-minute reminders don't start for it
+        if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
         if (!document.hidden) return;
         playPing();
         showDesktopNotification(`${actorName ?? 'Someone'} assigned a chat to you`, contactName, `assigned-${conversationId}`, () =>
@@ -603,7 +682,15 @@ function Inbox({ meName }: { meName: string }) {
     // A teammate moved a chat away from you (reassigned or unassigned; sent only to you): same pop-up rules
     socket.on(
       'assignment:removed',
-      ({ conversationId, actorName, contactName, assignee }: { conversationId: string; actorName: string | null; contactName: string; assignee: Conversation['assignee'] }) => {
+      ({ conversationId, actorId, actorName, contactName, assignee }: { conversationId: string; actorId: string | null; actorName: string | null; contactName: string; assignee: Conversation['assignee'] }) => {
+        // In-app toast for the previous holder (the sound + desktop pop-up below stay as they were)
+        const who = actorName ?? 'A teammate';
+        showAssignmentToast(
+          `removed:${conversationId}:${actorName ?? ''}:${assignee?.id ?? ''}`,
+          conversationId,
+          !assignee ? `${who} unassigned you from this chat.` : actorId && assignee.userId === actorId ? `${who} took this chat from you.` : `${who} reassigned this chat to ${assignee.name}.`,
+          contactName,
+        );
         if (!document.hidden) return;
         playPing();
         showDesktopNotification(
@@ -614,10 +701,39 @@ function Inbox({ meName }: { meName: string }) {
         );
       },
     );
+    // An owner/admin who was neither the actor nor involved: "Parth assigned this chat to Nikhil." (sent only to them)
+    socket.on(
+      'assignment:changed',
+      ({ conversationId, actorId, actorName, contactName, assignee, previous }: { conversationId: string; actorId: string | null; actorName: string | null; contactName: string; assignee: Conversation['assignee']; previous: string | null }) => {
+        const who = actorName ?? 'A teammate';
+        const self = !!assignee && !!actorId && assignee.userId === actorId; // took it themselves (Assign to Me or the Assign box)
+        const message = assignee
+          ? self
+            ? `${who} took this chat${previous ? ` from ${previous}` : ''}.`
+            : previous
+              ? `${who} reassigned this chat from ${previous} to ${assignee.name}.`
+              : `${who} assigned this chat to ${assignee.name}.`
+          : `${who} unassigned ${previous ?? 'the assignee'} from this chat.`;
+        showAssignmentToast(`changed:${conversationId}:${actorName ?? ''}:${assignee?.id ?? ''}:${previous ?? ''}`, conversationId, message, contactName);
+      },
+    );
+    // Recurring reminder (server schedule, sent only to the assignee): their open chats still waiting for a reply
+    socket.on('assignment:reminder', ({ at, chats }: { at: string; chats: { conversationId: string; contactName: string }[] }) => {
+      if (!chats?.length) return;
+      showAssignmentToast(
+        `reminder:${at}:${chats.map((c) => c.conversationId).join(',')}`,
+        chats[0].conversationId,
+        chats.length === 1 ? 'Reminder: This chat is assigned to you and still needs attention.' : `Reminder: ${chats.length} chats are assigned to you and still need attention.`,
+        chats.map((c) => c.contactName).join(', '),
+      );
+    });
     socket.on('assignee:saved', onAssigneeSaved);
     socket.on('assignee:deleted', ({ id }: { id: string }) => onAssigneeDeleted(id));
     // An owner/admin granted or removed this user's label-management permission
-    socket.on('member:removed', () => setMembersVersion((v) => v + 1));
+    socket.on('member:removed', () => {
+      setMembersVersion((v) => v + 1);
+      loadUnassignedCount(); // their chats were released
+    });
     socket.on('member:permissions', ({ userId, role, canManageLabels, canManageAssignments }: Permissions) => {
       setMembersVersion((v) => v + 1);
       // e.g. an admin just granted (or removed) this supervisor's right to assign chats: applies without a reload
@@ -625,6 +741,8 @@ function Inbox({ meName }: { meName: string }) {
       loadAssignees(); // a role or name change alters the assignee shape (colour, name) in the Assign list
     });
     return () => {
+      stopRevalidate();
+      unbindPresence();
       socketRef.current = null;
       socket.disconnect();
     };
@@ -643,6 +761,9 @@ function Inbox({ meName }: { meName: string }) {
     loadUnreadTotal,
     openConversation,
     onCleared,
+    showAssignmentToast,
+    loadUnassignedCount,
+    loadFeed,
   ]);
 
   useEffect(() => {
@@ -659,7 +780,12 @@ function Inbox({ meName }: { meName: string }) {
     }
     let cancelled = false; // ignore late responses after switching chats
     setOlderCursor(null);
-    patchConversations((c) => (c.id === activeId ? { ...c, unread: 0 } : c));
+    // Opening it: no longer bold (unread, and an assignment of yours you hadn't opened; the server records both)
+    patchConversations((c) =>
+      c.id === activeId
+        ? { ...c, unread: 0, ...(c.assignee?.userId === permissionsRef.current?.userId && !c.assigneeOpenedAt ? { assigneeOpenedAt: new Date().toISOString() } : {}) }
+        : c,
+    );
     Promise.all([
       fetchMessages(activeId),
       fetchConversationActivity(activeId),
@@ -710,20 +836,21 @@ function Inbox({ meName }: { meName: string }) {
   const active = listed ?? (lastActiveRef.current?.id === activeId ? lastActiveRef.current : undefined);
 
   const filteredConversations = conversations.filter((c) => {
-    const term = searchQuery.toLowerCase();
-    const name = (c.contact.name || '').toLowerCase();
-    const phone = c.contact.waId.toLowerCase();
-    const matchesSearch = name.includes(term) || phone.includes(term);
+    // Instant, on what is loaded; the server applies the same rule across all messages and refreshes the list.
+    // While the server result for this exact text is in, chats it returned stay listed even if only an older
+    // message matched (the local rule only sees the last one).
+    const serverSearched = searchTerm === searchQuery.trim();
+    const matched = serverSearched || matchesSearch(c, searchQuery);
     // A chat reassigned away from you leaves My Chats at once (the socket update patches it before any refetch)
     // (Until your permissions load, the server's "me" filter alone decides, so My Chats doesn't flash empty)
     if (mine && permissions && !isAssignedTo(c, permissions.userId)) return false;
     if (leads && c.assignee) return false; // taken by someone: no longer a lead
-    if (filterType === 'unread') return matchesSearch && c.unread > 0;
-    if (labelFilter) return matchesSearch && c.labels.some((l) => l.id === labelFilter);
-    if (assigneeFilter === 'me') return matchesSearch && isAssignedTo(c, permissions?.userId);
-    if (assigneeFilter === 'unassigned') return matchesSearch && !c.assignee;
-    if (assigneeFilter) return matchesSearch && c.assignee?.id === assigneeFilter;
-    return matchesSearch;
+    if (filterType === 'unread') return matched && c.unread > 0;
+    if (labelFilter) return matched && c.labels.some((l) => l.id === labelFilter);
+    if (assigneeFilter === 'me') return matched && isAssignedTo(c, permissions?.userId);
+    if (assigneeFilter === 'unassigned') return matched && !c.assignee;
+    if (assigneeFilter) return matched && c.assignee?.id === assigneeFilter;
+    return matched;
   });
 
   const openPicker = (conversationId: string | null, anchor: HTMLElement) =>
@@ -739,6 +866,8 @@ function Inbox({ meName }: { meName: string }) {
       <ConversationList
         conversations={filteredConversations}
         totalCount={conversations.length}
+        meId={permissions?.userId ?? null}
+        unassignedCount={unassignedCount}
         activeId={activeId}
         onSelect={selectConversation}
         onRefresh={loadConversations}
@@ -778,7 +907,7 @@ function Inbox({ meName }: { meName: string }) {
             });
           }}
           onOpenLabels={(anchor) => openPicker(active.id, anchor)}
-          viewer={permissions && { userId: permissions.userId, isAdmin: ['owner', 'admin'].includes(permissions.role) }}
+          viewer={permissions && { userId: permissions.userId, isAdmin: ['owner', 'admin'].includes(permissions.role), role: permissions.role }}
           onMessageUpdated={onMessageUpdated}
           onStatusChanged={onStatusChanged}
           onClosed={() => {
@@ -820,6 +949,10 @@ function Inbox({ meName }: { meName: string }) {
             canAssignOthers={showsAssignCheckboxes(permissions)}
             membersVersion={membersVersion}
             onAssigned={onAssigned}
+            onConfirmed={(conversationId, message) => {
+              const c = conversationsRef.current.find((x) => x.id === conversationId) ?? lastActiveRef.current;
+              showAssignmentToast(`own:${conversationId}:${Date.now()}`, conversationId, message, c?.contact ? c.contact.name || `+${c.contact.waId}` : '');
+            }}
           />,
           headerSlot,
         )}
@@ -835,6 +968,19 @@ function Inbox({ meName }: { meName: string }) {
           onLabelSaved={onLabelSaved}
           onLabelDeleted={onLabelDeleted}
           onConversationLabels={onConversationLabels}
+        />
+      )}
+
+      {assignedToast && (
+        <AssignedToast
+          key={assignedToast.key}
+          message={assignedToast.message}
+          detail={assignedToast.detail}
+          onOpen={() => {
+            openConversation(assignedToast.conversationId);
+            setAssignedToast(null);
+          }}
+          onDone={clearAssignedToast}
         />
       )}
     </div>
@@ -864,9 +1010,15 @@ function ConversationList({
   pickerConversationId,
   loading,
   typing,
+  meId,
+  unassignedCount,
 }: {
   conversations: Conversation[];
   totalCount: number;
+  // Signed-in user: their unopened assignments show bold
+  meId: string | null;
+  // Live number of chats with no assignee, for the Unassigned option (null while loading)
+  unassignedCount: number | null;
   activeId: string | null;
   onSelect: (id: string) => void;
   onRefresh: () => void;
@@ -888,6 +1040,7 @@ function ConversationList({
   loading: boolean;
   typing: TypingState;
 }) {
+  const presence = usePresence(); // online / away / offline dots next to assignees
   async function newChat() {
     const waId = prompt('Customer WhatsApp number with country code (e.g. 919876543210)');
     if (!waId) return;
@@ -936,7 +1089,8 @@ function ConversationList({
           <input
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search name, number, message"
+            placeholder="Search"
+            title="Finds chats by customer name, phone number, any message text, label, assignee, or the words open / closed / unread / unassigned"
             className="w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-xs text-ink-soft placeholder:text-faint outline-hidden transition hover:bg-surface focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
           />
           {searchQuery && (
@@ -960,16 +1114,12 @@ function ConversationList({
           >
             <option value="all">All</option>
             <option value="unread">Unread</option>
-            {/* My Chats is already "assigned to me" */}
-            {!mine && !leads && (
+            {/* Chats nobody holds yet (New Leads shows only these; My Chats is already "assigned to me") */}
+            {!mine && !leads && <option value="assigned:unassigned">Unassigned{unassignedCount === null ? '' : ` (${unassignedCount})`}</option>}
+            {/* Only your own chats here; no per-person entries (My Chats is already "assigned to me") */}
+            {!mine && !leads && myAssignee && (
               <optgroup label="Assigned">
-                {myAssignee && <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>}
-                <option value="assigned:unassigned">Unassigned</option>
-                {assignees.map((a) => (
-                  <option key={a.id} value={`assigned:${a.id}`}>
-                    {a.name} ({a.conversationCount})
-                  </option>
-                ))}
+                <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>
               </optgroup>
             )}
             {labels.length > 0 && (
@@ -1052,6 +1202,8 @@ function ConversationList({
             {conversations.map((c) => {
               const contactName = contactDisplayName(c.contact);
               const isSelected = activeId === c.id;
+              // WhatsApp-style: bold while there are unread messages or it was assigned to you and not opened yet
+              const attention = needsAttention(c, meId);
 
               return (
                 <li key={c.id} className="group relative">
@@ -1064,17 +1216,17 @@ function ConversationList({
                     <ContactAvatar contact={c.contact} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between">
-                        <span className={`truncate text-xs font-semibold ${isSelected ? 'text-primary' : 'text-ink'}`}>
+                        <span className={`truncate text-xs ${attention ? 'font-bold' : 'font-semibold'} ${isSelected ? 'text-primary' : 'text-ink'}`}>
                           {contactName}
                         </span>
-                        <span className="text-[10px] text-faint">
+                        <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
                           {listTimestamp(c.lastMessageAt)}
                         </span>
                       </div>
                       {typingNames(typing, c.id).length > 0 ? (
                         <p className="mt-0.5 truncate text-[11px] font-medium text-accent">typing…</p>
                       ) : (
-                        <p className="mt-0.5 truncate text-[11px] text-muted">
+                        <p className={`mt-0.5 truncate text-[11px] ${attention ? 'font-semibold text-ink' : 'text-muted'}`}>
                           {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage?.body || 'No messages yet'}
                         </p>
                       )}
@@ -1087,16 +1239,19 @@ function ConversationList({
                             >
                               <AssigneeAvatar assignee={c.assignee} size="h-3.5 w-3.5 text-[8px]" />
                               <span className="truncate">{c.assignee.name}</span>
+                              <PresenceDot status={presenceOf(presence, c.assignee.userId)} size="h-1.5 w-1.5" />
                             </span>
                           )}
                           <LabelChips labels={c.labels} max={2} />
                         </div>
                       )}
                     </div>
-                    {c.unread > 0 && (
+                    {c.unread > 0 ? (
                       <span className="flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-on-primary">
                         {c.unread}
                       </span>
+                    ) : (
+                      attention && <span title="Assigned to you, not opened yet" className="h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
                     )}
                   </button>
                   
@@ -1157,7 +1312,7 @@ function ChatPanel({
   onLoadOlder?: () => void;
   onSent: (m: Message) => void;
   onOpenLabels: (anchor: HTMLElement) => void;
-  viewer: { userId: string; isAdmin: boolean } | null;
+  viewer: { userId: string; isAdmin: boolean; role?: string } | null;
   onMessageUpdated: (m: Message) => void;
   onStatusChanged: (change: StatusChange) => void;
   // Called once this agent's "Close chat" succeeded: leave the chat and go back to the inbox list
@@ -1176,12 +1331,34 @@ function ChatPanel({
   activity: Activity[];
   meId: string | null;
 }) {
+  const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Message actions: open menu, message being edited in the composer, message awaiting delete confirmation
   const [menu, setMenu] = useState<{ message: Message; anchor: HTMLElement } | null>(null);
+  // "Search in conversation": over the loaded messages; ↑ older, ↓ newer, Enter = ↑, Esc closes
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [matchPos, setMatchPos] = useState(0); // 0 = the newest match
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const matches = useMemo(() => findMessageMatches(messages, searchOpen ? searchText : '').reverse(), [messages, searchOpen, searchText]); // newest first
+  const currentMatchId = matches[Math.min(matchPos, Math.max(matches.length - 1, 0))];
+  useEffect(() => setMatchPos(0), [searchText]);
+  useEffect(() => {
+    setSearchOpen(false);
+    setSearchText('');
+  }, [conversation.id]);
+  useEffect(() => {
+    if (!searchOpen || !currentMatchId) return;
+    const el = messagesContainerRef.current?.querySelector(`[data-message-id="${currentMatchId}"]`);
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [searchOpen, currentMatchId]);
+  const stepMatch = (dir: 1 | -1) => {
+    if (!matches.length) return;
+    setMatchPos((p) => (p + dir + matches.length) % matches.length);
+  };
   const [editing, setEditing] = useState<Message | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Message | null>(null);
   // Just deleted by this agent: offered for undo for a few seconds
@@ -1403,13 +1580,34 @@ function ChatPanel({
               <p className="truncate text-[11px] text-muted">
                 {/* The number is already the title when the customer hasn't shared a name */}
                 {conversation.contact.name ? `+${conversation.contact.waId}` : 'WhatsApp contact'}
-                {conversation.assignee && <span> · Assigned to {conversation.assignee.name}</span>}
+                {conversation.assignee && (
+                  <span>
+                    {' · Assigned to '}
+                    {conversation.assignee.name} <PresenceDot status={presenceOf(presence, conversation.assignee.userId)} size="h-1.5 w-1.5" withLabel />
+                  </span>
+                )}
               </p>
             )}
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2.5">
+          <button
+            type="button"
+            title="Search in conversation"
+            aria-label="Search in conversation"
+            aria-pressed={searchOpen}
+            onClick={() => {
+              setSearchOpen((o) => !o);
+              setTimeout(() => searchInputRef.current?.focus(), 0);
+            }}
+            className={`flex h-7 w-7 items-center justify-center rounded-full border transition ${searchOpen ? 'border-primary text-primary' : 'border-line text-body-soft hover:bg-surface-strong hover:text-body'}`}
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+          </button>
           <button
             onClick={(e) => onOpenLabels(e.currentTarget)}
             title="Label chat"
@@ -1447,6 +1645,57 @@ function ChatPanel({
           )} */}
         </div>
       </header>
+
+      {searchOpen && (
+        <div className="relative z-10 flex items-center gap-2 border-b border-line/90 bg-surface px-4 py-1.5 text-xs">
+          <svg className="h-3.5 w-3.5 shrink-0 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+          <input
+            ref={searchInputRef}
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                stepMatch(e.shiftKey ? -1 : 1);
+              } else if (e.key === 'Escape') {
+                setSearchOpen(false);
+                setSearchText('');
+              }
+            }}
+            placeholder="Search in conversation..."
+            aria-label="Search in conversation"
+            className="min-w-0 flex-1 bg-transparent text-xs text-ink placeholder:text-faint outline-none"
+          />
+          <span className="shrink-0 tabular-nums text-[11px] text-muted" aria-live="polite">
+            {searchText.trim() ? `${matches.length ? Math.min(matchPos, matches.length - 1) + 1 : 0} of ${matches.length}` : ''}
+          </span>
+          <button type="button" title="Older match" aria-label="Older match" disabled={matches.length < 2} onClick={() => stepMatch(1)} className="rounded-md p-1 text-body-soft hover:bg-surface-strong disabled:opacity-40">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m18 15-6-6-6 6" />
+            </svg>
+          </button>
+          <button type="button" title="Newer match" aria-label="Newer match" disabled={matches.length < 2} onClick={() => stepMatch(-1)} className="rounded-md p-1 text-body-soft hover:bg-surface-strong disabled:opacity-40">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            title="Close search"
+            aria-label="Close search"
+            onClick={() => {
+              setSearchOpen(false);
+              setSearchText('');
+            }}
+            className="rounded-md p-1 text-body-soft hover:bg-surface-strong"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Messages Stream (the ref scrolls it to the newest message) */}
       <div ref={messagesContainerRef} className="relative z-10 flex-1 space-y-2.5 overflow-y-auto px-6 py-4">
@@ -1491,6 +1740,8 @@ function ChatPanel({
                 actions={actions}
                 highlighted={menu?.message.id === m.id || editing?.id === m.id}
                 onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
+                highlightTerm={searchOpen ? searchText : ''}
+                currentMatch={searchOpen && m.id === currentMatchId}
               />
             </Fragment>
           );
@@ -1535,8 +1786,9 @@ function ChatPanel({
               ? `Couldn't reopen this chat: ${reopenError}. Click it in the chat list to try again.`
               : 'This chat is closed. Click it in the chat list to reopen it.'}
           </p>
-        ) : !conversation.assignee && !editing ? (
-          // New Lead: someone has to take it before anyone replies (the server refuses replies too)
+        ) : !conversation.assignee && !editing && viewer?.role !== 'supervisor' && !viewer?.isAdmin ? (
+          // New Lead, as an agent: take it before replying (the server refuses agents' replies too). Owners, admins
+          // and supervisors get the normal composer and may reply without taking the chat.
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-3 rounded-xl bg-primary-subtle px-4 py-2.5 text-xs">
               <span className="text-body">New lead: assign it to yourself to reply to the customer.</span>

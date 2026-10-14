@@ -38,6 +38,12 @@ const nextConfig: NextConfig = {
         source: '/health',
         destination: `${API}/health`,
       },
+      {
+        // Report exports (e.g. /reports/assignments.csv). ':path+' needs at least one segment, so the
+        // /reports page itself is still served by Next.
+        source: '/reports/:path+',
+        destination: `${API}/reports/:path+`,
+      },
     ];
   },
 };

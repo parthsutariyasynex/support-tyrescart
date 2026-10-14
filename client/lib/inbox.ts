@@ -31,27 +31,58 @@ export type Conversation = {
   lastMessage: Message | null;
   labels: Pick<Label, 'id' | 'name' | 'color'>[];
   assignee: Pick<Assignee, 'id' | 'name' | 'color' | 'userId'> | null;
+  // When the current assignee first opened the chat after it was assigned to them; null = not yet
+  assigneeOpenedAt: string | null;
   // Closed chats keep everything; new customer messages don't reopen them
   status: ConversationStatus;
   closedAt: string | null;
   closedById: string | null;
 };
 export type ConversationStatus = 'open' | 'closed';
-export type ConversationCounts = { open: number; closed: number; closedWithUnread: number };
+export type ConversationCounts = { open: number; closed: number; closedWithUnread: number; unassigned: number };
 export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 
 export const PAGE_SIZE = 50;
 
 const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version';
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } status closedAt closedById`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById`;
+
+// The search box, applied instantly to the chats already on screen while the server search (the same rule over
+// every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last
+// message · label names · assignee name · the status words open / closed / unread / assigned / unassigned.
+export function matchesSearch(
+  c: Pick<Conversation, 'contact' | 'lastMessage' | 'labels' | 'assignee' | 'status' | 'unread'>,
+  query: string,
+) {
+  const term = query.trim().toLowerCase();
+  if (!term) return true;
+  const digits = term.replace(/\D/g, '');
+  if ((c.contact.name || '').toLowerCase().includes(term)) return true;
+  if (digits.length >= 3 && c.contact.waId.includes(digits)) return true;
+  if (!c.lastMessage?.deletedAt && (c.lastMessage?.body || '').toLowerCase().includes(term)) return true;
+  if (c.labels.some((l) => l.name.toLowerCase().includes(term))) return true;
+  if (c.assignee && c.assignee.name.toLowerCase().includes(term)) return true;
+  if (term === c.status) return true;
+  if (term === 'unread') return c.unread > 0;
+  if (term === 'unassigned') return !c.assignee;
+  if (term === 'assigned') return !!c.assignee;
+  return false;
+}
+
+// WhatsApp-style bold row: the chat has unread customer messages, or it is assigned to you and you haven't opened
+// it since (an open chat only). Opening the chat clears both.
+export function needsAttention(c: Pick<Conversation, 'unread' | 'assignee' | 'assigneeOpenedAt' | 'status'>, meId: string | null | undefined) {
+  if (c.unread > 0) return true;
+  return c.status === 'open' && !!meId && c.assignee?.userId === meId && !c.assigneeOpenedAt;
+}
 
 // Optional filters: labelId, assignee (an assignee id, 'unassigned' or 'me'), status (open | closed)
 export async function fetchConversations(
   after?: string | null,
-  filter: { labelId?: string | null; assignee?: string | null; status?: ConversationStatus | null } = {},
+  filter: { labelId?: string | null; assignee?: string | null; status?: ConversationStatus | null; search?: string | null } = {},
 ) {
-  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String) {
-    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
+  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String) {
+    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
   }`;
   return (await gql<{ conversations: Connection<Conversation> }>(query, { first: PAGE_SIZE, after, ...filter }))
     .conversations;
@@ -138,7 +169,7 @@ export function newerMessage(current: Message, incoming: Message) {
 }
 
 export async function fetchConversationCounts() {
-  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread } }`))
+  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread unassigned } }`))
     .conversationCounts;
 }
 

@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { requireAuth } from '../auth.js';
 import { env } from '../env.js';
+import { sweepPresence } from '../presence.js';
+import { sendAssignmentReminders } from '../services/assignmentReminders.js';
 import {
   listConversations,
   openConversation,
@@ -36,5 +38,14 @@ if (!env.isProd) {
   inboxRouter.post('/dev/simulate-incoming', async (req, res) => {
     await simulateIncoming(req.auth!.workspaceId, req.body);
     res.json({ ok: true });
+  });
+  // Dev only: run one assignment-reminder tick now instead of waiting for the schedule
+  inboxRouter.post('/dev/assignment-reminders', async (_req, res) => {
+    res.json({ reminded: await sendAssignmentReminders() });
+  });
+  // Dev only: mark everyone idle for longer than idleMs (default: the configured away time) as Away now
+  inboxRouter.post('/dev/presence-sweep', (req, res) => {
+    const idle = Number(req.body?.idleMs);
+    res.json({ changed: sweepPresence(Date.now(), Number.isFinite(idle) && idle >= 0 ? idle : undefined) });
   });
 }

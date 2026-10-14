@@ -11,9 +11,10 @@ export async function getPermissions({ userId, workspaceId }: AuthPayload) {
   if (!member) throw new AppError('You are not a member of this workspace', 403, 'FORBIDDEN');
   const role = member.role;
   const isAdmin = isAdminRole(role);
-  // Assigning, reassigning and unassigning chats: owners and admins only. Supervisors and agents never, and
-  // there is no grant for it; they only "Assign to Me" an unassigned chat on New Leads (claimConversation)
-  const canManageAssignments = isAdmin;
+  // Assigning, reassigning and unassigning chats is open to every role (owner, admin, supervisor and agent):
+  // being a current member of the workspace is the only requirement (checked above). The flag is kept so the
+  // API, the member:permissions event and the clients keep their shape; it is true for every member.
+  const canManageAssignments = true;
   // Labels and assignee names/colours: admins and supervisors, or anyone an admin granted it to (unchanged)
   const canManageLabels = isSupervisorOrAbove(role) || member.canManageLabels;
   return { role, isAdmin, canManageAssignments, canManageLabels };
@@ -31,12 +32,10 @@ export async function requireLabelManager(auth: AuthPayload) {
     throw new AppError("You don't have permission to manage labels", 403, 'FORBIDDEN');
 }
 
-// Linking an assignee to a person, unlinking it, or deleting it moves chats between people (My Chats,
-// notifications) just like reassigning, so it needs the same right: owners and admins only. A label grant
-// only covers names and colours.
+// Assigning, reassigning and unassigning chats: any current member of the workspace, whatever their role
 export async function requireAssignmentManager(auth: AuthPayload) {
   if (!(await getPermissions(auth)).canManageAssignments)
-    throw new AppError('Only admins can link, unlink or delete assignees', 403, 'FORBIDDEN');
+    throw new AppError("You don't have permission to assign chats", 403, 'FORBIDDEN');
 }
 
 // Owners and admins grant or revoke label management for a member

@@ -102,6 +102,37 @@ export async function sendInvite(user: { id: string; name: string; email: string
   }
 }
 
+// "Your account is ready": sent when an admin creates an account with a password (or adds an existing account to
+// a workspace). Carries the login link; the password only when the admin set one just now (they're asked to change
+// it after the first sign-in). Returns false if the email couldn't be sent.
+export async function sendAccountReady(
+  user: { name: string; email: string },
+  workspaceName: string,
+  inviter: string,
+  password: string | null,
+) {
+  const appUrl = (process.env.APP_URL || env.webOrigin).replace(/\/$/, '');
+  const link = `${appUrl}/login`;
+  const credentials = password
+    ? `\n\nSign in with:\n  Email: ${user.email}\n  Temporary password: ${password}\n\nPlease change it after your first sign-in (My account → Change password).`
+    : `\n\nSign in with your usual email and password:\n  Email: ${user.email}`;
+  const credentialsHtml = password
+    ? `<p>Sign in with:<br>Email: <b>${escapeHtml(user.email)}</b><br>Temporary password: <b>${escapeHtml(password)}</b></p><p>Please change it after your first sign-in (My account → Change password).</p>`
+    : `<p>Sign in with your usual email and password:<br>Email: <b>${escapeHtml(user.email)}</b></p>`;
+  try {
+    await sendMail({
+      to: user.email,
+      subject: `Your ${workspaceName} account on support-tyrescart is ready`,
+      text: `Hi ${user.name},\n\n${inviter} added you to ${workspaceName}. Sign in here:\n${link}${credentials}`,
+      html: `<p>Hi ${escapeHtml(user.name)},</p><p>${escapeHtml(inviter)} added you to ${escapeHtml(workspaceName)}.</p><p><a href="${link}">Sign in to support-tyrescart</a></p>${credentialsHtml}`,
+    });
+    return true;
+  } catch (err) {
+    console.error('[mail] account email failed', err);
+    return false;
+  }
+}
+
 // Sets the new password, uses up the link, and signs out every existing session
 export async function resetPassword(rawInput: unknown) {
   const { token, password } = parse(resetSchema, rawInput);

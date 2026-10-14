@@ -3,8 +3,14 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { getToken, setToken } from '@/lib/api';
+import { io } from 'socket.io-client';
+import { API_URL, getToken, setToken } from '@/lib/api';
+import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
 import { type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
+import { menuItemMatches } from '@/lib/menu';
+import { revalidateOnReturn } from '@/lib/revalidate';
+import { MenuSearch } from './MenuSearch';
+import { PresenceDot } from './PresenceDot';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
@@ -28,10 +34,26 @@ export function AppShell({
   const router = useRouter();
   const pathname = usePathname();
   const [me, setMe] = useState<Me | null>(cachedMe);
+  // Your own Online / Away / Offline tag in the header, live on every page (this connection also reports your
+  // activity, so Away is measured across the whole app, not only the chat pages)
+  const presence = usePresence();
+  const myStatus = presenceOf(presence, me?.user.id);
+  useEffect(() => {
+    if (!me?.user.id) return;
+    const socket = io(API_URL, { auth: { token: getToken() } });
+    const unbind = bindPresence(socket);
+    return () => {
+      unbind();
+      socket.disconnect();
+    };
+  }, [me?.user.id, me?.workspace.id]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [automationMenuOpen, setAutomationMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(cachedSidebarOpen);
+  // Sidebar "Search menu": hides menu items whose name doesn't contain the text
+  const [menuQuery, setMenuQuery] = useState('');
+  const showItem = (label: string) => menuItemMatches(menuQuery, label);
 
   function toggleSidebar(open: boolean) {
     cachedSidebarOpen = open;
@@ -96,16 +118,19 @@ export function AppShell({
       router.replace('/login');
       return;
     }
-    fetchMe<Me>()
-      .then((m) => {
-        cachedMe = m;
-        setMe(m);
-        rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
-      })
-      .catch(() => {
-        cachedMe = null;
-        router.replace('/login');
-      });
+    const load = () =>
+      fetchMe<Me>()
+        .then((m) => {
+          cachedMe = m;
+          setMe(m);
+          rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
+        })
+        .catch(() => {
+          cachedMe = null;
+          router.replace('/login');
+        });
+    load();
+    return revalidateOnReturn(load); // back to this tab: role, name or workspace may have changed meanwhile
   }, [router]);
 
   if (!me) {
@@ -156,20 +181,7 @@ export function AppShell({
 
             {/* Search Input Box */}
             <div className="p-3">
-              <div className="flex items-center gap-2 rounded-xl border border-line bg-surface-muted/60 px-3 py-1.5 text-xs text-ink-soft">
-                <svg className="h-3.5 w-3.5 text-faint shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.3-4.3" />
-                </svg>
-                <input
-                  type="text"
-                  placeholder="Search menu..."
-                  className="w-full bg-transparent text-xs text-ink placeholder:text-faint outline-none"
-                />
-                <span className="flex items-center gap-0.5 rounded border border-line bg-surface px-1 py-0.5 text-[9px] font-semibold text-faint">
-                  ⌘K
-                </span>
-              </div>
+              <MenuSearch value={menuQuery} onChange={setMenuQuery} />
             </div>
 
             {/* Navigation Menus */}
@@ -179,60 +191,68 @@ export function AppShell({
                 <p className="px-2 pb-1.5 text-[10px] font-bold tracking-wider text-faint uppercase">
                   CONVERSATIONS
                 </p>
+                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
+                  <p className="px-2.5 py-2 text-[11px] text-faint">No menu item matches “{menuQuery.trim()}”</p>
+                )}
                 <div className="space-y-0.5">
-                  <Link
-                    href="/inbox"
-                    scroll={false}
-                    className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
-                      pathname === '/inbox'
-                        ? 'bg-secondary text-on-primary shadow-2xs'
-                        : 'text-body hover:bg-surface-strong'
-                    }`}
-                  >
-                    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect width="20" height="16" x="2" y="4" rx="2" />
-                      <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
-                    </svg>
-                    <span>Inbox</span>
-                  </Link>
+                  {showItem('My Chats') && (
+                    <Link
+                      href="/my-chats"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/my-chats'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                        <circle cx="12" cy="9" r="2" />
+                        <path d="M8.5 13.5a4 4 0 0 1 7 0" />
+                      </svg>
+                      <span>My Chats</span>
+                    </Link>
+                  )}
+                  {showItem('Inbox') && (
+                    <Link
+                      href="/inbox"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/inbox'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect width="20" height="16" x="2" y="4" rx="2" />
+                        <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+                      </svg>
+                      <span>Inbox</span>
+                    </Link>
+                  )}
 
                   {/* Unassigned customer chats waiting for someone to "Assign to Me" */}
-                  <Link
-                    href="/leads"
-                    scroll={false}
-                    className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
-                      pathname === '/leads'
-                        ? 'bg-secondary text-on-primary shadow-2xs'
-                        : 'text-body hover:bg-surface-strong'
-                    }`}
-                  >
-                    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-                      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-                    </svg>
-                    <span>New Leads</span>
-                  </Link>
+                  {showItem('New Leads') && (
+                    <Link
+                      href="/leads"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/leads'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+                        <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                      </svg>
+                      <span>New Leads</span>
+                    </Link>
+                  )}
 
                   {/* Same inbox, only the chats assigned to you */}
-                  <Link
-                    href="/my-chats"
-                    scroll={false}
-                    className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
-                      pathname === '/my-chats'
-                        ? 'bg-secondary text-on-primary shadow-2xs'
-                        : 'text-body hover:bg-surface-strong'
-                    }`}
-                  >
-                    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                      <circle cx="12" cy="9" r="2" />
-                      <path d="M8.5 13.5a4 4 0 0 1 7 0" />
-                    </svg>
-                    <span>My Chats</span>
-                  </Link>
-
                   {/* Teams: owners and admins only (the server refuses the members list to everyone else) */}
-                  {isAdminRole(me.role) && (
+                  {isAdminRole(me.role) && showItem('Teams') && (
                     <Link
                       href="/teams"
                       scroll={false}
@@ -249,6 +269,25 @@ export function AppShell({
                       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                       </svg>
                       <span>Teams</span>
+                    </Link>
+                  )}
+
+                  {/* Reports: owners and admins only (the server refuses the report to everyone else) */}
+                  {isAdminRole(me.role) && showItem('Reports') && (
+                    <Link
+                      href="/reports"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/reports'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 3v18h18" />
+                        <path d="M7 15l4-4 4 4 5-6" />
+                      </svg>
+                      <span>Reports</span>
                     </Link>
                   )}
 
@@ -431,6 +470,22 @@ export function AppShell({
               {/* Slim Icons */}
               <div className="flex flex-col items-center gap-2 w-full">
                 <Link
+                  href="/my-chats"
+                  scroll={false}
+                  title="My Chats"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/my-chats'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    <circle cx="12" cy="9" r="2" />
+                    <path d="M8.5 13.5a4 4 0 0 1 7 0" />
+                  </svg>
+                </Link>
+                <Link
                   href="/inbox"
                   scroll={false}
                   title="Inbox"
@@ -460,22 +515,6 @@ export function AppShell({
                       <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
                   </svg>
                 </Link>
-                <Link
-                  href="/my-chats"
-                  scroll={false}
-                  title="My Chats"
-                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
-                    pathname === '/my-chats'
-                      ? 'bg-secondary text-on-primary shadow-2xs'
-                      : 'text-faint hover:bg-surface-strong hover:text-body'
-                  }`}
-                >
-                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                    <circle cx="12" cy="9" r="2" />
-                    <path d="M8.5 13.5a4 4 0 0 1 7 0" />
-                  </svg>
-                </Link>
                 {isAdminRole(me.role) && (
                   <Link
                     href="/teams"
@@ -492,6 +531,23 @@ export function AppShell({
                       <circle cx="9" cy="7" r="4" />
                       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
                       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                    </svg>
+                  </Link>
+                )}
+                {isAdminRole(me.role) && (
+                  <Link
+                    href="/reports"
+                    scroll={false}
+                    title="Reports"
+                    className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                      pathname === '/reports'
+                        ? 'bg-secondary text-on-primary shadow-2xs'
+                        : 'text-faint hover:bg-surface-strong hover:text-body'
+                    }`}
+                  >
+                    <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 3v18h18" />
+                      <path d="M7 15l4-4 4 4 5-6" />
                     </svg>
                   </Link>
                 )}
@@ -565,7 +621,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -585,6 +641,8 @@ export function AppShell({
                   ? 'Your details and password'
                   : pathname === '/teams'
                   ? 'Everyone in this workspace: name, email, role and status'
+                  : pathname === '/reports'
+                  ? 'Assignment report: who assigned which chat to whom, and why'
                   : pathname === '/my-chats'
                   ? 'Chats assigned to you'
                   : pathname === '/leads'
@@ -894,6 +952,7 @@ export function AppShell({
                   {userInitial}
                 </span>
                 <span className="font-semibold max-w-[120px] truncate">{me.user.name || me.user.email}</span>
+                <PresenceDot status={myStatus} withLabel />
                 <RoleBadge role={me.role} />
                 <svg className="h-3 w-3 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
@@ -910,6 +969,7 @@ export function AppShell({
                     <div className="min-w-0 flex-1">
                       <p className="flex items-center gap-1.5 text-xs font-bold text-ink">
                         <span className="truncate">{me.user.name || 'User'}</span>
+                        <PresenceDot status={myStatus} withLabel />
                         <RoleBadge role={me.role} />
                       </p>
                       <p className="text-[11px] text-muted truncate">{me.user.email}</p>

@@ -10,13 +10,15 @@ import * as labels from './labels.js';
 import * as members from './members.js';
 import * as quickReplies from './quickReplies.js';
 import * as permissions from './permissions.js';
+import * as presence from './presence.js';
+import * as reports from './reports.js';
 import * as settings from './settings.js';
 import * as shared from './shared.js';
 import type { Context } from './shared.js';
 
 type ServerContext = { req: Request; res: Response };
 
-const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies];
+const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence];
 
 export const yoga = createYoga<ServerContext, Context>({
   schema: createSchema<ServerContext & Context>({

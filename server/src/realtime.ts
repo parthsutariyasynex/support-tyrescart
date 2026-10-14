@@ -2,6 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import { Server } from 'socket.io';
 import { verifyCurrentToken } from './auth.js';
 import { env } from './env.js';
+import { forgetPresence, registerPresence } from './presence.js';
 import { registerTyping } from './typing.js';
 
 let io: Server;
@@ -22,6 +23,7 @@ export function initRealtime(server: HttpServer) {
     }
   });
   registerTyping(io);
+  registerPresence(io);
 }
 
 // Drop a user's live connections in every workspace (e.g. after a password reset); their old token can't reconnect
@@ -44,4 +46,5 @@ export function emitToUser(workspaceId: string, userId: string, event: string, d
 // Removed from a workspace: close their live connections to it (their token for it no longer works either)
 export function disconnectMember(workspaceId: string, userId: string) {
   io?.in(userRoom(workspaceId, userId)).disconnectSockets(true);
+  forgetPresence(workspaceId, userId);
 }

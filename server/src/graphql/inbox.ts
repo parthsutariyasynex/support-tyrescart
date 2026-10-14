@@ -74,6 +74,8 @@ export const typeDefs = /* GraphQL */ `
     labels: [Label!]!
     "Null when unassigned"
     assignee: Assignee
+    "When the current assignee first opened the chat after it was assigned to them; null = not yet (shown bold in their list, reminded every few minutes)"
+    assigneeOpenedAt: DateTime
     "open | closed. New customer messages don't reopen a closed chat; they still count as unread."
     status: String!
     closedAt: DateTime
@@ -86,6 +88,8 @@ export const typeDefs = /* GraphQL */ `
     closed: Int!
     "Closed chats with unread customer messages"
     closedWithUnread: Int!
+    "Chats with no assignee (the Unassigned filter / New Leads)"
+    unassigned: Int!
   }
 
   type ConversationConnection {
@@ -136,8 +140,8 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', or 'me' (assigned to you). status: open | closed"
-    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String): ConversationConnection!
+    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', or 'me' (assigned to you). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
+    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String): ConversationConnection!
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
     messageTemplates: [MessageTemplate!]!
@@ -170,7 +174,7 @@ export const typeDefs = /* GraphQL */ `
 `;
 
 type PageArgs = { first?: number | null; after?: string | null };
-type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null };
+type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null };
 const pageArgs = ({ first, after }: PageArgs) => ({ first: first ?? undefined, after: after ?? undefined });
 
 type AssigneeRefMember = { id: string; role: string; user: { id: string; name: string } };
@@ -187,11 +191,11 @@ type ConversationParent = {
 
 export const resolvers = {
   Query: {
-    conversations: authed(async ({ labelId, assignee, status, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
+    conversations: authed(async ({ labelId, assignee, status, search, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
         (await listConversations(
           workspaceId,
-          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined },
+          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined },
           userId,
         )) as Page<ConversationParent>,
       ),

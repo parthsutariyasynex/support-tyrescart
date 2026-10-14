@@ -7,9 +7,10 @@ import { prisma } from '../prisma.js';
 import { disconnectMember, disconnectUser, emitToWorkspace } from '../realtime.js';
 import { findOrphanAccount, passwordSchema, registerSchema } from './auth.js';
 import { recordActivity } from './activity.js';
+import { recordAssignment } from './assignmentReports.js';
 import { announceAssignee } from './assign.js';
 import { AppError, notFound } from './errors.js';
-import { isInviteToken, sendInvite } from './passwordReset.js';
+import { isInviteToken, sendAccountReady, sendInvite } from './passwordReset.js';
 import { announcePermissions, requireAdmin } from './permissions.js';
 import { readJoinLink, signJoinLink } from './joinLinks.js';
 import { ASSIGNABLE_ROLES, DEFAULT_ROLE, isAdminRole } from './roles.js';
@@ -123,13 +124,18 @@ export async function inviteMember(auth: AuthPayload, rawInput: unknown) {
     throw err;
   }
 
+  const [workspace, inviter] = await Promise.all([
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { name: true } }),
+    prisma.user.findUnique({ where: { id: auth.userId }, select: { name: true } }),
+  ]);
   if (invited) {
-    const [workspace, inviter] = await Promise.all([
-      prisma.workspace.findUnique({ where: { id: workspaceId }, select: { name: true } }),
-      prisma.user.findUnique({ where: { id: auth.userId }, select: { name: true } }),
-    ]);
+    // No password set: the email carries a "choose your password" link
     emailSent = await sendInvite(member.user, workspace?.name ?? 'your team', inviter?.name ?? 'An admin');
     member = await prisma.member.findUniqueOrThrow({ where: { id: member.id }, include: memberInclude }); // now "invited"
+  } else {
+    // Account created with an admin-set password, or an existing account added: email the login link (and the
+    // temporary password when the admin set one just now)
+    emailSent = await sendAccountReady(member.user, workspace?.name ?? 'your team', inviter?.name ?? 'An admin', created && password !== undefined ? password : null);
   }
   await announcePermissions(workspaceId, member.user.id);
   return { member: toMember(member), invited, emailSent, created };
@@ -222,9 +228,13 @@ export async function removeMember(auth: AuthPayload, userId: string) {
   const { workspaceId } = auth;
   const member = await requireOtherMember(auth, userId, 'remove');
   if (isAdminRole(member.role) && member.active) await requireAnotherActiveAdmin(workspaceId, userId, 'remove');
+  const actor = await prisma.user.findUnique({ where: { id: auth.userId }, select: { id: true, name: true } });
   const chats = await prisma.$transaction(async (tx) => {
     const held = await tx.conversation.findMany({ where: { workspaceId, assignedToId: member.id }, select: { id: true } });
     await tx.member.delete({ where: { id: member.id } });
+    // Each released chat gets an assignment report row (unassigned by the admin, no reason)
+    for (const c of held)
+      await recordAssignment(tx, { workspaceId, conversationId: c.id, previous: member, next: null, actor, reason: null });
     return held;
   });
   disconnectMember(workspaceId, userId);
