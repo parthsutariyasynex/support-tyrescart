@@ -42,8 +42,8 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Mutation {
-    "Admins only. assigneeId: the member id (null = unassign). memberId: the person's user id instead. Assigning the current holder again changes nothing."
-    assignConversation(conversationId: ID!, assigneeId: ID, memberId: ID): Conversation!
+    "Every role. assigneeId: the member id (null = unassign). memberId: the person's user id instead. Assigning the current holder again changes nothing. reason: the Assignment Reason (max 500 chars), required when assigning or reassigning (REASON_REQUIRED otherwise), optional when unassigning. Stored for the admin assignment report only; never returned by chat queries."
+    assignConversation(conversationId: ID!, assigneeId: ID, memberId: ID, reason: String): Conversation!
     "Assign to Me (New Leads): take an unassigned chat for yourself. Fails with ALREADY_ASSIGNED if someone else has it."
     claimConversation(conversationId: ID!): Conversation!
   }
@@ -60,13 +60,13 @@ export const resolvers = {
     claimConversation: authed(({ conversationId }: { conversationId: string }, auth) => claimConversation(auth, conversationId)),
     assignConversation: authed(
       async (
-        { conversationId, assigneeId, memberId }: { conversationId: string; assigneeId?: string | null; memberId?: string | null },
+        { conversationId, assigneeId, memberId, reason }: { conversationId: string; assigneeId?: string | null; memberId?: string | null; reason?: string | null },
         auth,
       ) => {
         if (assigneeId && memberId) throw new AppError('Pass either assigneeId or memberId, not both', 400, 'BAD_USER_INPUT');
         return memberId
-          ? assignConversationToMember(auth, conversationId, memberId)
-          : assignConversation(auth.workspaceId, conversationId, assigneeId ?? null, auth.userId);
+          ? assignConversationToMember(auth, conversationId, memberId, reason)
+          : assignConversation(auth.workspaceId, conversationId, assigneeId ?? null, auth.userId, { reason, requireReason: true });
       },
     ),
   },

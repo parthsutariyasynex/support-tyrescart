@@ -4,7 +4,7 @@ import { describe, test } from 'node:test';
 import { ROLE_STYLES, assignableMembers, isAdminRole, otherAssigneesToList, roleStyle, showsAssignCheckboxes } from './roles';
 
 describe('Assign menu people and role badges', () => {
-  test('the owner, Supervisors and Agents are listed (other Admins are left out), by name', () => {
+  test('every role is listed (owner, Admins, Supervisors and Agents), by name; unknown roles are not', () => {
     const members = [
       { id: '1', name: 'Zoya', email: 'z@example.com', role: 'agent' },
       { id: '2', name: 'Owner', email: 'o@example.com', role: 'owner' },
@@ -13,9 +13,9 @@ describe('Assign menu people and role badges', () => {
       { id: '5', name: 'Arun', email: 'ar@example.com', role: 'agent' },
       { id: '6', name: 'Ghost', email: 'g@example.com', role: 'something-else' },
     ];
-    assert.deepEqual(assignableMembers(members).map((m) => [m.name, m.role]), [['Arun', 'agent'], ['Owner', 'owner'], ['Sana', 'supervisor'], ['Zoya', 'agent']]);
+    assert.deepEqual(assignableMembers(members).map((m) => [m.name, m.role]), [['Adam', 'admin'], ['Arun', 'agent'], ['Owner', 'owner'], ['Sana', 'supervisor'], ['Zoya', 'agent']]);
     assert.deepEqual(assignableMembers([]), []);
-    assert.equal(assignableMembers(members)[0].email, 'ar@example.com'); // keeps the email for the row
+    assert.equal(assignableMembers(members)[0].email, 'a@example.com'); // keeps the email for the row
   });
 
   test('role colours: Admin purple, Supervisor blue, Agent green; owners show as Admin', () => {
@@ -30,20 +30,19 @@ describe('Assign menu people and role badges', () => {
   });
 });
 
-describe('Assign list checkboxes: owners and admins only', () => {
+describe('Assign list checkboxes: every role', () => {
   const perms = (role: string, canManageAssignments: boolean) => ({ userId: 'u1', role, canManageLabels: true, canManageAssignments });
 
-  test('shown only when the server says the person may manage assignments (owners and admins)', () => {
+  test('shown for every role once the server says so (it says true for every member)', () => {
     assert.equal(showsAssignCheckboxes(perms('owner', true)), true);
     assert.equal(showsAssignCheckboxes(perms('admin', true)), true);
-    assert.equal(showsAssignCheckboxes(perms('supervisor', false)), false);
-    assert.equal(showsAssignCheckboxes(perms('agent', false)), false);
+    assert.equal(showsAssignCheckboxes(perms('supervisor', true)), true);
+    assert.equal(showsAssignCheckboxes(perms('agent', true)), true);
   });
 
-  test('never decided by the role name alone: a supervisor or agent flag stays hidden, and vice versa', () => {
-    // The server flag is the only input; a label grant or a role string can't turn the checkboxes on
-    assert.equal(showsAssignCheckboxes(perms('supervisor', true as boolean)), true); // only if the server ever said so
-    assert.equal(showsAssignCheckboxes(perms('admin', false)), false);
+  test('decided by the server flag alone, never by the role name', () => {
+    assert.equal(showsAssignCheckboxes(perms('admin', false)), false); // if the server ever said no
+    assert.equal(showsAssignCheckboxes(perms('agent', false)), false);
     assert.equal(showsAssignCheckboxes({ canManageAssignments: 'yes' as unknown as boolean }), false); // strict boolean
   });
 

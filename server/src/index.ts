@@ -6,8 +6,10 @@ import { yoga } from './graphql/index.js';
 import { initRealtime } from './realtime.js';
 import { authRouter } from './routes/auth.js';
 import { inboxRouter } from './routes/inbox.js';
+import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
+import { startAssignmentReminders } from './services/assignmentReminders.js';
 import { AppError } from './services/errors.js';
 
 const app = express();
@@ -22,6 +24,7 @@ app.use('/auth', authRouter);
 app.use('/webhook', webhookRouter);
 app.use('/inbox', inboxRouter);
 app.use('/settings', settingsRouter);
+app.use('/reports', reportsRouter);
 
 // Always answer with JSON, never Express's HTML error page (it leaks stack traces)
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
@@ -34,3 +37,5 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 const server = createServer(app);
 initRealtime(server);
 server.listen(env.port, () => console.log(`API running on http://localhost:${env.port}`));
+const stopReminders = startAssignmentReminders();
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => stopReminders());

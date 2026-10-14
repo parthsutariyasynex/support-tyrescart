@@ -14,6 +14,10 @@ export const env = {
   metaVerifyToken: required('META_VERIFY_TOKEN'),
   graphVersion: process.env.GRAPH_API_VERSION ?? 'v21.0',
   isProd: process.env.NODE_ENV === 'production',
+  // How often assignees are reminded (toast) about their open chats still waiting for a reply; 0 disables
+  assignmentReminderMinutes: Number(process.env.ASSIGNMENT_REMINDER_MINUTES ?? 5),
+  // Minutes without activity on any tab before a connected person shows as Away
+  presenceAwayMinutes: Number(process.env.PRESENCE_AWAY_MINUTES ?? 5),
   // Creating new workspaces (sign-up without a team link, "Create workspace"): closed in production unless
   // ALLOW_WORKSPACE_CREATION=true; open elsewhere so development and the e2e tests can set up workspaces.
   // Admins add users from the Teams page instead.

@@ -2,9 +2,9 @@
 // 'owner' is whoever created the workspace: an Admin who can't be demoted or removed, so a workspace always
 // keeps someone who can manage it.
 //   Admin (owner, admin): users, roles and system settings, plus everything below
-//   Supervisor: team chats and assignments (assign/reassign anyone, labels and assignees)
-//   Agent: customer conversations; can take an unassigned chat or release their own, and manage labels
-//          and assignees only if an Admin grants it (Member.canManageLabels)
+//   Supervisor: team chats, labels and assignees
+//   Agent: customer conversations; manages labels only if an Admin grants it (Member.canManageLabels)
+// Assigning, reassigning and unassigning chats (to anyone, including themselves) is open to every role.
 export const ROLES = ['owner', 'admin', 'supervisor', 'agent'] as const;
 export type Role = (typeof ROLES)[number];
 

@@ -8,8 +8,11 @@ import {
   fetchWorkspaceMembers,
 } from '@/lib/assignees';
 import type { Conversation } from '@/lib/inbox';
+import { presenceOf, usePresence } from '@/lib/presence';
 import { assignableMembers, otherAssigneesToList, roleStyle } from '@/lib/roles';
+import { PresenceDot } from '../PresenceDot';
 import { RoleBadge } from '../RoleBadge';
+import { type AssignAction, AssignReasonDialog } from './AssignReasonDialog';
 
 type AssigneeRef = NonNullable<Conversation['assignee']>;
 
@@ -45,6 +48,13 @@ export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { ass
 const inputClass =
   'w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-xs text-ink-soft placeholder:text-faint outline-hidden focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary';
 
+// What the actor sees after their own assignment succeeds
+function confirmation(action: AssignAction, name: string, previous?: string) {
+  if (action === 'assign') return `Chat assigned to ${name}.`;
+  if (action === 'reassign') return previous ? `Chat reassigned from ${previous} to ${name}.` : `Chat reassigned to ${name}.`;
+  return `Chat unassigned from ${name}.`;
+}
+
 // Top-header "Assign" dropdown: assign the open chat to a person (click them again to unassign). Without a chat it just lists them.
 export function AssignDropdown({
   conversation,
@@ -53,24 +63,31 @@ export function AssignDropdown({
   canAssignOthers,
   membersVersion,
   onAssigned,
+  onConfirmed,
 }: {
   conversation?: Conversation;
   assignees: Assignee[];
   meId: string | null;
-  // Supervisors and admins; agents may only take an unassigned chat or release their own (the server enforces it)
+  // The server's canManageAssignments flag: true for every role once permissions are loaded (the server enforces it)
   canAssignOthers: boolean;
   // Bumped by the page when members join, leave or change role (Socket.IO): refetch while open
   membersVersion: number;
   onAssigned: (conversationId: string, assignee: Conversation['assignee']) => void;
+  // Confirmation for the person who did it ("Chat assigned to Nikhil."); the server never notifies the actor
+  onConfirmed?: (conversationId: string, message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const presence = usePresence();
   // Workspace members (People)
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
   // Messages shown after an action
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // The action picked from the list, waiting for its popup: the Assignment Reason (compulsory for assign and
+  // reassign, optional for unassign) and a confirmation. In-page dialog, never the browser's prompt/confirm.
+  const [pending, setPending] = useState<{ action: AssignAction; person: string; previous: string | null; run: (reason: string) => Promise<void> } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   function close() {
@@ -78,6 +95,7 @@ export function AssignDropdown({
     setError('');
     setNotice('');
     setQuery('');
+    setPending(null);
   }
 
   useEffect(() => {
@@ -132,38 +150,50 @@ export function AssignDropdown({
     };
   }, [open, members]);
 
+  // Runs an action; true when it succeeded (the error, if any, is shown in the box or the open popup)
   async function attempt(fn: () => Promise<void>) {
     setBusy(true);
     setError('');
     try {
       await fn();
+      return true;
     } catch (err) {
       setError((err as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  // Like a label checkbox: tick to assign, untick the ticked one to unassign (asks first). The menu stays open.
-  function toggle(assigneeId: string) {
+  // Picking someone opens the popup (reason + confirm); nothing is sent until it is confirmed. The menu stays open.
+  function ask(action: AssignAction, person: string, run: (reason: string) => Promise<void>) {
+    setError('');
+    setPending({ action, person, previous: conversation?.assignee?.name ?? null, run });
+  }
+
+  // Like a label checkbox: tick to assign (or reassign), untick the ticked one to unassign
+  function toggle(assigneeId: string, name: string) {
     if (!conversation) return;
-    if (conversation.assignee?.id === assigneeId && !confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
-    attempt(async () => {
-      const c = await assignConversation(conversation.id, conversation.assignee?.id === assigneeId ? null : assigneeId);
+    const unassign = conversation.assignee?.id === assigneeId;
+    const action: AssignAction = unassign ? 'unassign' : conversation.assignee ? 'reassign' : 'assign';
+    ask(action, name, async (reason) => {
+      const c = await assignConversation(conversation.id, unassign ? null : assigneeId, undefined, reason);
       onAssigned(c.id, c.assignee);
+      onConfirmed?.(c.id, confirmation(action, name, conversation.assignee?.name));
     });
   }
 
-  // A person: the server assigns their linked assignee (creating it the first time)
-  function toggleMember(userId: string) {
+  // A person: assign the chat to them (their membership), or untick them to unassign
+  function toggleMember(userId: string, name: string) {
     if (!conversation) return;
-    if (conversation.assignee?.userId === userId && !confirm(`Unassign ${conversation.assignee.name} from this chat?`)) return;
-    attempt(async () => {
-      const c =
-        conversation.assignee?.userId === userId
-          ? await assignConversation(conversation.id, null)
-          : await assignConversation(conversation.id, null, userId);
+    const unassign = conversation.assignee?.userId === userId;
+    const action: AssignAction = unassign ? 'unassign' : conversation.assignee ? 'reassign' : 'assign';
+    ask(action, name, async (reason) => {
+      const c = unassign
+        ? await assignConversation(conversation.id, null, undefined, reason)
+        : await assignConversation(conversation.id, null, userId, reason);
       onAssigned(c.id, c.assignee);
+      onConfirmed?.(c.id, confirmation(action, name, conversation.assignee?.name));
     });
   }
 
@@ -181,8 +211,8 @@ export function AssignDropdown({
 
   const current = conversation?.assignee;
   const memberRole = (userId: string | null) => (userId ? members?.find((m) => m.id === userId)?.role : undefined);
-  // Only owners and admins see the checkboxes and assign or unassign here. Supervisors and agents see the list
-  // read-only and take new chats with "Assign to Me" on New Leads. The server enforces the same rule.
+  // Every role assigns, reassigns and unassigns here (the server enforces the same rule). Until permissions have
+  // loaded the rows are read-only.
   const allowed = (_a: Assignee) => canAssignOthers;
   const allowedPerson = (_userId: string) => canAssignOthers;
   // const sectionTitle = (text: string) => <li className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-faint">{text}</li>;
@@ -253,8 +283,8 @@ export function AssignDropdown({
                     <li key={`member:${m.id}`} className="flex items-center gap-1 px-1">
                       <button
                         disabled={busy || !conversation || !ok}
-                        title={conversation && !ok ? 'Only admins can assign chats. Use Assign to Me on New Leads.' : undefined}
-                        onClick={() => toggleMember(m.id)}
+                        title={conversation && !ok ? 'Loading your permissions…' : undefined}
+                        onClick={() => toggleMember(m.id, m.name)}
                         className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
                           isAssigned
                             ? 'bg-primary-subtle text-primary font-medium'
@@ -265,6 +295,7 @@ export function AssignDropdown({
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-1.5">
                             <span className="truncate text-body">{m.name}</span>
+                            <PresenceDot status={presenceOf(presence, m.id)} />
                             <RoleBadge role={m.role} />
                             {m.id === meId && <span className="text-[10px] text-faint">You</span>}
                           </span>
@@ -285,8 +316,8 @@ export function AssignDropdown({
                     <li key={a.id} className="flex items-center gap-1 px-1">
                       <button
                         disabled={busy || !conversation || !allowed(a)}
-                        title={conversation && !allowed(a) ? 'Only admins can assign chats. Use Assign to Me on New Leads.' : undefined}
-                        onClick={() => toggle(a.id)}
+                        title={conversation && !allowed(a) ? 'Loading your permissions…' : undefined}
+                        onClick={() => toggle(a.id, a.name)}
                         className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
                           isAssigned
                             ? 'bg-primary-subtle text-primary font-medium'
@@ -316,6 +347,24 @@ export function AssignDropdown({
             </>
           )}
         </div>
+      )}
+
+      {pending && (
+        <AssignReasonDialog
+          action={pending.action}
+          person={pending.person}
+          previous={pending.previous}
+          busy={busy}
+          error={error}
+          onCancel={() => {
+            setPending(null);
+            setError('');
+          }}
+          onConfirm={(reason) => {
+            const { run } = pending;
+            attempt(() => run(reason)).then((done) => done && setPending(null));
+          }}
+        />
       )}
     </div>
   );

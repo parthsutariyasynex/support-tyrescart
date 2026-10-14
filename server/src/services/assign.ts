@@ -5,8 +5,9 @@ import { emitToUser, emitToWorkspace } from '../realtime.js';
 import { AppError, notFound } from './errors.js';
 import { recordActivity } from './activity.js';
 import { requireConversation } from './inbox.js';
-import { getPermissions } from './permissions.js';
-import { ASSIGNABLE_TO_ROLES, ROLE_COLORS } from './roles.js';
+import { normalizeReason, recordAssignment } from './assignmentReports.js';
+import { getPermissions, requireAssignmentManager } from './permissions.js';
+import { ASSIGNABLE_TO_ROLES, ROLE_COLORS, isAdminRole } from './roles.js';
 
 // A conversation is assigned to a workspace member: Conversation.assignedToId is a Member.id. The API and the
 // Socket.IO payloads keep the "assignee" shape clients already use: id = the member id, name = the person's name,
@@ -71,15 +72,14 @@ function missingMember(err: unknown) {
   return err;
 }
 
-// Assigning a chat to a person by their user id (the Assign dropdown lists people). Admins only; the rest of the
-// rules are in assignConversation.
-export async function assignConversationToMember(auth: AuthPayload, conversationId: string, userId: string) {
+// Assigning a chat to a person by their user id (the Assign dropdown lists people). Open to every role; the rest
+// of the rules are in assignConversation. `reason` is the optional Assignment Reason (report-only).
+export async function assignConversationToMember(auth: AuthPayload, conversationId: string, userId: string, reason?: string | null) {
   const { workspaceId } = auth;
   await requireConversation(workspaceId, conversationId);
-  if (!(await getPermissions(auth)).canManageAssignments)
-    throw new AppError('Only admins can assign or unassign chats. Use Assign to Me on New Leads.', 403, 'FORBIDDEN');
+  await requireAssignmentManager(auth);
   const member = await requireAssignableMember(workspaceId, { userId });
-  return assignConversation(workspaceId, conversationId, member.id, auth.userId);
+  return assignConversation(workspaceId, conversationId, member.id, auth.userId, { reason, requireReason: true });
 }
 
 // "Assign to Me" on a New Lead: take an unassigned chat for yourself. The write only applies while the chat is
@@ -109,20 +109,27 @@ const ASSIGN_ATTEMPTS = 3;
 // Compare-and-set: the write only applies if the chat still has the member we just read, so when two admins
 // reassign at once each history entry names the real previous holder. Assigning the current holder changes
 // nothing, so it sends no event and records no history.
+// Every real change also appends an AssignmentRecord row (previous/new holder, actor, optional reason) in the
+// same transaction. That row is report data only: the reason never reaches chat history, queries or events.
 export async function assignConversation(
   workspaceId: string,
   conversationId: string,
   memberId: string | null,
   actorId: string | null = null,
   // claim: "Assign to Me" on a New Lead (the caller checked it's the actor's own membership); succeeds only while
-  // the chat is still unassigned, for every role
-  options: { claim?: boolean } = {},
+  // the chat is still unassigned, for every role. reason: the Assignment Reason typed in the Assign box; with
+  // requireReason (the Assign box's mutation) assigning or reassigning without one is refused. Unassigning never
+  // needs one.
+  options: { claim?: boolean; reason?: string | null; requireReason?: boolean } = {},
 ) {
+  const reason = normalizeReason(options.reason);
+  if (options.requireReason && memberId && !reason)
+    throw new AppError('Please give a reason for this assignment', 400, 'REASON_REQUIRED');
   const member = memberId ? await requireAssignableMember(workspaceId, { id: memberId }) : null;
-  // Owners and admins assign, reassign and unassign. Everyone else (supervisors and agents) can only "Assign to
-  // Me" an unassigned chat (claimConversation). getPermissions also refuses non-members.
-  if (actorId && !options.claim && !(await getPermissions({ userId: actorId, workspaceId })).canManageAssignments)
-    throw new AppError('Only admins can assign or unassign chats. Use Assign to Me on New Leads.', 403, 'FORBIDDEN');
+  // Every role assigns, reassigns and unassigns (their own chats or anyone's). The actor only has to be a current
+  // member of this workspace; requireAssignmentManager refuses outsiders and removed members.
+  if (actorId && !options.claim) await requireAssignmentManager({ userId: actorId, workspaceId });
+  const actor = actorId ? await prisma.user.findUnique({ where: { id: actorId }, select: { id: true, name: true } }) : null;
   for (let attempt = 0; attempt < ASSIGN_ATTEMPTS; attempt++) {
     const before = await requireConversation(workspaceId, conversationId);
     if (before.assignedToId === memberId) return before;
@@ -131,10 +138,14 @@ export async function assignConversation(
     const previous = before.assignedToId
       ? await prisma.member.findUnique({ where: { id: before.assignedToId }, include: { user: { select: { id: true, name: true } } } })
       : null;
-    const { count } = await prisma.conversation
-      .updateMany({
-        where: { id: conversationId, workspaceId, assignedToId: before.assignedToId },
-        data: { assignedToId: memberId, ...(actorId ? { updatedBy: actorId } : {}) },
+    const { count } = await prisma
+      .$transaction(async (tx) => {
+        const result = await tx.conversation.updateMany({
+          where: { id: conversationId, workspaceId, assignedToId: before.assignedToId },
+          data: { assignedToId: memberId, assigneeOpenedAt: null, ...(actorId ? { updatedBy: actorId } : {}) },
+        });
+        if (result.count) await recordAssignment(tx, { workspaceId, conversationId, previous, next: member, actor, reason });
+        return result;
       })
       .catch((err) => {
         throw missingMember(err);
@@ -158,19 +169,24 @@ export async function assignConversation(
         : { assignee: previous?.user.name ?? null },
     });
     // Tell the people affected, unless they did it themselves: the new holder gets assignment:you; whoever it
-    // was taken from gets assignment:removed
+    // was taken from gets assignment:removed; every other active owner/admin gets assignment:changed (so each
+    // person receives exactly one event per change, and the person who did it receives none)
     const notifyNew = member && member.user.id !== actorId ? member.user.id : null;
     const notifyPrevious = previous && previous.user.id !== actorId ? previous.user.id : null;
-    if (notifyNew || notifyPrevious) {
-      const actor = actorId ? await prisma.user.findUnique({ where: { id: actorId }, select: { name: true } }) : null;
-      const event = {
-        conversationId,
-        assignee: payload,
-        actorName: actor?.name ?? null,
-        contactName: before.contact.name || `+${before.contact.waId}`,
-      };
-      if (notifyNew) emitToUser(workspaceId, notifyNew, 'assignment:you', event);
-      if (notifyPrevious) emitToUser(workspaceId, notifyPrevious, 'assignment:removed', { ...event, previous: previous!.user.name });
+    const event = {
+      conversationId,
+      assignee: payload,
+      actorId,
+      actorName: actor?.name ?? null,
+      contactName: before.contact.name || `+${before.contact.waId}`,
+      previous: previous?.user.name ?? null,
+    };
+    if (notifyNew) emitToUser(workspaceId, notifyNew, 'assignment:you', event);
+    if (notifyPrevious) emitToUser(workspaceId, notifyPrevious, 'assignment:removed', event);
+    const admins = await prisma.member.findMany({ where: { workspaceId, active: true }, select: { userId: true, role: true } });
+    for (const a of admins) {
+      if (!isAdminRole(a.role) || a.userId === actorId || a.userId === notifyNew || a.userId === notifyPrevious) continue;
+      emitToUser(workspaceId, a.userId, 'assignment:changed', event);
     }
     return requireConversation(workspaceId, conversationId);
   }

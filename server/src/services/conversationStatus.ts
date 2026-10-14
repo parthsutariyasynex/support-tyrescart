@@ -43,10 +43,11 @@ export const reopenConversation = (auth: AuthPayload, id: string) => setStatus(a
 
 // For the Open / Closed tabs, and the "closed chats have new messages" notice
 export async function conversationCounts(workspaceId: string) {
-  const [open, closed, closedWithUnread] = await Promise.all([
+  const [open, closed, closedWithUnread, unassigned] = await Promise.all([
     prisma.conversation.count({ where: { workspaceId, status: 'open' } }),
     prisma.conversation.count({ where: { workspaceId, status: 'closed' } }),
     prisma.conversation.count({ where: { workspaceId, status: 'closed', unread: { gt: 0 } } }),
+    prisma.conversation.count({ where: { workspaceId, assignedToId: null } }),
   ]);
-  return { open, closed, closedWithUnread };
+  return { open, closed, closedWithUnread, unassigned };
 }

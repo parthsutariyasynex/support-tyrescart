@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Message } from '@/lib/inbox';
+import { highlightSegments } from '@/lib/messageSearch';
 import { formatDateTime, formatTime } from '@/lib/time';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
@@ -51,11 +53,16 @@ export function MessageBubble({
   actions,
   highlighted,
   onOpenMenu,
+  highlightTerm = '',
+  currentMatch = false,
 }: {
   message: Message;
   actions: MessageAction[];
   highlighted: boolean;
   onOpenMenu: (anchor: HTMLElement) => void;
+  // "Search in conversation": the text to mark inside the bubble, and whether this is the match being shown
+  highlightTerm?: string;
+  currentMatch?: boolean;
 }) {
   const isOut = m.direction === 'out';
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -68,7 +75,7 @@ export function MessageBubble({
   };
 
   return (
-    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`} data-message-id={m.id}>
       <div
         ref={bubbleRef}
         onContextMenu={(e) => {
@@ -85,7 +92,7 @@ export function MessageBubble({
         onTouchMove={cancelPress}
         className={`group relative max-w-[72%] rounded-2xl px-3.5 py-2 text-xs shadow-xs transition [-webkit-touch-callout:none] ${
           isOut ? 'rounded-tr-xs bg-bubble-out text-ink' : 'rounded-tl-xs bg-bubble-in text-ink'
-        } ${highlighted ? 'ring-2 ring-primary/40' : ''}`}
+        } ${highlighted ? 'ring-2 ring-primary/40' : ''} ${currentMatch ? 'ring-2 ring-accent' : ''}`}
       >
         {hasActions && (
           <button
@@ -115,7 +122,19 @@ export function MessageBubble({
             <DeletedText />
           </p>
         ) : (
-          <p className="whitespace-pre-wrap break-words pr-3 text-[13px] leading-relaxed">{m.body}</p>
+          <p className="whitespace-pre-wrap break-words pr-3 text-[13px] leading-relaxed">
+            {highlightTerm
+              ? highlightSegments(m.body, highlightTerm).map((seg, i) =>
+                  seg.match ? (
+                    <mark key={i} className="rounded-sm bg-warning-soft px-0.5 text-ink">
+                      {seg.text}
+                    </mark>
+                  ) : (
+                    <Fragment key={i}>{seg.text}</Fragment>
+                  ),
+                )
+              : m.body}
+          </p>
         )}
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-faint">
           {m.editedAt && !m.deletedAt && (
@@ -325,6 +344,35 @@ export function ConfirmDeleteDialog({
 }
 
 export const UNDO_SECONDS = 5;
+
+export const ASSIGNED_TOAST_SECONDS = 6;
+
+// "This chat has been assigned to you by Parth." Same bar as UndoToast, shown at the bottom-left corner of the
+// page for a few seconds when a chat is assigned, reassigned or unassigned. Click opens the chat.
+export function AssignedToast({ message, detail, onOpen, onDone }: { message: string; detail?: string; onOpen: () => void; onDone: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, ASSIGNED_TOAST_SECONDS * 1000);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  if (typeof document === 'undefined') return null;
+
+  // Portal to <body>: position: fixed is measured from the viewport, never from a transformed/scrolling panel.
+  // Bottom-left corner, over the sidebar, so it never covers the message composer or the chat.
+  return createPortal(
+    <div role="status" className="pointer-events-none fixed bottom-20 left-4 z-[60] flex max-w-[calc(100vw-32px)] justify-start sm:left-6">
+      <div className="pointer-events-auto flex w-96 max-w-full items-center gap-3 rounded-xl border border-on-primary/10 bg-ink px-3.5 py-2.5 text-xs text-on-primary shadow-2xl">
+        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left hover:underline">
+          <span className="block font-semibold">{message}</span>
+          {detail && <span className="block truncate text-on-primary/70">{detail}</span>}
+        </button>
+        <button type="button" onClick={onDone} title="Dismiss" className="rounded-md px-1.5 py-1 text-on-primary/70 hover:bg-on-primary/10 hover:text-on-primary">
+          ✕
+        </button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
 
 // WhatsApp-style "Message deleted · Undo" bar with a countdown
 export function UndoToast({ busy, onUndo, onDone }: { busy: boolean; onUndo: () => void; onDone: () => void }) {

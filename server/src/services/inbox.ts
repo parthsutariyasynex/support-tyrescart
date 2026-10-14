@@ -2,7 +2,9 @@ import { isValidPhoneNumber } from 'libphonenumber-js/max';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { saveIncoming } from '../messages.js';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
+import { isSupervisorOrAbove } from './roles.js';
 import { emitToWorkspace } from '../realtime.js';
 import { type ApprovedTemplate, listApprovedTemplates, sendTemplate, sendText } from '../whatsapp.js';
 import { AppError, notFound } from './errors.js';
@@ -21,7 +23,30 @@ const conversationPageSchema = pageSchema.extend({
   labelId: z.string().min(1).optional(),
   assignee: z.string().min(1).optional(),
   status: z.enum(['open', 'closed']).optional(),
+  search: z.string().trim().max(100).optional(),
 });
+
+// Free-text search over a workspace's chats, one box for everything (case-insensitive, substring):
+//   customer name · phone number (digits, so "+971 50" finds 97150…) · any message text (deleted ones excluded)
+//   · label name · assignee name · the words open / closed / unread / assigned / unassigned (chat status)
+export function conversationSearchWhere(raw: string): Prisma.ConversationWhereInput {
+  const term = raw.trim();
+  if (!term) return {};
+  const word = term.toLowerCase();
+  const digits = term.replace(/\D/g, '');
+  const or: Prisma.ConversationWhereInput[] = [
+    { contact: { name: { contains: term } } },
+    ...(digits.length >= 3 ? [{ contact: { waId: { contains: digits } } }] : []),
+    { messages: { some: { body: { contains: term }, deletedAt: null } } },
+    { labels: { some: { label: { name: { contains: term } } } } },
+    { assignedTo: { user: { name: { contains: term } } } },
+  ];
+  if (word === 'open' || word === 'closed') or.push({ status: word });
+  if (word === 'unread') or.push({ unread: { gt: 0 } });
+  if (word === 'unassigned') or.push({ assignedToId: null });
+  if (word === 'assigned') or.push({ assignedToId: { not: null } });
+  return { OR: or };
+}
 
 export type Page<T> = { nodes: T[]; hasNextPage: boolean; endCursor: string | null };
 
@@ -50,7 +75,7 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   };
   if (page === undefined) return prisma.conversation.findMany(query);
 
-  const { first, after, labelId, assignee, status } = parse(conversationPageSchema, page);
+  const { first, after, labelId, assignee, status, search } = parse(conversationPageSchema, page);
   if (after) await requireConversation(workspaceId, after);
   if (assignee === 'me' && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
   const rows = await prisma.conversation.findMany({
@@ -64,6 +89,7 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
           ? { assignedToId: assignee === 'unassigned' ? null : assignee }
           : {}),
       ...(status ? { status } : {}),
+      ...(search ? conversationSearchWhere(search) : {}),
     },
     take: first + 1,
     ...(after ? { cursor: { id: after }, skip: 1 } : {}),
@@ -79,8 +105,23 @@ export async function requireConversation(workspaceId: string, id: string) {
 }
 
 export async function markConversationRead(workspaceId: string, id: string, viewerId: string | null = null) {
-  await requireConversation(workspaceId, id);
-  return prisma.conversation.update({ where: { id }, data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}) }, include: conversationInclude });
+  const conversation = await requireConversation(workspaceId, id);
+  return prisma.conversation.update({
+    where: { id },
+    data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}), ...(await openedByAssignee(conversation, viewerId)) },
+    include: conversationInclude,
+  });
+}
+
+// The viewer is the chat's current assignee and hasn't opened it since it was assigned to them: stamp it now
+// (assignment reminders stop for this chat). Anyone else opening it changes nothing.
+async function openedByAssignee(
+  conversation: { assignedToId: string | null; assigneeOpenedAt: Date | null },
+  viewerId: string | null,
+): Promise<{ assigneeOpenedAt?: Date }> {
+  if (!viewerId || !conversation.assignedToId || conversation.assigneeOpenedAt) return {};
+  const own = await prisma.member.findFirst({ where: { id: conversation.assignedToId, userId: viewerId }, select: { id: true } });
+  return own ? { assigneeOpenedAt: new Date() } : {};
 }
 
 // Newest page first; `after` walks back to older messages. Nodes are returned oldest -> newest.
@@ -105,7 +146,10 @@ export async function listMessages(workspaceId: string, conversationId: string, 
 // REST: GET /inbox/conversations/:id/messages (marks read, returns full history)
 export async function openConversation(workspaceId: string, id: string, viewerId: string | null = null) {
   const conversation = await requireConversation(workspaceId, id);
-  await prisma.conversation.update({ where: { id }, data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}) } });
+  await prisma.conversation.update({
+    where: { id },
+    data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}), ...(await openedByAssignee(conversation, viewerId)) },
+  });
   const messages = await prisma.message.findMany({ where: { conversationId: id }, orderBy: { createdAt: 'asc' } });
   return { conversation, messages };
 }
@@ -183,9 +227,13 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
       400,
       'INVALID_PHONE',
     );
-  // New Leads: someone has to take the chat (Assign to Me) before anyone messages the customer
-  if (!conversation.assignedToId)
-    throw new AppError('Assign this chat to yourself before replying (New Leads → Assign to Me).', 409, 'NOT_ASSIGNED');
+  // New Leads: an agent has to take the chat (Assign to Me) before messaging the customer. Owners, admins and
+  // supervisors may reply to a chat nobody holds yet (replying doesn't assign it).
+  if (!conversation.assignedToId) {
+    const sender = sentById ? await prisma.member.findUnique({ where: { userId_workspaceId: { userId: sentById, workspaceId } }, select: { role: true } }) : null;
+    if (!sender || !isSupervisorOrAbove(sender.role))
+      throw new AppError('Assign this chat to yourself before replying (New Leads → Assign to Me).', 409, 'NOT_ASSIGNED');
+  }
   const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;

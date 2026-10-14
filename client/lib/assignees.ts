@@ -25,9 +25,16 @@ export async function claimConversation(conversationId: string) {
 }
 
 // assigneeId: the member id (null to unassign). memberId (instead): the person's user id.
-export async function assignConversation(conversationId: string, assigneeId: string | null, memberId?: string) {
-  const query = `mutation Assign($c: ID!, $a: ID, $m: ID) { assignConversation(conversationId: $c, assigneeId: $a, memberId: $m) { id assignee { id name color userId } } }`;
+// reason: the optional Assignment Reason; the server stores it for the admin assignment report only (it never
+// comes back with the chat).
+export async function assignConversation(conversationId: string, assigneeId: string | null, memberId?: string, reason?: string) {
+  const query = `mutation Assign($c: ID!, $a: ID, $m: ID, $r: String) { assignConversation(conversationId: $c, assigneeId: $a, memberId: $m, reason: $r) { id assignee { id name color userId } } }`;
   return (
-    await gql<{ assignConversation: { id: string; assignee: AssigneeRef | null } }>(query, { c: conversationId, a: assigneeId, m: memberId ?? null })
+    await gql<{ assignConversation: { id: string; assignee: AssigneeRef | null } }>(query, {
+      c: conversationId,
+      a: assigneeId,
+      m: memberId ?? null,
+      r: reason?.trim() ? reason.trim() : null,
+    })
   ).assignConversation;
 }

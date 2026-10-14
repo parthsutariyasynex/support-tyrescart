@@ -19,19 +19,19 @@ export function roleStyle(role: string | null | undefined) {
 
 export const isAdminRole = (role?: string | null) => role === 'owner' || role === 'admin';
 
-// People listed in the Assign menu: the workspace owner (so they can take chats and see them in My Chats),
-// Supervisors and Agents. Other Admins manage and aren't listed.
-export const ASSIGN_LIST_ROLES = ['owner', 'supervisor', 'agent'] as const;
+// People listed in the Assign menu: every role (owner, admins, supervisors and agents), so anyone can be given a
+// chat and find it in My Chats
+export const ASSIGN_LIST_ROLES = ['owner', 'admin', 'supervisor', 'agent'] as const;
 
-// The Assign menu's People: this workspace's owner, Supervisors and Agents, by name
+// The Assign menu's People: every member of this workspace, by name
 export function assignableMembers<M extends { name: string; role: string }>(members: M[]): M[] {
   return members
     .filter((m) => (ASSIGN_LIST_ROLES as readonly string[]).includes(m.role))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Assign list checkboxes (assign, reassign, unassign) are shown only to people the server says may manage
-// assignments: owners and admins. Supervisors and agents never see them, and nothing loaded (null) hides them too.
+// Assign list checkboxes (assign, reassign, unassign) are shown to everyone the server says may manage
+// assignments: every role, so the flag is true for every member. Nothing loaded yet (null) hides them.
 // The server enforces the same rule on every request; this only decides what to draw.
 export const showsAssignCheckboxes = (permissions: { canManageAssignments: boolean } | null | undefined) =>
   permissions?.canManageAssignments === true;

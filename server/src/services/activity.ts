@@ -1,8 +1,9 @@
 import type { Prisma } from '@prisma/client';
 import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
-import { emitToWorkspace } from '../realtime.js';
+import { emitToUser, emitToWorkspace } from '../realtime.js';
 import { notFound } from './errors.js';
+import { isAdminRole } from './roles.js';
 
 // Activity history: what happened in each chat and who did it. Shown as a timeline in the chat and in
 // the header's notification bell. Recording never fails the action it describes.
@@ -51,7 +52,13 @@ export async function recordActivity(e: {
 }) {
   try {
     const row = await prisma.activityEvent.create({ data: e, include });
-    emitToWorkspace(e.workspaceId, 'activity:new', await toActivity(row));
+    const activity = await toActivity(row);
+    // Chat timelines (anyone who has the chat open) keep getting every event
+    emitToWorkspace(e.workspaceId, 'activity:new', activity);
+    // The bell is per person: owners/admins get everything; everyone else only what concerns them (their chats,
+    // or an assignment naming them). The person who did it isn't notified of their own action.
+    for (const userId of await notificationRecipients(e.workspaceId, e.conversationId, e.data))
+      if (userId !== e.actorId) emitToUser(e.workspaceId, userId, 'notification:new', activity);
   } catch (err) {
     console.error('[activity] could not record', e.type, err);
   }
@@ -80,25 +87,48 @@ export async function listConversationActivity(
   return Promise.all(rows.reverse().map(toActivity));
 }
 
-// Bell: newest events in the workspace done by someone else (or by customers), plus how many are unseen
+// Who a new event's bell notification goes to: every active owner/admin, the chat's current assignee, and the
+// person an assignment names (data.assigneeUserId)
+async function notificationRecipients(workspaceId: string, conversationId: string, data: Prisma.InputJsonValue | undefined) {
+  const [admins, conversation] = await Promise.all([
+    prisma.member.findMany({ where: { workspaceId, active: true, role: { in: ['owner', 'admin'] } }, select: { userId: true } }),
+    prisma.conversation.findUnique({ where: { id: conversationId }, select: { assignedTo: { select: { userId: true } } } }),
+  ]);
+  const recipients = new Set(admins.map((a) => a.userId));
+  if (conversation?.assignedTo) recipients.add(conversation.assignedTo.userId);
+  const named = data && typeof data === 'object' && !Array.isArray(data) ? (data as { assigneeUserId?: unknown }).assigneeUserId : undefined;
+  if (typeof named === 'string') recipients.add(named);
+  return [...recipients];
+}
+
+// What a person may see in their bell. Owners and admins: everything in the workspace. Everyone else: only events
+// on chats currently assigned to them, or assignments that name them. Enforced here, not in the UI.
+function visibleTo(userId: string, role: string): Prisma.ActivityEventWhereInput {
+  if (isAdminRole(role)) return {};
+  return { OR: [{ conversation: { assignedTo: { userId } } }, { data: { path: '$.assigneeUserId', equals: userId } }] };
+}
+
+// Bell: newest events done by someone else (or by customers) that this person may see, plus how many are unseen
 export async function listNotifications({ userId, workspaceId }: AuthPayload, first = 30) {
   const notMine = { OR: [{ actorId: null }, { actorId: { not: userId } }] };
   const member = await prisma.member.findUnique({
     where: { userId_workspaceId: { userId, workspaceId } },
-    select: { notificationsSeenAt: true },
+    select: { notificationsSeenAt: true, role: true },
   });
+  if (!member) return { items: [], unseen: 0, seenAt: null };
+  const where: Prisma.ActivityEventWhereInput = { workspaceId, AND: [notMine, visibleTo(userId, member.role)] };
   const [rows, unseen] = await Promise.all([
     prisma.activityEvent.findMany({
-      where: { workspaceId, ...notMine },
+      where,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: Math.min(Math.max(first, 1), 100),
       include,
     }),
     prisma.activityEvent.count({
-      where: { workspaceId, ...notMine, ...(member?.notificationsSeenAt ? { createdAt: { gt: member.notificationsSeenAt } } : {}) },
+      where: { ...where, ...(member.notificationsSeenAt ? { createdAt: { gt: member.notificationsSeenAt } } : {}) },
     }),
   ]);
-  return { items: await Promise.all(rows.map(toActivity)), unseen, seenAt: member?.notificationsSeenAt ?? null };
+  return { items: await Promise.all(rows.map(toActivity)), unseen, seenAt: member.notificationsSeenAt };
 }
 
 export async function markNotificationsSeen({ userId, workspaceId }: AuthPayload) {
