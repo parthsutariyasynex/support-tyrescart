@@ -22,8 +22,15 @@ const pageSchema = z.object({
 const conversationPageSchema = pageSchema.extend({
   labelId: z.string().min(1).optional(),
   assignee: z.string().min(1).optional(),
-  status: z.enum(['open', 'closed']).optional(),
+  status: z.enum(['open', 'snoozed', 'closed']).optional(),
   search: z.string().trim().max(100).optional(),
+  // newest (default): latest activity first; oldest: least recent activity first
+  sort: z.enum(['newest', 'oldest']).optional(),
+  // "Filter by" menu: any of these labels; any of these assignees (member ids, or 'unassigned'); last activity range
+  labelIds: z.array(z.string().min(1).max(64)).max(100).optional(),
+  assigneeIds: z.array(z.string().min(1).max(64)).max(100).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
 });
 
 // Free-text search over a workspace's chats, one box for everything (case-insensitive, substring):
@@ -75,26 +82,51 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   };
   if (page === undefined) return prisma.conversation.findMany(query);
 
-  const { first, after, labelId, assignee, status, search } = parse(conversationPageSchema, page);
+  const { first, after, labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to } = parse(conversationPageSchema, page);
+  if (from && to && from > to) throw new AppError('"from" must be before "to"', 400, 'BAD_USER_INPUT');
+  const memberIds = (assigneeIds ?? []).filter((a) => a !== 'unassigned');
+  const menuFilters: Prisma.ConversationWhereInput[] = [
+    ...(labelIds?.length ? [{ labels: { some: { labelId: { in: labelIds } } } }] : []),
+    ...(assigneeIds?.length
+      ? [{ OR: [...(memberIds.length ? [{ assignedToId: { in: memberIds } }] : []), ...(assigneeIds.includes('unassigned') ? [{ assignedToId: null }] : [])] }]
+      : []),
+    ...(from || to ? [{ lastMessageAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }] : []),
+  ];
+  const dir = sort === 'oldest' ? ('asc' as const) : ('desc' as const);
   if (after) await requireConversation(workspaceId, after);
-  if (assignee === 'me' && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
-  const rows = await prisma.conversation.findMany({
-    ...query,
-    where: {
+  if ((assignee === 'me' || assignee === 'collaborating') && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
+  // The viewer's pinned chats come first on the first page (whatever their age), and are left out of the pages
+  const pins = viewerId
+    ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
+    : [];
+  const where: Prisma.ConversationWhereInput = {
       workspaceId,
       ...(labelId ? { labels: { some: { labelId } } } : {}),
-      ...(assignee === 'me'
-        ? { assignedTo: { userId: viewerId } }
+      ...(assignee === 'collaborating'
+        ? // Collaborations: chats I've been added to as a collaborator
+          { collaborators: { some: { userId: viewerId } } }
+        : assignee === 'me'
+        ? // My Chats: assigned to me, or I'm a collaborator on it
+          { OR: [{ assignedTo: { userId: viewerId } }, { collaborators: { some: { userId: viewerId } } }] }
         : assignee
           ? { assignedToId: assignee === 'unassigned' ? null : assignee }
           : {}),
       ...(status ? { status } : {}),
       ...(search ? conversationSearchWhere(search) : {}),
-    },
+      ...(menuFilters.length ? { AND: menuFilters } : {}),
+  };
+  const rows = await prisma.conversation.findMany({
+    ...query,
+    orderBy: [{ lastMessageAt: dir }, { id: dir }],
+    where: pins.length ? { AND: [where, { id: { notIn: pins } }] } : where,
     take: first + 1,
     ...(after ? { cursor: { id: after }, skip: 1 } : {}),
   });
-  return toPage(rows, first);
+  const page_ = toPage(rows, first);
+  if (after || !pins.length) return page_;
+  const pinned = await prisma.conversation.findMany({ ...query, where: { AND: [where, { id: { in: pins } }] } });
+  pinned.sort((a, b) => pins.indexOf(a.id) - pins.indexOf(b.id));
+  return { ...page_, nodes: [...pinned, ...page_.nodes] };
 }
 
 // Every lookup is scoped to the caller's workspace, so other workspaces' data reads as "not found"

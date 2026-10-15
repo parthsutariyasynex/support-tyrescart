@@ -60,7 +60,7 @@ export async function requestPasswordReset(rawInput: unknown, ip: string) {
   try {
     await sendMail({
       to: user.email,
-      subject: 'Reset your support-tyrescart password',
+      subject: `Reset your ${env.appName} password`,
       text: `Hi ${user.name},\n\nUse this link to choose a new password (valid for 30 minutes):\n${link}\n\nIf you didn't ask for this, you can ignore this email; your password won't change.`,
       html: `<p>Hi ${escapeHtml(user.name)},</p><p>Use this link to choose a new password (valid for 30 minutes):</p><p><a href="${link}">Reset password</a></p><p>If you didn't ask for this, you can ignore this email; your password won't change.</p>`,
     });
@@ -91,7 +91,7 @@ export async function sendInvite(user: { id: string; name: string; email: string
   try {
     await sendMail({
       to: user.email,
-      subject: `You've been invited to ${workspaceName} on support-tyrescart`,
+      subject: `You've been invited to ${workspaceName} on ${env.appName}`,
       text: `Hi ${user.name},\n\n${inviter} added you to ${workspaceName}. Choose your password to sign in (link valid for 7 days):\n${link}`,
       html: `<p>Hi ${escapeHtml(user.name)},</p><p>${escapeHtml(inviter)} added you to ${escapeHtml(workspaceName)}. Choose your password to sign in (link valid for 7 days):</p><p><a href="${link}">Choose password</a></p>`,
     });
@@ -122,9 +122,9 @@ export async function sendAccountReady(
   try {
     await sendMail({
       to: user.email,
-      subject: `Your ${workspaceName} account on support-tyrescart is ready`,
+      subject: `Your ${workspaceName} account on ${env.appName} is ready`,
       text: `Hi ${user.name},\n\n${inviter} added you to ${workspaceName}. Sign in here:\n${link}${credentials}`,
-      html: `<p>Hi ${escapeHtml(user.name)},</p><p>${escapeHtml(inviter)} added you to ${escapeHtml(workspaceName)}.</p><p><a href="${link}">Sign in to support-tyrescart</a></p>${credentialsHtml}`,
+      html: `<p>Hi ${escapeHtml(user.name)},</p><p>${escapeHtml(inviter)} added you to ${escapeHtml(workspaceName)}.</p><p><a href="${link}">Sign in to ${escapeHtml(env.appName)}</a></p>${credentialsHtml}`,
     });
     return true;
   } catch (err) {

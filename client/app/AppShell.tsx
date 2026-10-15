@@ -7,13 +7,34 @@ import { io } from 'socket.io-client';
 import { API_URL, getToken, setToken } from '@/lib/api';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
 import { type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
+import { APP_NAME } from '@/lib/brand';
 import { menuItemMatches } from '@/lib/menu';
 import { revalidateOnReturn } from '@/lib/revalidate';
+import {
+  type AssignmentEvent,
+  type ReminderEvent,
+  addedAsCollaboratorText,
+  assignedToYouText,
+  assignmentChangedText,
+  clearToast,
+  removedAsCollaboratorText,
+  newChatText,
+  reminderText,
+  removedFromYouText,
+  showToast,
+  useToast,
+} from '@/lib/toasts';
+import { AssignedToast } from './inbox/messages';
+import { playPing, showDesktopNotification, unlockSound } from './inbox/notifications';
 import { MenuSearch } from './MenuSearch';
 import { PresenceDot } from './PresenceDot';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
+
+// Menu items for features that aren't built yet (Automation bots, SLA policies, Logs, Billing). They only showed a
+// placeholder alert, so they stay hidden; set to true to show them again once they have real pages and data.
+const SHOW_UNBUILT_FEATURES = false;
 
 export type Me = {
   user: { id: string; name: string; email: string };
@@ -24,6 +45,10 @@ export type Me = {
 
 let cachedMe: Me | null = null;
 let cachedSidebarOpen = true;
+
+// Pages that show the chat list and conversation (the inbox page component): a toast click opens the chat in place
+const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations'];
+export const OPEN_CHAT_EVENT = 'app:open-chat';
 
 // Slim Left Icon Rail + Full App Shell
 export function AppShell({
@@ -38,11 +63,71 @@ export function AppShell({
   // activity, so Away is measured across the whole app, not only the chat pages)
   const presence = usePresence();
   const myStatus = presenceOf(presence, me?.user.id);
+  // Toasts (assignment, new chat, reminders) on every page: this one connection receives them, so they work on
+  // Teams, Reports and Account too, not only the chat pages. The server sends each person only their own events.
+  const toast = useToast();
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const openChatRef = useRef<(id: string) => void>(() => {});
+  openChatRef.current = (id: string) => {
+    if (CHAT_PAGES.includes(pathnameRef.current)) window.dispatchEvent(new CustomEvent(OPEN_CHAT_EVENT, { detail: id }));
+    else router.push(`/inbox?chat=${encodeURIComponent(id)}`);
+  };
   useEffect(() => {
     if (!me?.user.id) return;
     const socket = io(API_URL, { auth: { token: getToken() } });
     const unbind = bindPresence(socket);
+    const open = (id: string) => openChatRef.current(id);
+    // Toast only for new chats, reminders and collaborators. Assigned to you / removed from you keep the sound and
+    // desktop pop-up they already had while the tab is in the background (unchanged)
+    const alertHidden = (title: string, body: string, tag: string, conversationId: string) => {
+      if (!document.hidden) return;
+      playPing();
+      showDesktopNotification(title, body, tag, () => open(conversationId));
+    };
+    socket.on('assignment:you', (e: AssignmentEvent) => {
+      const t = assignedToYouText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+      alertHidden(`${e.actorName ?? 'Someone'} assigned a chat to you`, e.contactName, `assigned-${e.conversationId}`, e.conversationId);
+    });
+    socket.on('assignment:removed', (e: AssignmentEvent) => {
+      const t = removedFromYouText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+      alertHidden(
+        e.assignee ? `${e.actorName ?? 'Someone'} reassigned your chat to ${e.assignee.name}` : `${e.actorName ?? 'Someone'} unassigned you from a chat`,
+        e.contactName,
+        `unassigned-${e.conversationId}`,
+        e.conversationId,
+      );
+    });
+    socket.on('assignment:changed', (e: AssignmentEvent) => {
+      const t = assignmentChangedText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+    });
+    socket.on('collaborator:you', (e: { conversationId: string; actorName: string | null; contactName: string }) => {
+      const t = addedAsCollaboratorText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+    });
+    socket.on('collaborator:removed', (e: { conversationId: string; actorName: string | null; contactName: string }) => {
+      const t = removedAsCollaboratorText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+    });
+    socket.on('chat:new', (e: { conversationId: string; contactName: string }) => {
+      const t = newChatText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+    });
+    socket.on('assignment:reminder', (e: ReminderEvent) => {
+      if (!e?.chats?.length) return;
+      const t = reminderText(e);
+      showToast(t.key, e.chats[0].conversationId, t.message, t.detail);
+    });
+    // Sound needs one click or key press before browsers allow it
+    const unlock = () => unlockSound();
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
     return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
       unbind();
       socket.disconnect();
     };
@@ -138,7 +223,7 @@ export function AppShell({
       <div className="grid h-screen place-items-center bg-page text-sm text-muted font-medium">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-          <span>Loading support-tyrescart...</span>
+          <span>Loading {APP_NAME}...</span>
         </div>
       </div>
     );
@@ -163,7 +248,7 @@ export function AppShell({
             <div className="flex h-16 items-center justify-between px-4 border-b border-line-soft">
               <div className="flex items-center gap-2">
                 <span className="text-base font-extrabold tracking-tight text-ink flex items-center gap-1">
-                  support-tyrescart
+                  {APP_NAME}
                   <span className="h-2 w-2 rounded-full bg-accent inline-block" />
                 </span>
               </div>
@@ -191,7 +276,7 @@ export function AppShell({
                 <p className="px-2 pb-1.5 text-[10px] font-bold tracking-wider text-faint uppercase">
                   CONVERSATIONS
                 </p>
-                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
+                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', 'Collaborations', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
                   <p className="px-2.5 py-2 text-[11px] text-faint">No menu item matches “{menuQuery.trim()}”</p>
                 )}
                 <div className="space-y-0.5">
@@ -211,6 +296,24 @@ export function AppShell({
                         <path d="M8.5 13.5a4 4 0 0 1 7 0" />
                       </svg>
                       <span>My Chats</span>
+                    </Link>
+                  )}
+                  {showItem('Collaborations') && (
+                    <Link
+                      href="/collaborations"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/collaborations'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M19 8v6M22 11h-6" />
+                      </svg>
+                      <span>Collaborations</span>
                     </Link>
                   )}
                   {showItem('Inbox') && (
@@ -486,6 +589,22 @@ export function AppShell({
                   </svg>
                 </Link>
                 <Link
+                  href="/collaborations"
+                  scroll={false}
+                  title="Collaborations"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/collaborations'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M19 8v6M22 11h-6" />
+                  </svg>
+                </Link>
+                <Link
                   href="/inbox"
                   scroll={false}
                   title="Inbox"
@@ -621,7 +740,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -644,7 +763,9 @@ export function AppShell({
                   : pathname === '/reports'
                   ? 'Assignment report: who assigned which chat to whom, and why'
                   : pathname === '/my-chats'
-                  ? 'Chats assigned to you'
+                  ? 'Chats assigned to you or that you collaborate on'
+                  : pathname === '/collaborations'
+                  ? 'Chats you have been added to as a collaborator'
                   : pathname === '/leads'
                     ? 'Unassigned customer chats: Assign to Me to take one'
                     : 'Conversations with your customers'}
@@ -707,7 +828,7 @@ export function AppShell({
               {workspaceMenuOpen && (
                 <div className="absolute right-0 top-11 w-64 rounded-2xl border border-line bg-surface p-3 shadow-xl z-50">
                   <div className="px-1 pb-2 text-[10px] font-bold tracking-wider text-faint uppercase">
-                    YOUR WORKSPACES
+                    YOUR Channel
                   </div>
 
                   {/* All of the user's workspaces; the active one is ticked, the others switch to it */}
@@ -769,6 +890,9 @@ export function AppShell({
             {/* Page-specific header controls (the inbox renders its Assign dropdown here) */}
             <div id="app-header-actions" className="flex items-center gap-3 shrink-0 min-w-[154px] justify-end" />
 
+            {/* Automation menu: features not built yet (each item only showed an alert), hidden until they exist */}
+            {SHOW_UNBUILT_FEATURES && (
+              <>
             {/* Automation Menu Button */}
             <div ref={automationMenuRef} className="relative">
               <button
@@ -909,6 +1033,8 @@ export function AppShell({
                 </div>
               )}
             </div>
+              </>
+            )}
 
             {/* Settings Gear Button */}
             {/* <Link
@@ -998,9 +1124,8 @@ export function AppShell({
 
                   {/* Settings Menu List */}
                   <div className="p-1 space-y-0.5 text-xs">
-                    <Link
-                      href="/settings"
-                      onClick={() => setUserMenuOpen(false)}
+                    <button
+                      // onClick={() => setUserMenuOpen(false)}
                       className="flex items-center gap-3 rounded-xl px-3 py-2 text-body hover:bg-surface-strong transition"
                     >
                       <svg className="h-4 w-4 text-faint shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1008,8 +1133,11 @@ export function AppShell({
                         <line x1="12" y1="18" x2="12.01" y2="18" />
                       </svg>
                       <span>WhatsApp</span>
-                    </Link>
+                    </button>
 
+                    {/* SLA policies, Logs and Billing: not built yet (each only showed an alert), hidden until they exist */}
+                    {SHOW_UNBUILT_FEATURES && (
+                      <>
                     <button
                       onClick={() => {
                         alert('SLA policies settings');
@@ -1055,6 +1183,8 @@ export function AppShell({
                       </svg>
                       <span>Billing</span>
                     </button>
+                      </>
+                    )}
                   </div>
 
                   {/* Sign Out Action */}
@@ -1084,6 +1214,19 @@ export function AppShell({
         {/* Dynamic Children (Inbox, Settings, etc.) */}
         <main className="flex-1 min-h-0 overflow-hidden">{children(me)}</main>
       </div>
+
+      {toast && (
+        <AssignedToast
+          key={toast.id}
+          message={toast.message}
+          detail={toast.detail}
+          onOpen={() => {
+            if (toast.conversationId) openChatRef.current(toast.conversationId);
+            clearToast();
+          }}
+          onDone={clearToast}
+        />
+      )}
     </div>
   );
 }

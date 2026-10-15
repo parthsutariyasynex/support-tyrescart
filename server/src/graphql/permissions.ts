@@ -8,7 +8,7 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     "Owners and admins always can; agents only when granted"
     canManageLabels: Boolean!
-    "Assign, reassign and unassign chats: every role (true for every member of the workspace)"
+    "Assign, reassign and unassign chats: owners, admins and supervisors (agents only Assign to Me)"
     canManageAssignments: Boolean!
   }
 
@@ -17,7 +17,7 @@ export const typeDefs = /* GraphQL */ `
     role: String!
     "Can create, rename, recolour and delete labels and assignees"
     canManageLabels: Boolean!
-    "Can assign, reassign and unassign chats: every role (true for every member of the workspace)"
+    "Can assign, reassign and unassign chats: owners, admins and supervisors (agents only Assign to Me)"
     canManageAssignments: Boolean!
   }
 

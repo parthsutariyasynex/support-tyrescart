@@ -1,7 +1,7 @@
 // Run: npm test --workspace=client
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { DEFAULT_NEW_USER_PASSWORD, passwordProblem, passwordsProblem, suggestPassword } from './password';
+import { passwordProblem, passwordsProblem, suggestPassword } from './password';
 
 describe('password rule (create/edit user form)', () => {
   test('8-72 characters with a letter and a number', () => {
@@ -36,12 +36,5 @@ describe('suggested password', () => {
     let calls = 0;
     const p = suggestPassword((n) => (calls++ < 12 ? 0 : (calls % 2 ? 0 : 50) % n)); // first draw: 12x "a" (no digit), then letters and digits
     assert.equal(passwordProblem(p), null);
-  });
-});
-
-describe('default password for new users', () => {
-  test('is pre-filled and satisfies the rule', () => {
-    assert.equal(DEFAULT_NEW_USER_PASSWORD, 'Tyres@123');
-    assert.equal(passwordProblem(DEFAULT_NEW_USER_PASSWORD), null);
   });
 });

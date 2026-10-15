@@ -83,3 +83,41 @@ body {
   @apply bg-canvas text-ink antialiased selection:bg-primary-soft selection:text-primary;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
 }
+
+/* Cursors (Tailwind v4 no longer makes buttons show a pointer). Clickable things get the hand, text fields the text
+   cursor, disabled controls "not allowed". Classes like cursor-default on an element still win. */
+@layer base {
+  button,
+  [role='button'],
+  [role='menuitem'],
+  [role='menuitemcheckbox'],
+  [role='option'],
+  [role='tab'],
+  a[href],
+  select,
+  summary,
+  label[for],
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='date'],
+  input[type='file'],
+  input[type='color'],
+  input[type='range'],
+  input[type='submit'],
+  input[type='button'],
+  input[type='reset'] {
+    cursor: pointer;
+  }
+  input:not([type='checkbox']):not([type='radio']):not([type='date']):not([type='file']):not([type='color']):not([type='range']):not([type='submit']):not([type='button']):not([type='reset']),
+  textarea,
+  [contenteditable='true'] {
+    cursor: text;
+  }
+  button:disabled,
+  select:disabled,
+  input:disabled,
+  textarea:disabled,
+  [aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+}

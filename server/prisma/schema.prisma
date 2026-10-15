@@ -134,14 +134,22 @@ model Conversation {
   // When the current assignee first opened the chat after it was assigned to them; null = not yet. Cleared on
   // every assignment change, so reminders (services/assignmentReminders.ts) run until they open it.
   assigneeOpenedAt DateTime?
+  // When the current assignee got it (set on every assignment change; null when unassigned or assigned before
+  // this column existed, then updatedAt stands in). Reminders count 5 minutes from here.
+  assignedAt     DateTime?
+  // Last reminder sent for this chat (persisted, so restarts don't reset the 5-minute timer or send duplicates)
+  reminderSentAt DateTime?
   lastMessageAt DateTime            @default(now())
   // Customer's last inbound message: free-form replies allowed for 24h after this
   lastInboundAt DateTime?
   unread        Int                 @default(0)
-  // open | closed. Closing keeps messages, labels and the assignee; new customer messages don't reopen it
+  // open | snoozed | closed. Closing keeps messages, labels and the assignee; new customer messages don't reopen it
+  // (they do wake a snoozed chat)
   status        String              @default("open")
   closedAt      DateTime?
   closedById    String?
+  // status = snoozed: back to open at this time (or as soon as the customer writes); null otherwise
+  snoozedUntil  DateTime?
   createdAt     DateTime            @default(now())
   // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
   // --- deletes stay as they are) ---
@@ -157,6 +165,10 @@ model Conversation {
   assignedTo    Member?             @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
   activity      ActivityEvent[]
   clears        ConversationClear[]
+  // Pinned to the top of these people's lists (per person)
+  pins          ConversationPin[]
+  // Teammates added to help on this chat (besides the assignee); they get its notifications
+  collaborators ConversationCollaborator[]
   // Assignment report rows (reasons). Never read by the chat API; see services/assignmentReports.ts
   assignments   AssignmentRecord[]
 
@@ -300,6 +312,29 @@ model AssignmentRecord {
 
   @@index([workspaceId, createdAt])
   @@index([conversationId, createdAt])
+}
+
+// "Pin conversation": keeps a chat at the top of one person's list (like WhatsApp; at most 3 per person and workspace)
+model ConversationPin {
+  userId         String
+  conversationId String
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId])
+}
+
+// Collaborators on a chat: workspace members added alongside the assignee (user ids)
+model ConversationCollaborator {
+  conversationId String
+  userId         String
+  addedById      String?
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
 }
 
 // "Clear chat" (only for the person who did it, like WhatsApp): messages and activity up to clearedAt are

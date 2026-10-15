@@ -11,6 +11,7 @@ import {
   removeConversationLabel,
   updateLabel,
 } from '@/lib/labels';
+import { labelToastText, showToast } from '@/lib/toasts';
 import { ColorField } from './colors';
 
 type LabelRef = Conversation['labels'][number];
@@ -150,13 +151,22 @@ export function LabelPicker({
   const visible = labels.filter((l) => l.name.toLowerCase().includes(term.toLowerCase()));
   const exactMatch = labels.some((l) => l.name.toLowerCase() === term.toLowerCase());
 
+  const contactName = conversation?.contact ? conversation.contact.name || `+${conversation.contact.waId}` : '';
+  // Confirmation toast for your own change (bottom-left, only you; nobody else is shown it)
+  const toastLabel = (action: 'added' | 'removed' | 'deleted', name: string, conversationId = '') => {
+    const t = labelToastText(action, name, action === 'deleted' ? '' : contactName);
+    showToast(t.key, conversationId, t.message, t.detail);
+  };
+
   function toggle(label: Label) {
     if (!conversation) return;
+    const removing = assigned.has(label.id);
     attempt(async () => {
-      const c = assigned.has(label.id)
+      const c = removing
         ? await removeConversationLabel(conversation.id, label.id)
         : await addConversationLabel(conversation.id, label.id);
       onConversationLabels(c.id, c.labels);
+      toastLabel(removing ? 'removed' : 'added', label.name, c.id);
     });
   }
 
@@ -180,6 +190,7 @@ export function LabelPicker({
       if (!editing.id && conversation) {
         const c = await addConversationLabel(conversation.id, saved.id);
         onConversationLabels(c.id, c.labels);
+        toastLabel('added', saved.name, c.id);
       }
       setEditing(null);
       setQuery('');
@@ -191,6 +202,7 @@ export function LabelPicker({
     attempt(async () => {
       await deleteLabel(label.id);
       onLabelDeleted(label.id);
+      toastLabel('deleted', label.name);
       setEditing(null);
     });
   }
@@ -299,9 +311,9 @@ export function LabelPicker({
               maxLength={50}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && term && !exactMatch && canManage) startNew(term);
+                if (e.key === 'Enter' && term && !exactMatch) startNew(term); // every role may create a label
               }}
-              placeholder={canManage ? 'Search or create a label' : 'Search labels'}
+              placeholder="Search or create a label"
               className="w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-ink-soft placeholder:text-faint outline-hidden focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
             />
           </div>
@@ -355,12 +367,12 @@ export function LabelPicker({
             })}
             {visible.length === 0 && !term && (
               <li className="px-3 py-2 text-muted">
-                {canManage ? 'No labels yet. Type a name to create one.' : 'No labels yet.'}
+                No labels yet. Type a name to create one.
               </li>
             )}
-            {visible.length === 0 && term && !canManage && <li className="px-3 py-2 text-muted">No labels match.</li>}
           </ul>
-          {canManage && (
+          {/* Creating is open to every role; editing an existing label (pencil) needs canManage */}
+          {(conversation || canManage) && (
             <div className="border-t border-line-soft p-1">
               {term && !exactMatch ? (
                 <button

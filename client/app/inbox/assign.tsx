@@ -283,7 +283,7 @@ export function AssignDropdown({
                     <li key={`member:${m.id}`} className="flex items-center gap-1 px-1">
                       <button
                         disabled={busy || !conversation || !ok}
-                        title={conversation && !ok ? 'Loading your permissions…' : undefined}
+                        title={conversation && !ok ? 'Agents can only take unassigned chats with Assign to Me.' : undefined}
                         onClick={() => toggleMember(m.id, m.name)}
                         className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
                           isAssigned
@@ -316,7 +316,7 @@ export function AssignDropdown({
                     <li key={a.id} className="flex items-center gap-1 px-1">
                       <button
                         disabled={busy || !conversation || !allowed(a)}
-                        title={conversation && !allowed(a) ? 'Loading your permissions…' : undefined}
+                        title={conversation && !allowed(a) ? 'Agents can only take unassigned chats with Assign to Me.' : undefined}
                         onClick={() => toggle(a.id, a.name)}
                         className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition disabled:cursor-default ${
                           isAssigned

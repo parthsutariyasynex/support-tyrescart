@@ -6,7 +6,7 @@ import { emitToWorkspace } from '../realtime.js';
 import { AppError, notFound } from './errors.js';
 import { recordActivity } from './activity.js';
 import { requireConversation } from './inbox.js';
-import { requireLabelManager } from './permissions.js';
+import { getPermissions, requireLabelManager } from './permissions.js';
 import { parse } from './validate.js';
 
 const labelInclude = { _count: { select: { conversations: true } } };
@@ -43,8 +43,10 @@ async function requireLabel(workspaceId: string, id: string) {
   return label;
 }
 
+// Every role may create a label (and add it to chats). Renaming, recolouring and deleting a shared label stays with
+// owners, admins, supervisors and agents granted it (requireLabelManager below).
 export async function createLabel(auth: AuthPayload, rawInput: unknown) {
-  await requireLabelManager(auth);
+  await getPermissions(auth); // a current member of this workspace (any role)
   const { workspaceId } = auth;
   const data = parse(createSchema, rawInput);
   const label = toLabel(

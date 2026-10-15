@@ -14,6 +14,8 @@ export const env = {
   metaVerifyToken: required('META_VERIFY_TOKEN'),
   graphVersion: process.env.GRAPH_API_VERSION ?? 'v21.0',
   isProd: process.env.NODE_ENV === 'production',
+  // Product name used in emails (subjects and text)
+  appName: process.env.APP_NAME || 'support-tyrescart',
   // How often assignees are reminded (toast) about their open chats still waiting for a reply; 0 disables
   assignmentReminderMinutes: Number(process.env.ASSIGNMENT_REMINDER_MINUTES ?? 5),
   // Minutes without activity on any tab before a connected person shows as Away

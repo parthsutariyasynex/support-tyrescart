@@ -42,7 +42,7 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Mutation {
-    "Every role. assigneeId: the member id (null = unassign). memberId: the person's user id instead. Assigning the current holder again changes nothing. reason: the Assignment Reason (max 500 chars), required when assigning or reassigning (REASON_REQUIRED otherwise), optional when unassigning. Stored for the admin assignment report only; never returned by chat queries."
+    "Owners, admins and supervisors (agents: FORBIDDEN, they use claimConversation). assigneeId: the member id (null = unassign). memberId: the person's user id instead. Assigning the current holder again changes nothing. reason: the Assignment Reason (max 500 chars), required when assigning or reassigning (REASON_REQUIRED otherwise), optional when unassigning. Stored for the admin assignment report only; never returned by chat queries."
     assignConversation(conversationId: ID!, assigneeId: ID, memberId: ID, reason: String): Conversation!
     "Assign to Me (New Leads): take an unassigned chat for yourself. Fails with ALREADY_ASSIGNED if someone else has it."
     claimConversation(conversationId: ID!): Conversation!

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../auth.js';
 import { env } from '../env.js';
 import { sweepPresence } from '../presence.js';
+import { wakeSnoozedConversations } from '../services/conversationStatus.js';
 import { sendAssignmentReminders } from '../services/assignmentReminders.js';
 import {
   listConversations,
@@ -39,9 +40,15 @@ if (!env.isProd) {
     await simulateIncoming(req.auth!.workspaceId, req.body);
     res.json({ ok: true });
   });
-  // Dev only: run one assignment-reminder tick now instead of waiting for the schedule
-  inboxRouter.post('/dev/assignment-reminders', async (_req, res) => {
-    res.json({ reminded: await sendAssignmentReminders() });
+  // Dev only: run one reminder check for your own workspace now instead of waiting for the schedule.
+  // body.now (ISO time, optional): check as if it were that time, e.g. 6 minutes ahead (tests)
+  inboxRouter.post('/dev/assignment-reminders', async (req, res) => {
+    const at = req.body?.now ? new Date(String(req.body.now)) : new Date();
+    res.json({ reminded: await sendAssignmentReminders(Number.isNaN(at.getTime()) ? new Date() : at, undefined, req.auth!.workspaceId) });
+  });
+  // Dev only: wake every snoozed chat whose time has come, now instead of within 30 seconds
+  inboxRouter.post('/dev/wake-snoozed', async (_req, res) => {
+    res.json({ woke: await wakeSnoozedConversations() });
   });
   // Dev only: mark everyone idle for longer than idleMs (default: the configured away time) as Away now
   inboxRouter.post('/dev/presence-sweep', (req, res) => {

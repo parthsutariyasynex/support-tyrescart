@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-export type ChatOption = { label: string; onSelect: () => void; danger?: boolean; icon: React.ReactNode };
+// An option either runs onSelect, or opens its `children` beside the menu (e.g. Snooze › 1 hour, 3 hours, …)
+export type ChatOption = {
+  label: string;
+  onSelect?: () => void;
+  danger?: boolean;
+  icon: React.ReactNode;
+  children?: { label: string; hint?: string; onSelect: () => void }[];
+};
 
 // Chat header "More options" (three-dot) menu
 // `busy`: an option's request is in flight (shows a spinner instead of the dots)
@@ -16,7 +23,11 @@ export function ChatOptionsMenu({
   busy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [sub, setSub] = useState<string | null>(null); // the option whose children are showing
   const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) setSub(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -60,15 +71,21 @@ export function ChatOptionsMenu({
           className="absolute right-0 top-9 z-50 w-48 rounded-xl border border-line bg-surface p-1 text-xs shadow-lg"
         >
           {options.map((o) => (
+            <div key={o.label} className="relative" onMouseEnter={() => setSub(o.children ? o.label : null)}>
             <button
-              key={o.label}
               role="menuitem"
+              aria-haspopup={o.children ? 'menu' : undefined}
+              aria-expanded={o.children ? sub === o.label : undefined}
               onClick={() => {
+                if (o.children) {
+                  setSub(o.label); // hover already opens it; a click (or tap) must not close it again
+                  return;
+                }
                 setOpen(false);
-                o.onSelect();
+                o.onSelect?.();
               }}
               className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left font-medium transition ${
-                o.danger ? 'text-danger hover:bg-danger-soft' : 'text-body hover:bg-surface-muted'
+                o.danger ? 'text-danger hover:bg-danger-soft' : `text-body hover:bg-surface-muted ${sub === o.label ? 'bg-surface-muted' : ''}`
               }`}
             >
               <svg
@@ -82,8 +99,32 @@ export function ChatOptionsMenu({
               >
                 {o.icon}
               </svg>
-              {o.label}
+              <span className="flex-1">{o.label}</span>
+              {o.children && (
+                <svg className="h-3.5 w-3.5 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m15 18-6-6 6-6" />
+                </svg>
+              )}
             </button>
+            {o.children && sub === o.label && (
+              <div role="menu" aria-label={o.label} className="absolute right-full top-0 mr-1 w-52 rounded-xl border border-line bg-surface p-1 text-xs shadow-lg">
+                {o.children.map((c) => (
+                  <button
+                    key={c.label}
+                    role="menuitem"
+                    onClick={() => {
+                      setOpen(false);
+                      c.onSelect();
+                    }}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left font-medium text-body transition hover:bg-surface-muted"
+                  >
+                    <span>{c.label}</span>
+                    {c.hint && <span className="text-[11px] font-normal text-faint">{c.hint}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            </div>
           ))}
         </div>
       )}
@@ -95,6 +136,23 @@ export const CloseIcon = (
   <>
     <circle cx="12" cy="12" r="9" />
     <path d="m8.5 12.5 2.5 2.5 4.5-5" />
+  </>
+);
+export const PinIcon = (
+  <>
+    <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+  </>
+);
+export const UnreadIcon = (
+  <>
+    <path d="M22 6.5V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h11" />
+    <circle cx="19" cy="5" r="3" />
+  </>
+);
+export const SnoozeIcon = (
+  <>
+    <circle cx="12" cy="13" r="8" />
+    <path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3" />
   </>
 );
 export const ClearIcon = (

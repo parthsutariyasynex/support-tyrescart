@@ -1,4 +1,5 @@
 import { gql } from './api';
+import { snoozedUntilText } from './snooze';
 
 export type Activity = {
   id: string;
@@ -53,7 +54,17 @@ export function activityText(a: Activity, meId: string | null, where: 'chat' | '
     case 'conversation_closed':
       return `${who} closed ${chat}`;
     case 'conversation_reopened':
+      if (d.reason === 'snooze_ended') return `${where === 'chat' ? 'This chat' : `The chat with ${a.contactName ?? 'a customer'}`} is back from snooze`;
+      if (d.reason === 'customer_replied') return `The customer wrote, so ${chat} is back from snooze`;
       return `${who} reopened ${chat}`;
+    case 'collaborators_added': {
+      const names = (a.data ? (JSON.parse(a.data).names as string[] | undefined) : undefined) ?? [];
+      return `${who} added ${names.join(', ') || 'someone'} as ${names.length > 1 ? 'collaborators' : 'a collaborator'}${where === 'bell' ? ` on ${chat}` : ''}`;
+    }
+    case 'collaborator_removed':
+      return `${who} removed ${d.name ?? 'someone'} as a collaborator${where === 'bell' ? ` on ${chat}` : ''}`;
+    case 'conversation_snoozed':
+      return `${who} snoozed ${chat}${d.until ? ` until ${snoozedUntilText(d.until)}` : ''}`;
     case 'assigned':
       return `${who} assigned ${chat} to ${assignedTo(d, meId)}`;
     case 'reassigned':

@@ -11,10 +11,9 @@ export async function getPermissions({ userId, workspaceId }: AuthPayload) {
   if (!member) throw new AppError('You are not a member of this workspace', 403, 'FORBIDDEN');
   const role = member.role;
   const isAdmin = isAdminRole(role);
-  // Assigning, reassigning and unassigning chats is open to every role (owner, admin, supervisor and agent):
-  // being a current member of the workspace is the only requirement (checked above). The flag is kept so the
-  // API, the member:permissions event and the clients keep their shape; it is true for every member.
-  const canManageAssignments = true;
+  // Assigning, reassigning and unassigning chats: owners, admins and supervisors. Agents never; they only take an
+  // unassigned chat for themselves with "Assign to Me" (claimConversation).
+  const canManageAssignments = isSupervisorOrAbove(role);
   // Labels and assignee names/colours: admins and supervisors, or anyone an admin granted it to (unchanged)
   const canManageLabels = isSupervisorOrAbove(role) || member.canManageLabels;
   return { role, isAdmin, canManageAssignments, canManageLabels };
@@ -32,10 +31,10 @@ export async function requireLabelManager(auth: AuthPayload) {
     throw new AppError("You don't have permission to manage labels", 403, 'FORBIDDEN');
 }
 
-// Assigning, reassigning and unassigning chats: any current member of the workspace, whatever their role
+// Assigning, reassigning and unassigning chats: owners, admins and supervisors (agents use Assign to Me)
 export async function requireAssignmentManager(auth: AuthPayload) {
   if (!(await getPermissions(auth)).canManageAssignments)
-    throw new AppError("You don't have permission to assign chats", 403, 'FORBIDDEN');
+    throw new AppError('Agents can only take unassigned chats with Assign to Me.', 403, 'FORBIDDEN');
 }
 
 // Owners and admins grant or revoke label management for a member

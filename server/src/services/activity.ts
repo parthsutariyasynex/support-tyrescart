@@ -11,6 +11,9 @@ import { isAdminRole } from './roles.js';
 export type ActivityType =
   | 'conversation_closed'
   | 'conversation_reopened'
+  | 'conversation_snoozed'
+  | 'collaborators_added'
+  | 'collaborator_removed'
   | 'assigned'
   | 'reassigned'
   | 'unassigned'
@@ -96,6 +99,7 @@ async function notificationRecipients(workspaceId: string, conversationId: strin
   ]);
   const recipients = new Set(admins.map((a) => a.userId));
   if (conversation?.assignedTo) recipients.add(conversation.assignedTo.userId);
+  for (const c of await prisma.conversationCollaborator.findMany({ where: { conversationId }, select: { userId: true } })) recipients.add(c.userId);
   const named = data && typeof data === 'object' && !Array.isArray(data) ? (data as { assigneeUserId?: unknown }).assigneeUserId : undefined;
   if (typeof named === 'string') recipients.add(named);
   return [...recipients];
@@ -105,7 +109,13 @@ async function notificationRecipients(workspaceId: string, conversationId: strin
 // on chats currently assigned to them, or assignments that name them. Enforced here, not in the UI.
 function visibleTo(userId: string, role: string): Prisma.ActivityEventWhereInput {
   if (isAdminRole(role)) return {};
-  return { OR: [{ conversation: { assignedTo: { userId } } }, { data: { path: '$.assigneeUserId', equals: userId } }] };
+  return {
+    OR: [
+      { conversation: { assignedTo: { userId } } },
+      { conversation: { collaborators: { some: { userId } } } },
+      { data: { path: '$.assigneeUserId', equals: userId } },
+    ],
+  };
 }
 
 // Bell: newest events done by someone else (or by customers) that this person may see, plus how many are unseen

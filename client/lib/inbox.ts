@@ -37,15 +37,21 @@ export type Conversation = {
   status: ConversationStatus;
   closedAt: string | null;
   closedById: string | null;
+  // status = snoozed: back to open at this time (or when the customer writes)
+  snoozedUntil: string | null;
+  // Pinned to the top of your own list
+  pinned: boolean;
+  // You are a collaborator on it (shows in My Chats)
+  isCollaborator: boolean;
 };
-export type ConversationStatus = 'open' | 'closed';
-export type ConversationCounts = { open: number; closed: number; closedWithUnread: number; unassigned: number };
+export type ConversationStatus = 'open' | 'snoozed' | 'closed';
+export type ConversationCounts = { open: number; closed: number; closedWithUnread: number; unassigned: number; snoozed: number };
 export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 
 export const PAGE_SIZE = 50;
 
 const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version';
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
 // every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last
@@ -79,10 +85,20 @@ export function needsAttention(c: Pick<Conversation, 'unread' | 'assignee' | 'as
 // Optional filters: labelId, assignee (an assignee id, 'unassigned' or 'me'), status (open | closed)
 export async function fetchConversations(
   after?: string | null,
-  filter: { labelId?: string | null; assignee?: string | null; status?: ConversationStatus | null; search?: string | null } = {},
+  filter: {
+    labelId?: string | null;
+    assignee?: string | null;
+    status?: ConversationStatus | null;
+    search?: string | null;
+    sort?: 'newest' | 'oldest' | null;
+    labelIds?: string[] | null;
+    assigneeIds?: string[] | null;
+    from?: string | null;
+    to?: string | null;
+  } = {},
 ) {
-  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String) {
-    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
+  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime) {
+    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
   }`;
   return (await gql<{ conversations: Connection<Conversation> }>(query, { first: PAGE_SIZE, after, ...filter }))
     .conversations;
@@ -169,17 +185,32 @@ export function newerMessage(current: Message, incoming: Message) {
 }
 
 export async function fetchConversationCounts() {
-  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread unassigned } }`))
+  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread unassigned snoozed } }`))
     .conversationCounts;
 }
 
-type StatusFields = Pick<Conversation, 'id' | 'status' | 'closedAt' | 'closedById'>;
+type StatusFields = Pick<Conversation, 'id' | 'status' | 'closedAt' | 'closedById' | 'snoozedUntil'>;
 
 // Close (resolve) or reopen a chat. Messages, labels and the assignee are kept.
-export async function setConversationStatus(id: string, status: ConversationStatus) {
+export async function setConversationStatus(id: string, status: 'open' | 'closed') {
   const field = status === 'closed' ? 'closeConversation' : 'reopenConversation';
-  const query = `mutation SetStatus($id: ID!) { ${field}(id: $id) { id status closedAt closedById } }`;
+  const query = `mutation SetStatus($id: ID!) { ${field}(id: $id) { id status closedAt closedById snoozedUntil } }`;
   return (await gql<Record<string, StatusFields>>(query, { id }))[field];
+}
+
+// Pin / unpin for yourself (at most 3), and "Mark as unread"
+export async function setConversationPinned(id: string, pinned: boolean) {
+  const field = pinned ? 'pinConversation' : 'unpinConversation';
+  return (await gql<Record<string, { id: string; pinned: boolean }>>(`mutation Pin($id: ID!) { ${field}(id: $id) { id pinned } }`, { id }))[field];
+}
+export async function markConversationUnread(id: string) {
+  return (await gql<{ markConversationUnread: { id: string; unread: number } }>(`mutation Unread($id: ID!) { markConversationUnread(id: $id) { id unread } }`, { id })).markConversationUnread;
+}
+
+// Snooze until a time (back to open then, or when the customer writes)
+export async function snoozeConversation(id: string, until: Date) {
+  const query = `mutation Snooze($id: ID!, $until: DateTime!) { snoozeConversation(id: $id, until: $until) { id status closedAt closedById snoozedUntil } }`;
+  return (await gql<{ snoozeConversation: StatusFields }>(query, { id, until: until.toISOString() })).snoozeConversation;
 }
 
 // Clear chat for yourself only (like WhatsApp); nothing is deleted and teammates still see everything

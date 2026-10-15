@@ -10,6 +10,7 @@ import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
+import { startSnoozeWaker } from './services/conversationStatus.js';
 import { AppError } from './services/errors.js';
 
 const app = express();
@@ -38,4 +39,9 @@ const server = createServer(app);
 initRealtime(server);
 server.listen(env.port, () => console.log(`API running on http://localhost:${env.port}`));
 const stopReminders = startAssignmentReminders();
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => stopReminders());
+const stopSnoozeWaker = startSnoozeWaker();
+for (const signal of ['SIGINT', 'SIGTERM'] as const)
+  process.once(signal, () => {
+    stopReminders();
+    stopSnoozeWaker();
+  });

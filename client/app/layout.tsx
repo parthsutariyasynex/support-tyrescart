@@ -1,11 +1,12 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
+import { APP_NAME } from '@/lib/brand';
 
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'support-tyrescart — WhatsApp Business SaaS',
+  title: `${APP_NAME} — WhatsApp Business SaaS`,
   description: 'Shared inbox, broadcasts and automations on official WhatsApp Cloud API',
 };
 

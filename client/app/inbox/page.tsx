@@ -26,6 +26,9 @@ import {
   sendTextMessage,
   simulateIncomingMessage,
   startConversation,
+  snoozeConversation,
+  setConversationPinned,
+  markConversationUnread,
 } from '@/lib/inbox';
 import {
   type Activity,
@@ -38,19 +41,25 @@ import {
 } from '@/lib/activity';
 import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
+import { EMPTY_MENU_FILTERS, type MenuFilters, matchesMenuFilters, toServerFilter } from '@/lib/chatFilters';
 import { findMessageMatches } from '@/lib/messageSearch';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
 import { revalidateOnReturn } from '@/lib/revalidate';
 import { showsAssignCheckboxes } from '@/lib/roles';
-import { AppShell } from '../AppShell';
+import { AppShell, OPEN_CHAT_EVENT } from '../AppShell';
+import { pinText, showToast } from '@/lib/toasts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
+import { CollaboratorsButton } from './CollaboratorsButton';
+import { FilterMenu } from './FilterMenu';
+import { type StatusFilter, StatusMenu } from './StatusMenu';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
 import { dayKey, dayLabel, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
-import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog } from './chatOptions';
+import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
+import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, playPing, showDesktopNotification, unlockSound } from './notifications';
 import {
@@ -70,7 +79,6 @@ import {
   MessageMenu,
   type MessageAction,
   UndoToast,
-  AssignedToast,
   messageActions,
 } from './messages';
 
@@ -88,9 +96,10 @@ export default function InboxPage() {
   return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
 }
 
-type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null };
-const filterKey = (f: ConversationFilter) => `${f.labelId}|${f.assignee}|${f.search ?? ''}`;
-type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string };
+type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null; sort: SortOrder; status: 'open' | 'snoozed' | 'closed' | null } & ReturnType<typeof toServerFilter>;
+const filterKey = (f: ConversationFilter) => JSON.stringify(f);
+type SortOrder = 'newest' | 'oldest';
+type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string; snoozedUntil?: string | null };
 
 // Module-level caches across client-side page transitions
 let cachedConversationsByPath: Record<string, Conversation[]> = {};
@@ -98,8 +107,6 @@ let cachedLabels: Label[] = [];
 let cachedAssignees: Assignee[] = [];
 let cachedPermissions: Permissions | null = null;
 let cachedFeed: NotificationFeed | null = null;
-// "You took this chat." after Assign to Me: set before the jump to My Chats and shown by the page that mounts there
-let pendingAssignmentToast: { conversationId: string; message: string; detail: string } | null = null;
 let cachedUnreadTotal = 0;
 let cachedActiveIdByPath: Record<string, string | null> = {};
 const messagesCache = new Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>();
@@ -114,6 +121,7 @@ function Inbox({ meName }: { meName: string }) {
   const pathname = usePathname();
   const mine = pathname === '/my-chats';
   const leads = pathname === '/leads';
+  const collab = pathname === '/collaborations'; // chats I collaborate on
 
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     if (cachedConversationsByPath[pathname]?.length) {
@@ -176,24 +184,7 @@ function Inbox({ meName }: { meName: string }) {
   const [membersVersion, setMembersVersion] = useState(0);
   const [permissions, setPermissions] = useState<Permissions | null>(cachedPermissions);
   const permissionsRef = useRef(permissions);
-  // Assignment toasts: "This chat has been assigned to you by …" (assignment:you, to the new assignee) and
-  // "… reassigned this chat to …" / "… unassigned you from this chat" (assignment:removed, to the previous
-  // holder). One at a time; the same event arriving twice within a few seconds (e.g. a reconnect) shows it once.
-  const [assignedToast, setAssignedToast] = useState<{ key: string; conversationId: string; message: string; detail: string } | null>(null);
-  const lastAssignedToastRef = useRef<{ key: string; at: number } | null>(null);
-  const clearAssignedToast = useCallback(() => setAssignedToast(null), []);
-  const showAssignmentToast = useCallback((key: string, conversationId: string, message: string, detail: string) => {
-    const last = lastAssignedToastRef.current;
-    if (last && last.key === key && Date.now() - last.at < 5000) return; // duplicate
-    lastAssignedToastRef.current = { key, at: Date.now() };
-    setAssignedToast({ key: `${key}:${Date.now()}`, conversationId, message, detail });
-  }, []);
-  useEffect(() => {
-    if (!pendingAssignmentToast) return;
-    const t = pendingAssignmentToast;
-    pendingAssignmentToast = null;
-    showAssignmentToast(`claim:${t.conversationId}`, t.conversationId, t.message, t.detail);
-  }, [showAssignmentToast]);
+  // Toasts (assignment, new chat, reminders) are shown app-wide by AppShell from the shared store in lib/toasts
   const [activity, setActivity] = useState<Activity[]>(() => {
     const initId = cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
@@ -211,16 +202,27 @@ function Inbox({ meName }: { meName: string }) {
   conversationsRef.current = conversations;
 
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = mine ? 'me' : leads ? 'unassigned' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : leads ? 'unassigned' : collab ? 'collaborating' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   // The search box: applied to the loaded chats at once; the server search (every message, label, name…) runs a
   // moment after you stop typing
   const [searchTerm, setSearchTerm] = useState('');
+  // The search text the server has actually answered for (set when its list arrives). Until then, and whenever the
+  // request fails, the loaded chats keep being filtered locally so the search never looks dead.
+  const [serverSearchedTerm, setServerSearchedTerm] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setSearchTerm(searchQuery.trim()), 300);
     return () => clearTimeout(t);
   }, [searchQuery]);
-  const filterRef = useRef<ConversationFilter>({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null });
-  filterRef.current = { labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null };
+  // Newest (latest activity first) or Oldest; the server sorts too, so paging follows the same order
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest');
+  // "Filter by" menu (labels, collaborator, date range); applied on the server and to live updates on screen
+  const [menuFilters, setMenuFilters] = useState<MenuFilters>(EMPTY_MENU_FILTERS);
+  // "● Open ⌄": All / Open / Closed (server-side too, so paging follows it)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const menuFilterKey = JSON.stringify(menuFilters);
+  const currentFilter = (): ConversationFilter => ({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null, sort: sortOrder, status: statusFilter === 'all' ? null : statusFilter, ...toServerFilter(menuFilters) });
+  const filterRef = useRef<ConversationFilter>(currentFilter());
+  filterRef.current = currentFilter();
   const lastActiveRef = useRef<Conversation | null>(null);
 
   const loadedMoreRef = useRef(false);
@@ -250,7 +252,9 @@ function Inbox({ meName }: { meName: string }) {
       .then((page) => {
         if (filterKey(filter) !== filterKey(filterRef.current)) return;
         if (seq !== loadSeqRef.current) return;
-        if (!loadedMoreRef.current) {
+        setServerSearchedTerm(filter.search ?? '');
+        // A search result replaces the list outright (never merged with chats loaded earlier that no longer match)
+        if (!loadedMoreRef.current || filter.search) {
           updateConversations(page.nodes);
           setConversationsCursor(page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null);
           return;
@@ -412,8 +416,9 @@ function Inbox({ meName }: { meName: string }) {
   // Closed or reopened here, or (via Socket.IO) by another agent. The chat stays in the list;
   // messages, labels and assignee are untouched.
   const onStatusChanged = useCallback(
-    ({ conversationId, status, closedAt, closedById }: StatusChange) => {
-      patchConversations((c) => (c.id === conversationId ? { ...c, status, closedAt, closedById } : c));
+    (change: StatusChange) => {
+      const { conversationId, status, closedAt, closedById } = change;
+      patchConversations((c) => (c.id === conversationId ? { ...c, status, closedAt, closedById, snoozedUntil: change.snoozedUntil ?? null } : c));
     },
     [patchConversations],
   );
@@ -442,7 +447,7 @@ function Inbox({ meName }: { meName: string }) {
       const c = conversations.find((x) => x.id === id);
       if (c?.status !== 'closed') return;
       setConversationStatus(id, 'open')
-        .then((r) => onStatusChanged({ conversationId: r.id, status: r.status, closedAt: r.closedAt, closedById: r.closedById }))
+        .then((r) => onStatusChanged({ conversationId: r.id, status: r.status, closedAt: r.closedAt, closedById: r.closedById, snoozedUntil: r.snoozedUntil }))
         .catch((err) => setReopenError({ id, message: (err as Error).message }));
     },
     [conversations, onStatusChanged, pathname],
@@ -465,7 +470,7 @@ function Inbox({ meName }: { meName: string }) {
     loadedMoreRef.current = false;
     setConversationsCursor(null);
     loadConversations();
-  }, [labelFilter, assigneeFilter, searchTerm, loadConversations]);
+  }, [labelFilter, assigneeFilter, searchTerm, sortOrder, menuFilterKey, statusFilter, loadConversations]);
 
   // AppShell's top header leaves a slot for page controls. Look it up once this page is in the DOM (per path), and
   // if the header isn't rendered yet (first sign-in, before "me" loads) wait for it to appear.
@@ -514,9 +519,14 @@ function Inbox({ meName }: { meName: string }) {
   }, []);
   // "Unassigned (n)" in the filter: live count from the server (refreshed on every assignment change and new chat)
   const [unassignedCount, setUnassignedCount] = useState<number | null>(null);
+  // Open / Closed counts for the status menu, from the same request
+  const [statusCounts, setStatusCounts] = useState<{ open: number; snoozed: number; closed: number } | null>(null);
   const loadUnassignedCount = useCallback(() => {
     fetchConversationCounts()
-      .then((c) => setUnassignedCount(c.unassigned))
+      .then((c) => {
+        setUnassignedCount(c.unassigned);
+        setStatusCounts({ open: c.open, snoozed: c.snoozed, closed: c.closed });
+      })
       .catch(() => {});
   }, []);
 
@@ -536,6 +546,16 @@ function Inbox({ meName }: { meName: string }) {
     [pathname],
   );
 
+  // A toast was clicked (AppShell): open that chat here
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      if (id) openConversation(id);
+    };
+    window.addEventListener(OPEN_CHAT_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_CHAT_EVENT, onOpen);
+  }, [openConversation]);
+
   // Opened with ?chat=<id> (e.g. after "Assign to Me" moves a lead to My Chats): open that chat
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get('chat');
@@ -553,7 +573,7 @@ function Inbox({ meName }: { meName: string }) {
         const c = await claimConversation(conversationId);
         onAssigned(c.id, c.assignee);
         const known = conversationsRef.current.find((x) => x.id === c.id) ?? lastActiveRef.current;
-        pendingAssignmentToast = { conversationId: c.id, message: 'You took this chat. It is now in your My Chats.', detail: known?.contact ? known.contact.name || `+${known.contact.waId}` : '' };
+        showToast(`claim:${c.id}`, c.id, 'You took this chat. It is now in your My Chats.', known?.contact ? known.contact.name || `+${known.contact.waId}` : '');
         router.push(`/my-chats?chat=${encodeURIComponent(c.id)}`);
       } catch (err) {
         setClaimError({ id: conversationId, message: (err as Error).message });
@@ -643,7 +663,11 @@ function Inbox({ meName }: { meName: string }) {
       if (a.actorId === null || a.actorId !== permissionsRef.current?.userId)
         setFeed((f) => (f && !f.items.some((x) => x.id === a.id) ? { unseen: f.unseen + 1, items: [a, ...f.items].slice(0, 30) } : f));
     });
-    socket.on('conversation:status', onStatusChanged);
+    socket.on('conversation:status', (change: StatusChange) => {
+      onStatusChanged(change);
+      loadUnassignedCount(); // Open / Closed counts
+      if (filterRef.current.status) loadConversations(); // may have joined the Open / Closed list
+    });
     socket.on('conversation:cleared', ({ conversationId, userId }: { conversationId: string; userId: string }) => {
       if (userId === permissionsRef.current?.userId) onCleared(conversationId);
     });
@@ -663,69 +687,25 @@ function Inbox({ meName }: { meName: string }) {
         loadUnassignedCount();
       },
     );
-    // A teammate assigned a chat to you (sent only to you): sound + desktop pop-up while this tab is in the background.
-    // The bell gets it through activity:new like everything else.
-    socket.on(
-      'assignment:you',
-      ({ conversationId, actorName, contactName }: { conversationId: string; actorName: string | null; contactName: string }) => {
-        // In-app toast, whether or not the tab is visible (the existing sound + desktop pop-up below stay as they were)
-        showAssignmentToast(`you:${conversationId}:${actorName ?? ''}`, conversationId, 'This chat has been assigned to you and is waiting for your attention.', `${contactName}${actorName ? ` · by ${actorName}` : ''}`);
-        // Already looking at it: tell the server it is opened, so the 5-minute reminders don't start for it
-        if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
-        if (!document.hidden) return;
-        playPing();
-        showDesktopNotification(`${actorName ?? 'Someone'} assigned a chat to you`, contactName, `assigned-${conversationId}`, () =>
-          openConversation(conversationId),
-        );
-      },
+    // Assigned to you while you're looking at it: tell the server it is opened, so reminders don't start for it.
+    // (The toast, sound and desktop pop-up for assignment events and reminders come from AppShell, on every page.)
+    socket.on('assignment:you', ({ conversationId }: { conversationId: string }) => {
+      if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
+    });
+    // Pinned/unpinned in another of your tabs; "Mark as unread" by anyone
+    socket.on('conversation:pinned', ({ conversationId, pinned }: { conversationId: string; pinned: boolean }) =>
+      patchConversations((c) => (c.id === conversationId ? { ...c, pinned } : c)),
     );
-    // A teammate moved a chat away from you (reassigned or unassigned; sent only to you): same pop-up rules
-    socket.on(
-      'assignment:removed',
-      ({ conversationId, actorId, actorName, contactName, assignee }: { conversationId: string; actorId: string | null; actorName: string | null; contactName: string; assignee: Conversation['assignee'] }) => {
-        // In-app toast for the previous holder (the sound + desktop pop-up below stay as they were)
-        const who = actorName ?? 'A teammate';
-        showAssignmentToast(
-          `removed:${conversationId}:${actorName ?? ''}:${assignee?.id ?? ''}`,
-          conversationId,
-          !assignee ? `${who} unassigned you from this chat.` : actorId && assignee.userId === actorId ? `${who} took this chat from you.` : `${who} reassigned this chat to ${assignee.name}.`,
-          contactName,
-        );
-        if (!document.hidden) return;
-        playPing();
-        showDesktopNotification(
-          assignee ? `${actorName ?? 'Someone'} reassigned your chat to ${assignee.name}` : `${actorName ?? 'Someone'} unassigned you from a chat`,
-          contactName,
-          `unassigned-${conversationId}`,
-          () => openConversation(conversationId),
-        );
-      },
-    );
-    // An owner/admin who was neither the actor nor involved: "Parth assigned this chat to Nikhil." (sent only to them)
-    socket.on(
-      'assignment:changed',
-      ({ conversationId, actorId, actorName, contactName, assignee, previous }: { conversationId: string; actorId: string | null; actorName: string | null; contactName: string; assignee: Conversation['assignee']; previous: string | null }) => {
-        const who = actorName ?? 'A teammate';
-        const self = !!assignee && !!actorId && assignee.userId === actorId; // took it themselves (Assign to Me or the Assign box)
-        const message = assignee
-          ? self
-            ? `${who} took this chat${previous ? ` from ${previous}` : ''}.`
-            : previous
-              ? `${who} reassigned this chat from ${previous} to ${assignee.name}.`
-              : `${who} assigned this chat to ${assignee.name}.`
-          : `${who} unassigned ${previous ?? 'the assignee'} from this chat.`;
-        showAssignmentToast(`changed:${conversationId}:${actorName ?? ''}:${assignee?.id ?? ''}:${previous ?? ''}`, conversationId, message, contactName);
-      },
-    );
-    // Recurring reminder (server schedule, sent only to the assignee): their open chats still waiting for a reply
-    socket.on('assignment:reminder', ({ at, chats }: { at: string; chats: { conversationId: string; contactName: string }[] }) => {
-      if (!chats?.length) return;
-      showAssignmentToast(
-        `reminder:${at}:${chats.map((c) => c.conversationId).join(',')}`,
-        chats[0].conversationId,
-        chats.length === 1 ? 'Reminder: This chat is assigned to you and still needs attention.' : `Reminder: ${chats.length} chats are assigned to you and still need attention.`,
-        chats.map((c) => c.contactName).join(', '),
-      );
+    socket.on('conversation:unread', ({ conversationId, unread }: { conversationId: string; unread: number }) => {
+      patchConversations((c) => (c.id === conversationId ? { ...c, unread: Math.max(c.unread, unread) } : c));
+      loadUnreadTotal();
+    });
+    // Collaborators changed on a chat: am I one now? (My Chats follows)
+    socket.on('conversation:collaborators', ({ conversationId, collaborators }: { conversationId: string; collaborators: { id: string }[] }) => {
+      const me = permissionsRef.current?.userId;
+      const isCollaborator = !!me && collaborators.some((c) => c.id === me);
+      patchConversations((c) => (c.id === conversationId ? { ...c, isCollaborator } : c));
+      if (filterRef.current.assignee === 'me' || filterRef.current.assignee === 'collaborating') loadConversations(); // may have joined My Chats / Collaborations
     });
     socket.on('assignee:saved', onAssigneeSaved);
     socket.on('assignee:deleted', ({ id }: { id: string }) => onAssigneeDeleted(id));
@@ -761,7 +741,6 @@ function Inbox({ meName }: { meName: string }) {
     loadUnreadTotal,
     openConversation,
     onCleared,
-    showAssignmentToast,
     loadUnassignedCount,
     loadFeed,
   ]);
@@ -835,23 +814,34 @@ function Inbox({ meName }: { meName: string }) {
   if (listed) lastActiveRef.current = listed;
   const active = listed ?? (lastActiveRef.current?.id === activeId ? lastActiveRef.current : undefined);
 
-  const filteredConversations = conversations.filter((c) => {
+  const filteredConversations = conversations
+    .filter(listFilter)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || (sortOrder === 'oldest' ? byLatest(b, a) : byLatest(a, b)));
+  function listFilter(c: Conversation) {
+    if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+    if (!matchesMenuFilters(c, menuFilters)) return false;
     // Instant, on what is loaded; the server applies the same rule across all messages and refreshes the list.
     // While the server result for this exact text is in, chats it returned stay listed even if only an older
     // message matched (the local rule only sees the last one).
-    const serverSearched = searchTerm === searchQuery.trim();
+    const term = searchQuery.trim();
+    const serverSearched = term !== '' && serverSearchedTerm === term && searchTerm === term;
     const matched = serverSearched || matchesSearch(c, searchQuery);
     // A chat reassigned away from you leaves My Chats at once (the socket update patches it before any refetch)
     // (Until your permissions load, the server's "me" filter alone decides, so My Chats doesn't flash empty)
-    if (mine && permissions && !isAssignedTo(c, permissions.userId)) return false;
+    if (mine && permissions && !isAssignedTo(c, permissions.userId) && !c.isCollaborator) return false; // My Chats: assigned to me or collaborating
+    if (collab && !c.isCollaborator) return false; // Collaborations: removed as a collaborator leaves at once
     if (leads && c.assignee) return false; // taken by someone: no longer a lead
-    if (filterType === 'unread') return matched && c.unread > 0;
+    // Unread = what shows bold: unread customer messages, or assigned to you and not opened yet (WhatsApp-style)
+    if (filterType === 'unread') return matched && needsAttention(c, permissions?.userId);
+    // Unreplied: the customer's message is the latest one (nobody has answered yet)
+    if (filterType === 'unreplied') return matched && c.lastMessage?.direction === 'in' && !c.lastMessage.deletedAt;
     if (labelFilter) return matched && c.labels.some((l) => l.id === labelFilter);
-    if (assigneeFilter === 'me') return matched && isAssignedTo(c, permissions?.userId);
+    if (assigneeFilter === 'me') return matched && (isAssignedTo(c, permissions?.userId) || c.isCollaborator);
+    if (assigneeFilter === 'collaborating') return matched && c.isCollaborator;
     if (assigneeFilter === 'unassigned') return matched && !c.assignee;
     if (assigneeFilter) return matched && c.assignee?.id === assigneeFilter;
     return matched;
-  });
+  }
 
   const openPicker = (conversationId: string | null, anchor: HTMLElement) =>
     setPicker((p) => (p?.anchor === anchor ? null : { conversationId, anchor }));
@@ -865,6 +855,13 @@ function Inbox({ meName }: { meName: string }) {
       {/* Left Conversations List Panel */}
       <ConversationList
         conversations={filteredConversations}
+        sortOrder={sortOrder}
+        onSortChange={setSortOrder}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        statusCounts={statusCounts}
+        menuFilters={menuFilters}
+        onMenuFiltersChange={setMenuFilters}
         totalCount={conversations.length}
         meId={permissions?.userId ?? null}
         unassignedCount={unassignedCount}
@@ -882,6 +879,7 @@ function Inbox({ meName }: { meName: string }) {
         unlinkedNamesake={unlinkedNamesake}
         mine={mine}
         leads={leads}
+        collab={collab}
         onClaim={claim}
         claimError={claimError}
         typing={typing}
@@ -910,6 +908,11 @@ function Inbox({ meName }: { meName: string }) {
           viewer={permissions && { userId: permissions.userId, isAdmin: ['owner', 'admin'].includes(permissions.role), role: permissions.role }}
           onMessageUpdated={onMessageUpdated}
           onStatusChanged={onStatusChanged}
+          onPinnedChanged={(id, pinned) => patchConversations((c) => (c.id === id ? { ...c, pinned } : c))}
+          onMarkedUnread={(id, unread) => {
+            patchConversations((c) => (c.id === id ? { ...c, unread } : c));
+            loadUnreadTotal();
+          }}
           onClosed={() => {
             cachedActiveIdByPath[pathname] = null;
             setActiveId(null);
@@ -951,7 +954,7 @@ function Inbox({ meName }: { meName: string }) {
             onAssigned={onAssigned}
             onConfirmed={(conversationId, message) => {
               const c = conversationsRef.current.find((x) => x.id === conversationId) ?? lastActiveRef.current;
-              showAssignmentToast(`own:${conversationId}:${Date.now()}`, conversationId, message, c?.contact ? c.contact.name || `+${c.contact.waId}` : '');
+              showToast(`own:${conversationId}:${Date.now()}`, conversationId, message, c?.contact ? c.contact.name || `+${c.contact.waId}` : '');
             }}
           />,
           headerSlot,
@@ -971,18 +974,6 @@ function Inbox({ meName }: { meName: string }) {
         />
       )}
 
-      {assignedToast && (
-        <AssignedToast
-          key={assignedToast.key}
-          message={assignedToast.message}
-          detail={assignedToast.detail}
-          onOpen={() => {
-            openConversation(assignedToast.conversationId);
-            setAssignedToast(null);
-          }}
-          onDone={clearAssignedToast}
-        />
-      )}
     </div>
   );
 }
@@ -995,6 +986,13 @@ function ConversationList({
   onRefresh,
   onLoadMore,
   searchQuery,
+  sortOrder,
+  onSortChange,
+  statusFilter,
+  onStatusFilterChange,
+  statusCounts,
+  menuFilters,
+  onMenuFiltersChange,
   onSearchChange,
   filterType,
   onFilterChange,
@@ -1004,6 +1002,7 @@ function ConversationList({
   unlinkedNamesake,
   mine,
   leads,
+  collab,
   onClaim,
   claimError,
   onOpenLabels,
@@ -1024,6 +1023,13 @@ function ConversationList({
   onRefresh: () => void;
   onLoadMore?: () => void;
   searchQuery: string;
+  sortOrder: SortOrder;
+  onSortChange: (s: SortOrder) => void;
+  statusFilter: StatusFilter;
+  onStatusFilterChange: (s: StatusFilter) => void;
+  statusCounts: { open: number; snoozed: number; closed: number } | null;
+  menuFilters: MenuFilters;
+  onMenuFiltersChange: (f: MenuFilters) => void;
   onSearchChange: (q: string) => void;
   filterType: string;
   onFilterChange: (f: string) => void;
@@ -1033,6 +1039,8 @@ function ConversationList({
   unlinkedNamesake: Assignee | null;
   mine: boolean;
   leads: boolean;
+  // Collaborations page: only chats I collaborate on
+  collab: boolean;
   onClaim: (conversationId: string) => void;
   claimError: { id: string; message: string } | null;
   onOpenLabels: (conversationId: string | null, anchor: HTMLElement) => void;
@@ -1040,6 +1048,8 @@ function ConversationList({
   loading: boolean;
   typing: TypingState;
 }) {
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const presence = usePresence(); // online / away / offline dots next to assignees
   async function newChat() {
     const waId = prompt('Customer WhatsApp number with country code (e.g. 919876543210)');
@@ -1066,10 +1076,46 @@ function ConversationList({
     <section className="flex w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
       {/* Top Header Metrics + Refresh Button */}
       <div className="flex items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
-        <span className="font-medium text-body-soft">
-          {conversations.length} of {totalCount} · 0s
-        </span>
-        <button
+        <StatusMenu value={statusFilter} onChange={onStatusFilterChange} counts={statusCounts} />
+        <div className="flex items-center gap-0.5">
+            {/* Sort: Newest ⇄ Oldest (by last activity) */}
+            <button
+              type="button"
+              onClick={() => onSortChange(sortOrder === 'newest' ? 'oldest' : 'newest')}
+              title={sortOrder === 'newest' ? 'Newest first: click for oldest first' : 'Oldest first: click for newest first'}
+              aria-label={`Sort: ${sortOrder === 'newest' ? 'Newest' : 'Oldest'} first`}
+              className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-body-soft hover:bg-surface-strong"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m3 16 4 4 4-4" />
+                <path d="M7 20V4" />
+                <path d="m21 8-4-4-4 4" />
+                <path d="M17 4v16" />
+              </svg>
+              {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
+            </button>
+            {/* Search: hidden until the icon is clicked (stays open while a search is active) */}
+            <button
+              type="button"
+              title="Search chats"
+              aria-label="Search chats"
+              aria-expanded={searchOpen}
+              onClick={() => {
+                if (searchOpen && !searchQuery) setSearchOpen(false);
+                else {
+                  setSearchOpen(true);
+                  requestAnimationFrame(() => searchInputRef.current?.focus());
+                }
+              }}
+              className={`flex h-6 w-6 items-center justify-center rounded-full transition hover:bg-surface-strong ${searchOpen || searchQuery ? 'text-primary' : 'text-body-soft'}`}
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.3-4.3" />
+              </svg>
+            </button>
+            <FilterMenu value={menuFilters} onChange={onMenuFiltersChange} labels={labels} assignees={assignees} />
+        {/* <button
           onClick={onRefresh}
           title="Refresh conversations"
           className={`flex h-6 w-6 items-center justify-center rounded-md text-faint hover:bg-surface-strong hover:text-body transition ${loading ? 'animate-spin text-primary' : ''}`}
@@ -1080,33 +1126,47 @@ function ConversationList({
             <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
             <path d="M16 21h5v-5" />
           </svg>
-        </button>
+        </button> */}
+        </div>
       </div>
 
-      {/* Search Input */}
+      {/* Search Input (opened from the 🔍 icon above) */}
+      {(searchOpen || searchQuery) && (
       <div className="px-3 py-1">
         <div className="relative">
           <input
+            ref={searchInputRef}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                onSearchChange('');
+                setSearchOpen(false);
+              }
+            }}
             placeholder="Search"
             title="Finds chats by customer name, phone number, any message text, label, assignee, or the words open / closed / unread / unassigned"
             className="w-full rounded-lg border border-line bg-surface-muted/70 px-3 py-1.5 text-xs text-ink-soft placeholder:text-faint outline-hidden transition hover:bg-surface focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
           />
-          {searchQuery && (
-            <button
-              onClick={() => onSearchChange('')}
-              className="absolute inset-y-0 right-0 pr-2 flex items-center text-faint hover:text-body-soft text-xs"
-            >
-              ✕
-            </button>
-          )}
+          <button
+            type="button"
+            title="Close search"
+            aria-label="Close search"
+            onClick={() => {
+              onSearchChange('');
+              setSearchOpen(false);
+            }}
+            className="absolute inset-y-0 right-0 pr-2 flex items-center text-faint hover:text-body-soft text-xs"
+          >
+            ✕
+          </button>
         </div>
       </div>
+      )}
 
       {/* Filter Dropdown */}
-      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-line-soft">
-        <div className="relative min-w-0 flex-1">
+      <div className="flex items-center gap-1.5 px-3 py-1.5">
+        {/* <div className="relative min-w-0 flex-1">
           <select
             value={filterType}
             onChange={(e) => onFilterChange(e.target.value)}
@@ -1114,15 +1174,16 @@ function ConversationList({
           >
             <option value="all">All</option>
             <option value="unread">Unread</option>
+            <option value="unreplied">Unreplied</option> */}
             {/* Chats nobody holds yet (New Leads shows only these; My Chats is already "assigned to me") */}
-            {!mine && !leads && <option value="assigned:unassigned">Unassigned{unassignedCount === null ? '' : ` (${unassignedCount})`}</option>}
+            {/* {!mine && !leads && !collab && <option value="assigned:unassigned">Unassigned{unassignedCount === null ? '' : ` (${unassignedCount})`}</option>} */}
             {/* Only your own chats here; no per-person entries (My Chats is already "assigned to me") */}
-            {!mine && !leads && myAssignee && (
+            {/* {!mine && !leads && !collab && myAssignee && (
               <optgroup label="Assigned">
                 <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>
               </optgroup>
-            )}
-            {labels.length > 0 && (
+            )} */}
+            {/* {labels.length > 0 && (
               <optgroup label="Labels">
                 {labels.map((l) => (
                   <option key={l.id} value={`label:${l.id}`}>
@@ -1131,7 +1192,7 @@ function ConversationList({
                 ))}
               </optgroup>
             )}
-          </select>
+          </select> */}
           <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-faint">
             <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="m6 9 6 6 6-6" />
@@ -1145,7 +1206,33 @@ function ConversationList({
         >
           <TagIcon />
         </button> */}
+      {/* </div> */}
+      {/* Quick filters: All · Unread · Unreplied (same filter as the dropdown above) */}
+      <div className="flex items-center gap-1.5 border-b border-line-soft px-3 pb-2 pt-0.5">
+        {(
+          [
+            ['all', 'All'],
+            ['unread', 'Unread'],
+            ['unreplied', 'Unreplied'],
+          ] as const
+        ).map(([value, label]) => {
+          const active = filterType === value;
+          return (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onFilterChange(value)}
+              className={`rounded-full border px-3 py-1 text-[11px] font-medium transition ${
+                active ? 'border-primary/40 bg-primary-subtle text-primary' : 'border-transparent bg-surface-muted text-body-soft hover:bg-surface-strong'
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
+
 
       {/* Conversation List / Empty State */}
       <div className="flex-1 overflow-y-auto">
@@ -1155,11 +1242,13 @@ function ConversationList({
           <p className="p-5 text-xs leading-relaxed text-muted">
             No new leads right now. New customer chats that nobody has taken yet appear here.
           </p>
+        ) : conversations.length === 0 && collab ? (
+          <div className="p-4 text-xs text-muted">No collaborations yet. Chats you are added to as a collaborator will appear here.</div>
         ) : conversations.length === 0 && mine ? (
           <div className="space-y-2 p-5 text-xs leading-relaxed text-muted">
             <p>
               {myAssignee
-                ? 'No chats are assigned to you right now. Chats assigned to you will appear here.'
+                ? 'No chats are assigned to you right now. Chats assigned to you, or that you are added to as a collaborator, will appear here.'
                 : "No chats are assigned to you yet. When someone assigns you a chat from the Assign menu (under People), it appears here."}
             </p>
             {unlinkedNamesake && (
@@ -1219,8 +1308,15 @@ function ConversationList({
                         <span className={`truncate text-xs ${attention ? 'font-bold' : 'font-semibold'} ${isSelected ? 'text-primary' : 'text-ink'}`}>
                           {contactName}
                         </span>
-                        <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
-                          {listTimestamp(c.lastMessageAt)}
+                        <span className="flex shrink-0 items-center">
+                          {c.pinned && (
+                            <svg aria-label="Pinned" className="mr-1 inline h-3 w-3 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                            </svg>
+                          )}
+                          <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
+                            {listTimestamp(c.lastMessageAt)}
+                          </span>
                         </span>
                       </div>
                       {typingNames(typing, c.id).length > 0 ? (
@@ -1246,13 +1342,16 @@ function ConversationList({
                         </div>
                       )}
                     </div>
-                    {c.unread > 0 ? (
-                      <span className="flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-on-primary">
-                        {c.unread}
-                      </span>
-                    ) : (
-                      attention && <span title="Assigned to you, not opened yet" className="h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
-                    )}
+                    {/* Fixed slot, so the row doesn't shift when the badge appears or goes away */}
+                    <span className="flex w-5 shrink-0 justify-end">
+                      {c.unread > 0 ? (
+                        <span className="flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-on-primary">
+                          {c.unread > 99 ? '99+' : c.unread}
+                        </span>
+                      ) : (
+                        attention && <span title="Assigned to you, not opened yet" className="h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
+                      )}
+                    </span>
                   </button>
                   
                 </li>
@@ -1296,6 +1395,8 @@ function ChatPanel({
   viewer,
   onMessageUpdated,
   onStatusChanged,
+  onPinnedChanged,
+  onMarkedUnread,
   onClosed,
   onCleared,
   onClaim,
@@ -1317,6 +1418,8 @@ function ChatPanel({
   onStatusChanged: (change: StatusChange) => void;
   // Called once this agent's "Close chat" succeeded: leave the chat and go back to the inbox list
   onClosed: () => void;
+  onPinnedChanged: (id: string, pinned: boolean) => void;
+  onMarkedUnread: (id: string, unread: number) => void;
   // "Clear chat" succeeded (for this user only)
   onCleared: () => void;
   // "Assign to Me" for an unassigned chat (New Lead), and why it failed if it did
@@ -1421,14 +1524,38 @@ function ChatPanel({
     }
   }
 
-  async function changeStatus(status: ConversationStatus) {
+  async function togglePin() {
+    setError('');
+    try {
+      const r = await setConversationPinned(conversation.id, !conversation.pinned);
+      onPinnedChanged(r.id, r.pinned);
+      const t = pinText(r.pinned, conversation.contact.name || `+${conversation.contact.waId}`); // only you: pins are personal
+      showToast(t.key, r.id, t.message, t.detail);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  // Back to unread, then leave the chat (staying in it would mark it read again)
+  async function markUnread() {
+    setError('');
+    try {
+      const r = await markConversationUnread(conversation.id);
+      onMarkedUnread(r.id, r.unread);
+      onClosed();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function changeStatus(status: ConversationStatus, until?: Date) {
     setStatusBusy(true);
     setError('');
     try {
-      const c = await setConversationStatus(conversation.id, status);
-      onStatusChanged({ conversationId: c.id, status: c.status, closedAt: c.closedAt, closedById: c.closedById });
+      const c = status === 'snoozed' && until ? await snoozeConversation(conversation.id, until) : await setConversationStatus(conversation.id, status === 'closed' ? 'closed' : 'open');
+      onStatusChanged({ conversationId: c.id, status: c.status, closedAt: c.closedAt, closedById: c.closedById, snoozedUntil: c.snoozedUntil });
       // Only after the server confirmed: exit the chat (on failure we stay here and show the error)
-      if (status === 'closed') onClosed();
+      if (status === 'closed' || status === 'snoozed') onClosed();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -1592,6 +1719,12 @@ function ChatPanel({
         </div>
 
         <div className="flex shrink-0 items-center gap-2.5">
+          <CollaboratorsButton
+            conversationId={conversation.id}
+            meId={viewer?.userId ?? null}
+            contactName={conversation.contact.name || `+${conversation.contact.waId}`}
+            canEdit={!!viewer} // every role adds and removes collaborators
+          />
           <button
             type="button"
             title="Search in conversation"
@@ -1621,15 +1754,26 @@ function ChatPanel({
               disabled={statusBusy}
               busy={statusBusy}
               options={[
+                { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
+                { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
                 { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
                 { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
+                ...(conversation.status === 'snoozed'
+                  ? [{ label: 'Unsnooze', icon: SnoozeIcon, onSelect: () => changeStatus('open') }]
+                  : [
+                      {
+                        label: 'Snooze',
+                        icon: SnoozeIcon,
+                        children: snoozeChoices().map((s) => ({ label: s.label, hint: snoozedUntilText(s.until.toISOString()), onSelect: () => changeStatus('snoozed', s.until) })),
+                      },
+                    ]),
               ]}
             />
           )}
           {/* {process.env.NODE_ENV !== 'production' && (
             <button
               onClick={async () => {
-                const body = prompt('Enter simulated reply text:', 'Hi support-tyrescart! I want to check prices for my car.');
+                const body = prompt('Enter simulated reply text:', '');
                 if (!body) return;
                 await simulateIncomingMessage({
                   waId: conversation.contact.waId,
@@ -1780,6 +1924,14 @@ function ChatPanel({
           />
         )}
 
+        {conversation.status === 'snoozed' && !editing && (
+          <div className="mb-2 flex items-center justify-between gap-3 rounded-xl bg-warning-soft px-4 py-2 text-xs text-warning">
+            <span>Snoozed until {snoozedUntilText(conversation.snoozedUntil)}. It comes back on its own, or when the customer writes.</span>
+            <button type="button" disabled={statusBusy} onClick={() => changeStatus('open')} className="shrink-0 rounded-lg px-2 py-1 font-semibold hover:bg-warning-soft-hover disabled:opacity-50">
+              Unsnooze
+            </button>
+          </div>
+        )}
         {isClosed && !editing ? (
           <p className="rounded-xl bg-surface-muted px-4 py-2.5 text-center text-xs text-muted">
             {reopenError

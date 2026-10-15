@@ -1,5 +1,6 @@
 'use client';
 
+import { APP_NAME } from '@/lib/brand';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -50,7 +51,7 @@ export default function LoginPage() {
   return (
     <AuthShell
       title="Welcome back"
-      subtitle="Sign in to your support-tyrescart workspace."
+      subtitle={`Sign in to your ${APP_NAME} workspace.`}
       footerText={joinToken ? "Don't have an account?" : undefined}
       footerLinkText={joinToken ? 'Create your account →' : undefined}
       footerLinkHref={joinToken ? `/register?join=${encodeURIComponent(joinToken)}` : undefined}

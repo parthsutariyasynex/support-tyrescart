@@ -35,9 +35,16 @@ type Row = {
 
 // Team: everyone sees who is in the workspace and their role. Admins also invite people, change roles,
 // remove members and create a signup link (the server enforces all of it).
+let cachedTeamRows: Row[] | null = null;
+
 export function TeamSection({ meId, role }: { meId: string; role: string | undefined }) {
   const admin = isAdminRole(role);
-  const [rows, setRows] = useState<Row[] | null>(null);
+  // Kept between visits so coming back to Teams shows the list at once (then refreshed from the server)
+  const [rows, setRowsState] = useState<Row[] | null>(() => cachedTeamRows);
+  const setRows = (r: Row[] | null) => {
+    cachedTeamRows = r;
+    setRowsState(r);
+  };
   const presence = usePresence();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -273,8 +280,8 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
         )}
       </div>
 
-      {/* KPI Stats Overview Cards */}
-      {stats && (
+      {/* KPI Stats Overview Cards: always rendered (placeholders while loading) so the page doesn't jump */}
+      {(
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div className="rounded-2xl border border-line bg-surface p-4 shadow-xs">
             <div className="flex items-center justify-between text-muted">
@@ -286,7 +293,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
                 <path d="M16 3.13a4 4 0 0 1 0 7.75" />
               </svg>
             </div>
-            <div className="mt-2 text-2xl font-bold text-ink">{stats.total}</div>
+            <div className="mt-2 text-2xl font-bold text-ink">{stats?.total ?? '–'}</div>
             <div className="mt-0.5 text-[11px] text-faint">In workspace</div>
           </div>
 
@@ -295,7 +302,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
               <span className="text-xs font-medium">Active Accounts</span>
               <span className="h-2 w-2 rounded-full bg-success" />
             </div>
-            <div className="mt-2 text-2xl font-bold text-ink">{stats.activeCount}</div>
+            <div className="mt-2 text-2xl font-bold text-ink">{stats?.activeCount ?? '–'}</div>
             <div className="mt-0.5 text-[11px] text-faint">Can sign in</div>
           </div>
 
@@ -307,7 +314,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
               </span>
             </div>
-            <div className="mt-2 text-2xl font-bold text-ink">{stats.onlineCount}</div>
+            <div className="mt-2 text-2xl font-bold text-ink">{stats?.onlineCount ?? '–'}</div>
             <div className="mt-0.5 text-[11px] text-faint">Live presence</div>
           </div>
 
@@ -319,7 +326,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
               </svg>
             </div>
             <div className="mt-2 text-xs font-semibold text-ink sm:text-sm">
-              <span className="text-primary">{stats.admins}</span> Admin · <span className="text-secondary">{stats.supervisors}</span> Sup · <span className="text-success">{stats.agents}</span> Agent
+              <span className="text-primary">{stats?.admins ?? '–'}</span> Admin · <span className="text-secondary">{stats?.supervisors ?? '–'}</span> Sup · <span className="text-success">{stats?.agents ?? '–'}</span> Agent
             </div>
             <div className="mt-0.5 text-[11px] text-faint">Assigned permissions</div>
           </div>
@@ -539,12 +546,12 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
         {/* Directory List / Table */}
         <div className="divide-y divide-line-soft">
           {!rows && (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <svg className="h-8 w-8 animate-spin text-primary" viewBox="0 0 24 24" fill="none">
+            <div className="flex h-[73px] items-center justify-center gap-3 text-center">
+              <svg className="h-5 w-5 animate-spin text-primary" viewBox="0 0 24 24" fill="none">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
-              <p className="mt-3 text-xs text-muted">Loading workspace members…</p>
+              <p className="text-xs text-muted">Loading workspace members…</p>
             </div>
           )}
 

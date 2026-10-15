@@ -1,4 +1,5 @@
 import { prisma } from './prisma.js';
+import { wakeOnCustomerMessage } from './services/conversationStatus.js';
 import { emitToWorkspace } from './realtime.js';
 import { recordActivity } from './services/activity.js';
 import { withSender } from './services/senders.js';
@@ -41,6 +42,7 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     update: m.name ? { name: m.name } : {},
     create: { workspaceId, waId: m.waId, name: m.name },
   });
+  const existed = await prisma.conversation.findUnique({ where: { workspaceId_contactId: { workspaceId, contactId: contact.id } }, select: { id: true } });
   const conversation = await prisma.conversation.upsert({
     where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
     update: { lastMessageAt: now, lastInboundAt: now, unread: { increment: 1 } },
@@ -58,6 +60,10 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     },
   });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(message) });
+  // A brand-new chat: tell every connected member (toast). Only the customer's name, never the message text.
+  if (!existed) emitToWorkspace(workspaceId, 'chat:new', { conversationId: conversation.id, contactName: conversation.contact.name || `+${conversation.contact.waId}` });
+  // A snoozed chat wakes up as soon as the customer writes (closed chats stay closed)
+  if (conversation.status === 'snoozed') await wakeOnCustomerMessage(conversation.id, workspaceId);
   await recordActivity({
     workspaceId,
     conversationId: conversation.id,

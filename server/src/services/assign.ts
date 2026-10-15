@@ -126,8 +126,8 @@ export async function assignConversation(
   if (options.requireReason && memberId && !reason)
     throw new AppError('Please give a reason for this assignment', 400, 'REASON_REQUIRED');
   const member = memberId ? await requireAssignableMember(workspaceId, { id: memberId }) : null;
-  // Every role assigns, reassigns and unassigns (their own chats or anyone's). The actor only has to be a current
-  // member of this workspace; requireAssignmentManager refuses outsiders and removed members.
+  // Owners, admins and supervisors assign, reassign and unassign. Agents only "Assign to Me" an unassigned chat
+  // (options.claim). requireAssignmentManager also refuses outsiders and removed members.
   if (actorId && !options.claim) await requireAssignmentManager({ userId: actorId, workspaceId });
   const actor = actorId ? await prisma.user.findUnique({ where: { id: actorId }, select: { id: true, name: true } }) : null;
   for (let attempt = 0; attempt < ASSIGN_ATTEMPTS; attempt++) {
@@ -142,7 +142,7 @@ export async function assignConversation(
       .$transaction(async (tx) => {
         const result = await tx.conversation.updateMany({
           where: { id: conversationId, workspaceId, assignedToId: before.assignedToId },
-          data: { assignedToId: memberId, assigneeOpenedAt: null, ...(actorId ? { updatedBy: actorId } : {}) },
+          data: { assignedToId: memberId, assigneeOpenedAt: null, assignedAt: memberId ? new Date() : null, ...(actorId ? { updatedBy: actorId } : {}) },
         });
         if (result.count) await recordAssignment(tx, { workspaceId, conversationId, previous, next: member, actor, reason });
         return result;

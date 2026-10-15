@@ -31,7 +31,8 @@ export function assignableMembers<M extends { name: string; role: string }>(memb
 }
 
 // Assign list checkboxes (assign, reassign, unassign) are shown to everyone the server says may manage
-// assignments: every role, so the flag is true for every member. Nothing loaded yet (null) hides them.
+// assignments: owners, admins and supervisors. Agents see the list read-only and use Assign to Me. Nothing loaded
+// yet (null) hides them.
 // The server enforces the same rule on every request; this only decides what to draw.
 export const showsAssignCheckboxes = (permissions: { canManageAssignments: boolean } | null | undefined) =>
   permissions?.canManageAssignments === true;

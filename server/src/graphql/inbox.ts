@@ -2,7 +2,9 @@ import { prisma } from '../prisma.js';
 import { toAssigneeRef } from '../services/assign.js';
 import { conversationLabels } from '../services/labels.js';
 import { clearConversation, clearedAt } from '../services/conversationClear.js';
-import { closeConversation, conversationCounts, reopenConversation } from '../services/conversationStatus.js';
+import { closeConversation, conversationCounts, reopenConversation, snoozeConversation } from '../services/conversationStatus.js';
+import { markConversationUnread, pinConversation, pinnedIds, unpinConversation } from '../services/conversationPins.js';
+import { addCollaborators, listCollaborators, removeCollaborator } from '../services/collaborators.js';
 import type { Context } from './shared.js';
 import { deleteMessage, editMessage, restoreMessage } from '../services/messageActions.js';
 import { senderName } from '../services/senders.js';
@@ -81,6 +83,14 @@ export const typeDefs = /* GraphQL */ `
     closedAt: DateTime
     "User id of whoever closed it"
     closedById: ID
+    "status = snoozed: back to open at this time, or as soon as the customer writes"
+    snoozedUntil: DateTime
+    "Pinned to the top of your list (per person)"
+    pinned: Boolean!
+    "Teammates added to this chat besides the assignee (they get its notifications)"
+    collaborators: [WorkspaceMember!]!
+    "You are a collaborator on this chat (it shows in your My Chats)"
+    isCollaborator: Boolean!
   }
 
   type ConversationCounts {
@@ -88,6 +98,8 @@ export const typeDefs = /* GraphQL */ `
     closed: Int!
     "Closed chats with unread customer messages"
     closedWithUnread: Int!
+    "Snoozed chats (they wake up on their own)"
+    snoozed: Int!
     "Chats with no assignee (the Unassigned filter / New Leads)"
     unassigned: Int!
   }
@@ -140,8 +152,8 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', or 'me' (assigned to you). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
-    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String): ConversationConnection!
+    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', 'me' (assigned to you or collaborating), or 'collaborating' (only chats you collaborate on). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
+    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime): ConversationConnection!
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
     messageTemplates: [MessageTemplate!]!
@@ -164,6 +176,16 @@ export const typeDefs = /* GraphQL */ `
     "Mark the chat closed/resolved. Keeps messages, labels and the assignee."
     closeConversation(id: ID!): Conversation!
     reopenConversation(id: ID!): Conversation!
+    "Hide the chat until this time (at most a year ahead); it comes back to open then, or when the customer writes"
+    snoozeConversation(id: ID!, until: DateTime!): Conversation!
+    "Keep this chat at the top of your own list (at most 3; PIN_LIMIT otherwise)"
+    pinConversation(id: ID!): Conversation!
+    unpinConversation(id: ID!): Conversation!
+    "Back to unread (bold with a badge) until someone opens it"
+    markConversationUnread(id: ID!): Conversation!
+    "Add teammates (user ids) as collaborators: every role"
+    addCollaborators(conversationId: ID!, userIds: [ID!]!): [WorkspaceMember!]!
+    removeCollaborator(conversationId: ID!, userId: ID!): [WorkspaceMember!]!
     "Edit the text of your own sent message (owners/admins: any sent message). Doesn't change what the customer received."
     editMessage(input: EditMessageInput!): Message!
     "Delete for everyone in the app (own messages; owners/admins: any sent message). Pass version to guard against concurrent edits."
@@ -174,10 +196,13 @@ export const typeDefs = /* GraphQL */ `
 `;
 
 type PageArgs = { first?: number | null; after?: string | null };
-type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null };
+type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null; sort?: string | null; labelIds?: string[] | null; assigneeIds?: string[] | null; from?: Date | null; to?: Date | null };
 const pageArgs = ({ first, after }: PageArgs) => ({ first: first ?? undefined, after: after ?? undefined });
 
 type AssigneeRefMember = { id: string; role: string; user: { id: string; name: string } };
+
+const pinCache = new WeakMap<object, Promise<string[]>>();
+const collabCache = new WeakMap<object, Promise<string[]>>();
 
 type ConversationParent = {
   id: string;
@@ -191,11 +216,11 @@ type ConversationParent = {
 
 export const resolvers = {
   Query: {
-    conversations: authed(async ({ labelId, assignee, status, search, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
+    conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
         (await listConversations(
           workspaceId,
-          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined },
+          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined, sort: sort ?? undefined, labelIds: labelIds ?? undefined, assigneeIds: assigneeIds ?? undefined, from: from ?? undefined, to: to ?? undefined },
           userId,
         )) as Page<ConversationParent>,
       ),
@@ -235,6 +260,12 @@ export const resolvers = {
     clearConversation: authed(({ id }: { id: string }, auth) => clearConversation(auth, id)),
     closeConversation: authed(({ id }: { id: string }, auth) => closeConversation(auth, id)),
     reopenConversation: authed(({ id }: { id: string }, auth) => reopenConversation(auth, id)),
+    snoozeConversation: authed(({ id, until }: { id: string; until: Date }, auth) => snoozeConversation(auth, id, until)),
+    pinConversation: authed(({ id }: { id: string }, auth) => pinConversation(auth, id)),
+    unpinConversation: authed(({ id }: { id: string }, auth) => unpinConversation(auth, id)),
+    markConversationUnread: authed(({ id }: { id: string }, auth) => markConversationUnread(auth, id)),
+    addCollaborators: authed(({ conversationId, userIds }: { conversationId: string; userIds: string[] }, auth) => addCollaborators(auth, conversationId, userIds)),
+    removeCollaborator: authed(({ conversationId, userId }: { conversationId: string; userId: string }, auth) => removeCollaborator(auth, conversationId, userId)),
     restoreMessage: authed(({ messageId, version }: { messageId: string; version: number }, auth) =>
       restoreMessage(auth, messageId, { version }),
     ),
@@ -254,6 +285,22 @@ export const resolvers = {
   },
   // Services already include these for list queries; fall back to a lookup otherwise
   Conversation: {
+    // Whether the viewer pinned it; their pins are read once per request, not once per chat
+    pinned: async (c: ConversationParent, _args: unknown, ctx: Context) => {
+      if (!ctx.auth) return false;
+      let ids = pinCache.get(ctx);
+      if (!ids) pinCache.set(ctx, (ids = pinnedIds(ctx.auth.userId, ctx.auth.workspaceId)));
+      return (await ids).includes(c.id);
+    },
+    collaborators: (c: ConversationParent, _args: unknown, ctx: Context) => (ctx.auth ? listCollaborators(ctx.auth.workspaceId, c.id) : []),
+    // The viewer's collaborations are read once per request, not once per chat
+    isCollaborator: async (c: ConversationParent, _args: unknown, ctx: Context) => {
+      if (!ctx.auth) return false;
+      const { userId } = ctx.auth;
+      let ids = collabCache.get(ctx);
+      if (!ids) collabCache.set(ctx, (ids = prisma.conversationCollaborator.findMany({ where: { userId }, select: { conversationId: true } }).then((r) => r.map((x) => x.conversationId))));
+      return (await ids).includes(c.id);
+    },
     contact: (c: ConversationParent) => c.contact ?? prisma.contact.findUnique({ where: { id: c.contactId } }),
     // Hidden for someone who cleared the chat after it was sent
     lastMessage: async (c: ConversationParent, _args: unknown, ctx: Context) => {

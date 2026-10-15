@@ -1,7 +1,3 @@
-// Pre-filled in the "Add a person" form so every new user starts with the same known password (they change it
-// themselves under My account). Override with NEXT_PUBLIC_DEFAULT_USER_PASSWORD; it must satisfy the rule below.
-export const DEFAULT_NEW_USER_PASSWORD = process.env.NEXT_PUBLIC_DEFAULT_USER_PASSWORD || 'Tyres@123';
-
 // Same rule as the server (services/auth.ts): 8-72 characters with at least one letter and one number.
 // Checked in the form first so the admin sees the problem before anything is sent; the server checks again.
 export function passwordProblem(password: string): string | null {

@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { APP_NAME } from '@/lib/brand';
 
 export function AuthShell({
   title,
@@ -88,7 +89,7 @@ export function AuthShell({
             <Link href="#" className="hover:text-body-soft transition-colors">Privacy</Link>
             <Link href="#" className="hover:text-body-soft transition-colors">Terms</Link>
           </div>
-          <div>© {new Date().getFullYear()} support-tyrescart</div>
+          <div>© {new Date().getFullYear()} {APP_NAME}</div>
         </div>
       </section>
 
