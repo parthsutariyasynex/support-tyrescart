@@ -38,7 +38,10 @@ describe('assignment reminder schedule', () => {
     assert.equal(isDue(base, at(5), ms), true);
     assert.equal(isDue({ ...base, reminderSentAt: at(5) }, at(9), ms), false);
     assert.equal(isDue({ ...base, reminderSentAt: at(5) }, at(10), ms), true);
-    assert.equal(pendingSince({ ...base, unread: 0 }), null); // read: nothing to remind
+    // unassigned stays pending once viewed (unread back to 0) — only claiming it resolves it, not looking at it
+    assert.equal(pendingSince({ ...base, unread: 0 })?.getTime(), t0.getTime());
+    // never messaged and never unread: nothing to claim, so nothing pending
+    assert.equal(pendingSince({ ...base, unread: 0, lastInboundAt: null }), null);
     // assigned, not opened: counts from the assignment
     const assigned = { ...base, unread: 0, assignedAt: at(20), assignedTo: { userId: 'u', active: true } };
     assert.equal(isDue({ ...assigned, reminderSentAt: at(10) }, at(24), ms), false); // an older reminder doesn't count

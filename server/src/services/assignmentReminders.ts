@@ -5,7 +5,9 @@ import { emitToUser } from '../realtime.js';
 // Reminders for chats waiting for attention, sent as assignment:reminder to each person (their own Socket.IO room):
 //   assigned   - the assignee hasn't opened it since it was assigned, or it has unread customer messages
 //                -> the assignee is reminded
-//   unassigned - a new chat with unread customer messages nobody has taken -> every active member is reminded
+//   unassigned - a chat a customer has messaged that nobody has claimed -> every active member is reminded,
+//                even after someone's opened it to look (only claiming it, closing it or the customer going
+//                quiet stops the reminders; opening it without claiming it does not)
 // A chat is due ASSIGNMENT_REMINDER_MINUTES (default 5) after it became pending (assignedAt / last customer message)
 // and again every ASSIGNMENT_REMINDER_MINUTES until it is resolved: opened/read, closed, snoozed, (re)assigned.
 // The last reminder time is stored on the chat (reminderSentAt) and claimed with a compare-and-set update, so a
@@ -41,7 +43,9 @@ export function pendingSince(c: Pick<Row, 'unread' | 'lastInboundAt' | 'createdA
     if (c.unread > 0) return c.lastInboundAt ?? c.updatedAt; // opened, but new customer messages since
     return null;
   }
-  return c.unread > 0 ? (c.lastInboundAt ?? c.createdAt) : null; // a new chat nobody has taken
+  // Unclaimed: pending since the customer's first message, regardless of unread (opening it to look isn't
+  // claiming it, so that alone must not silence the reminder). No message ever received: nothing to claim.
+  return c.lastInboundAt ?? (c.unread > 0 ? c.createdAt : null);
 }
 
 // Due now: pending for the threshold, and not reminded within the threshold (a reminder from an earlier episode,
@@ -59,7 +63,10 @@ export async function findChatsNeedingAttention(now = new Date(), ms = threshold
     where: {
       ...(workspaceId ? { workspaceId } : {}),
       status: 'open',
-      OR: [{ assignedToId: { not: null }, OR: [{ assigneeOpenedAt: null }, { unread: { gt: 0 } }] }, { assignedToId: null, unread: { gt: 0 } }],
+      OR: [
+        { assignedToId: { not: null }, OR: [{ assigneeOpenedAt: null }, { unread: { gt: 0 } }] },
+        { assignedToId: null, OR: [{ lastInboundAt: { not: null } }, { unread: { gt: 0 } }] },
+      ],
     },
     select: {
       id: true,
