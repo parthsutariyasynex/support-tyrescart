@@ -1468,6 +1468,26 @@ describe('WhatsApp integration: config, webhook, numbers, templates', () => {
     assert.ok(c.lastInboundAt && Date.now() - c.lastInboundAt.getTime() < 60_000);
   });
 
+  test('regression: one bad message in a batch does not drop the others (and does not wrongly close the 24-hour window)', async () => {
+    // waMessageId is a VARCHAR(191) unique column: an overlong id fails at the database, inside saveIncoming,
+    // simulating any real failure on one item (a DB hiccup, an unexpected shape) without needing to fake one.
+    const badId = `wamid.e2e-bad-${run}-` + 'x'.repeat(200);
+    const bad = { from: '919876500003', id: badId, timestamp: '1760000000', type: 'text', text: { body: 'first, and broken' } };
+    const goodId = `wamid.e2e-good-${run}`;
+    const good = { from: '919876500003', id: goodId, timestamp: '1760000001', type: 'text', text: { body: 'second, and fine' } };
+    const contacts = [{ profile: { name: 'Batch Customer' }, wa_id: '919876500003' }];
+
+    await hook({ contacts, messages: [bad, good] }); // bad is listed first, same batch as good
+    const saved = await eventually(() => prisma.message.findMany({ where: { waMessageId: goodId } }), (x) => x.length > 0);
+    assert.deepEqual([saved[0].direction, saved[0].body], ['in', 'second, and fine']);
+    assert.equal(await prisma.message.count({ where: { waMessageId: badId } }), 0); // the bad one never got stored, as expected
+
+    // The good message is this contact's only successfully-saved one, so it must still be the one that opens
+    // the window - a batch failure earlier in the array must not leave lastInboundAt stale/unset.
+    const c = await prisma.conversation.findUniqueOrThrow({ where: { id: saved[0].conversationId } });
+    assert.ok(c.lastInboundAt && Date.now() - c.lastInboundAt.getTime() < 60_000);
+  });
+
   test('numbers must be real international numbers: starting a chat without a country code is refused', async () => {
     const start = `mutation($i: StartConversationInput!) { startConversation(input: $i) { contact { waId } } }`;
     assert.equal(await errorCode(start, { i: { waId: '9016312927' } }, ws.token), 'BAD_USER_INPUT');

@@ -5,16 +5,20 @@ import { withSender } from './services/senders.js';
 
 type Incoming = { waId: string; name?: string; waMessageId?: string; type: string; body: string };
 
-function describe(msg: any): { type: string; body: string } {
+// Optional chaining throughout: Meta's webhook normally matches `msg.type` exactly, but a malformed or
+// unexpected payload (a Meta API quirk, a future message shape) must degrade to a placeholder like the
+// default case below, never throw - one bad message must never take the rest of the batch down with it
+// (see the per-message try/catch in the webhook route).
+export function describe(msg: any): { type: string; body: string } {
   switch (msg.type) {
     case 'text':
-      return { type: 'text', body: msg.text.body };
+      return { type: 'text', body: msg.text?.body ?? '[text]' };
     case 'button':
-      return { type: 'button', body: msg.button.text };
+      return { type: 'button', body: msg.button?.text ?? '[button]' };
     case 'interactive':
       return {
         type: 'interactive',
-        body: msg.interactive.button_reply?.title ?? msg.interactive.list_reply?.title ?? '',
+        body: msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? '[interactive]',
       };
     default:
       // image, audio, document, location... download media via Graph API later
