@@ -5,7 +5,20 @@ import type { NextConfig } from 'next';
 // API_PROXY_TARGET in client/.env.local, e.g. API_PROXY_TARGET=http://127.0.0.1:5001
 const API = (process.env.API_PROXY_TARGET || 'http://127.0.0.1:5000').replace(/\/$/, '');
 
+// File uploads from the chat pass through these rewrites to the API. Next.js copies a forwarded request's body only
+// up to experimental.proxyClientMaxBodySize (default 10 MB; a bigger upload is cut off and then times out) and waits
+// experimental.proxyTimeout for the API (default 30 s). Keep these in line with the API: documents up to 100 MB
+// (server: DOCUMENT_MAX_BYTES and the /documents route's express.raw limit; client: lib/media.ts). The API answers
+// only after the file is stored and sent on to WhatsApp, which can take minutes for a large file.
+const UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
 const nextConfig: NextConfig = {
+  experimental: {
+    // A little over the largest upload, so the API (not this proxy) decides what is too large and says so
+    proxyClientMaxBodySize: UPLOAD_MAX_BYTES + 1024 * 1024,
+    proxyTimeout: UPLOAD_TIMEOUT_MS,
+  },
   async rewrites() {
     return [
       {
@@ -33,6 +46,28 @@ const nextConfig: NextConfig = {
       {
         source: '/socket.io/:path*',
         destination: `${API}/socket.io/:path*`,
+      },
+      {
+        // Sending an image or document from the chat, and a message's stored copy. Only these API paths: the
+        // /inbox page itself is served by Next.
+        source: '/inbox/conversations/:id/images',
+        destination: `${API}/inbox/conversations/:id/images`,
+      },
+      {
+        source: '/inbox/conversations/:id/documents',
+        destination: `${API}/inbox/conversations/:id/documents`,
+      },
+      {
+        source: '/inbox/conversations/:id/voice',
+        destination: `${API}/inbox/conversations/:id/voice`,
+      },
+      {
+        source: '/inbox/messages/:id/media',
+        destination: `${API}/inbox/messages/:id/media`,
+      },
+      {
+        source: '/me/avatar',
+        destination: `${API}/me/avatar`,
       },
       {
         source: '/health',

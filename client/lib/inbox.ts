@@ -2,7 +2,7 @@ import { gql } from './api';
 import type { Assignee } from './assignees';
 import type { Label } from './labels';
 
-export type Contact = { id: string; waId: string; name: string | null };
+export type Contact = { id: string; waId: string; name: string | null; leadStage?: string | null };
 export type Message = {
   id: string;
   conversationId: string;
@@ -21,6 +21,11 @@ export type Message = {
   deletedAt: string | null;
   // Bumped on every edit/delete; newer versions win over late socket events
   version: number;
+  // Images sent from the app: image/jpeg or image/png (file at /inbox/messages/{id}/media); null otherwise
+  mediaMime?: string | null;
+  mediaSize?: number | null;
+  // Documents: the file name
+  mediaName?: string | null;
 };
 export type Conversation = {
   id: string;
@@ -50,8 +55,8 @@ export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endC
 
 export const PAGE_SIZE = 50;
 
-const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version';
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator`;
+const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName';
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
 // every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last

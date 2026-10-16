@@ -48,6 +48,15 @@ import { revalidateOnReturn } from '@/lib/revalidate';
 import { showsAssignCheckboxes } from '@/lib/roles';
 import { AppShell, OPEN_CHAT_EVENT } from '../AppShell';
 import { pinText, showToast } from '@/lib/toasts';
+import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, ContactPanel } from './ContactPanel';
+import { EmojiPicker, FileSendDialog } from './composerExtras';
+import { VoiceRecorder } from './voice';
+import { StageMenu, StagePill } from './StageMenu';
+import { sendVoice } from '@/lib/voice';
+import { insertAt } from '@/lib/emojis';
+import { ACCEPT, checkFile, filePreview, sendFile } from '@/lib/media';
+import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
+import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, stagesChanged } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { CollaboratorsButton } from './CollaboratorsButton';
@@ -101,20 +110,99 @@ const filterKey = (f: ConversationFilter) => JSON.stringify(f);
 type SortOrder = 'newest' | 'oldest';
 type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string; snoozedUntil?: string | null };
 
-// Module-level caches across client-side page transitions
-let cachedConversationsByPath: Record<string, Conversation[]> = {};
-let cachedLabels: Label[] = [];
-let cachedAssignees: Assignee[] = [];
-let cachedPermissions: Permissions | null = null;
+const SKEY_CONVOS = 'support:convos';
+const SKEY_ACTIVE = 'support:activeChat';
+const SKEY_LABELS = 'support:labels';
+const SKEY_ASSIGNEES = 'support:assignees';
+const SKEY_PERMS = 'support:permissions';
+const SKEY_UNREAD = 'support:unreadTotal';
+const SKEY_MSGS = 'support:messages';
+
+function loadSessionJson<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveSessionJson(key: string, val: unknown) {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(key, JSON.stringify(val));
+  } catch {}
+}
+
+// Ensure no stale filter keys from previous sessions remain in sessionStorage
+if (typeof window !== 'undefined') {
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const k = sessionStorage.key(i);
+      if (k && (k.startsWith('support:menuFilters') || k.startsWith('support:filterType') || k.startsWith('support:statusFilter') || k.startsWith('support:sortOrder'))) {
+        sessionStorage.removeItem(k);
+      }
+    }
+  } catch {}
+}
+
+function loadSessionMessages(): Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }> {
+  const map = new Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>();
+  if (typeof window === 'undefined') return map;
+  try {
+    const raw = sessionStorage.getItem(SKEY_MSGS);
+    if (raw) {
+      const parsed: Record<string, { messages: Message[]; activity: Activity[]; cursor: string | null }> = JSON.parse(raw);
+      for (const [k, v] of Object.entries(parsed)) {
+        map.set(k, v);
+      }
+    }
+  } catch {}
+  return map;
+}
+
+function saveSessionMessages(map: Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>) {
+  if (typeof window === 'undefined') return;
+  try {
+    const obj: Record<string, unknown> = {};
+    const entries = Array.from(map.entries()).slice(-10);
+    for (const [k, v] of entries) {
+      obj[k] = v;
+    }
+    sessionStorage.setItem(SKEY_MSGS, JSON.stringify(obj));
+  } catch {}
+}
+
+// Module-level caches across client-side page transitions and browser reloads
+let cachedConversationsByPath: Record<string, Conversation[]> = loadSessionJson(SKEY_CONVOS, {});
+let cachedLabels: Label[] = loadSessionJson(SKEY_LABELS, []);
+let cachedAssignees: Assignee[] = loadSessionJson(SKEY_ASSIGNEES, []);
+let cachedPermissions: Permissions | null = loadSessionJson(SKEY_PERMS, null);
 let cachedFeed: NotificationFeed | null = null;
-let cachedUnreadTotal = 0;
-let cachedActiveIdByPath: Record<string, string | null> = {};
-const messagesCache = new Map<string, { messages: Message[]; activity: Activity[]; cursor: string | null }>();
+let cachedUnreadTotal = loadSessionJson(SKEY_UNREAD, 0);
+// Contact profile side panel: stays open (or closed) as you move between chats
+// Remembered in this browser, so a refresh keeps it open (or closed). Read on first use: this page only renders after
+// the app shell has loaded, so it never affects the server-rendered HTML.
+const PROFILE_OPEN_KEY = 'support:profileOpen';
+let cachedProfileOpen: boolean | null = null;
+function readProfileOpen() {
+  if (cachedProfileOpen !== null) return cachedProfileOpen;
+  try {
+    cachedProfileOpen = localStorage.getItem(PROFILE_OPEN_KEY) === 'true';
+  } catch {
+    cachedProfileOpen = false;
+  }
+  return cachedProfileOpen;
+}
+let cachedActiveIdByPath: Record<string, string | null> = loadSessionJson(SKEY_ACTIVE, {});
+const messagesCache = loadSessionMessages();
 
 function patchAllCachedConversations(fn: (c: Conversation) => Conversation) {
   for (const path of Object.keys(cachedConversationsByPath)) {
     cachedConversationsByPath[path] = cachedConversationsByPath[path].map(fn);
   }
+  saveSessionJson(SKEY_CONVOS, cachedConversationsByPath);
 }
 
 function Inbox({ meName }: { meName: string }) {
@@ -143,11 +231,20 @@ function Inbox({ meName }: { meName: string }) {
   });
 
   const [activeId, setActiveId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const urlId = new URLSearchParams(window.location.search).get('chat');
+      if (urlId) {
+        cachedActiveIdByPath[pathname] = urlId;
+        saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
+        return urlId;
+      }
+    }
     return cachedActiveIdByPath[pathname] ?? null;
   });
 
   const [messages, setMessages] = useState<Message[]>(() => {
-    const initId = cachedActiveIdByPath[pathname];
+    const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
+    const initId = urlId ?? cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
       return messagesCache.get(initId)!.messages;
     }
@@ -155,7 +252,8 @@ function Inbox({ meName }: { meName: string }) {
   });
 
   const [messagesChatId, setMessagesChatId] = useState<string | null>(() => {
-    const initId = cachedActiveIdByPath[pathname];
+    const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
+    const initId = urlId ?? cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
       return initId;
     }
@@ -163,7 +261,8 @@ function Inbox({ meName }: { meName: string }) {
   });
 
   const [olderCursor, setOlderCursor] = useState<string | null>(() => {
-    const initId = cachedActiveIdByPath[pathname];
+    const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
+    const initId = urlId ?? cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
       return messagesCache.get(initId)!.cursor;
     }
@@ -179,17 +278,29 @@ function Inbox({ meName }: { meName: string }) {
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [labels, setLabels] = useState<Label[]>(cachedLabels);
   const [picker, setPicker] = useState<PickerTarget | null>(null);
-  // AppShell's header slot for the bell and the Assign box. Resolved after mount (see the effect below): during the
-  // first render of a page reached by in-app navigation the previous page's header is still in the DOM, so a slot
-  // looked up here would be the old, soon-removed one and the bell would vanish until a full refresh.
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  // AppShell's header slot for the bell and the Assign box. Resolved immediately if already in DOM, or via effect.
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(() => {
+    if (typeof document === 'undefined') return null;
+    return document.getElementById('app-header-actions');
+  });
   const [assignees, setAssignees] = useState<Assignee[]>(cachedAssignees);
   const [membersVersion, setMembersVersion] = useState(0);
   const [permissions, setPermissions] = useState<Permissions | null>(cachedPermissions);
   const permissionsRef = useRef(permissions);
   // Toasts (assignment, new chat, reminders) are shown app-wide by AppShell from the shared store in lib/toasts
+  const [profileOpen, setProfileOpenState] = useState(readProfileOpen);
+  const setProfileOpen = useCallback((open: boolean) => {
+    cachedProfileOpen = open;
+    try {
+      localStorage.setItem(PROFILE_OPEN_KEY, String(open));
+    } catch {
+      // private mode: just not remembered
+    }
+    setProfileOpenState(open);
+  }, []);
   const [activity, setActivity] = useState<Activity[]>(() => {
-    const initId = cachedActiveIdByPath[pathname];
+    const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
+    const initId = urlId ?? cachedActiveIdByPath[pathname];
     if (initId && messagesCache.has(initId)) {
       return messagesCache.get(initId)!.activity;
     }
@@ -222,6 +333,23 @@ function Inbox({ meName }: { meName: string }) {
   const [menuFilters, setMenuFilters] = useState<MenuFilters>(EMPTY_MENU_FILTERS);
   // "● Open ⌄": All / Open / Closed (server-side too, so paging follows it)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+
+  const onSortOrderChange = useCallback((s: SortOrder) => {
+    setSortOrder(s);
+  }, []);
+
+  const onMenuFiltersChange = useCallback((f: MenuFilters) => {
+    setMenuFilters(f);
+  }, []);
+
+  const onStatusFilterChange = useCallback((s: StatusFilter) => {
+    setStatusFilter(s);
+  }, []);
+
+  const onFilterTypeChange = useCallback((f: string) => {
+    setFilterType(f);
+  }, []);
+
   const menuFilterKey = JSON.stringify(menuFilters);
   const currentFilter = (): ConversationFilter => ({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null, sort: sortOrder, status: statusFilter === 'all' ? null : statusFilter, ...toServerFilter(menuFilters) });
   const filterRef = useRef<ConversationFilter>(currentFilter());
@@ -235,6 +363,7 @@ function Inbox({ meName }: { meName: string }) {
     setConversations((prev) => {
       const next = typeof action === 'function' ? action(prev) : action;
       cachedConversationsByPath[pathname] = next;
+      saveSessionJson(SKEY_CONVOS, cachedConversationsByPath);
       return next;
     });
   }, [pathname]);
@@ -304,6 +433,7 @@ function Inbox({ meName }: { meName: string }) {
     fetchLabels()
       .then((l) => {
         cachedLabels = l;
+        saveSessionJson(SKEY_LABELS, l);
         setLabels(l);
       })
       .catch(() => {});
@@ -356,6 +486,7 @@ function Inbox({ meName }: { meName: string }) {
         if (seq !== assigneesSeqRef.current) return;
         assigneesLoadedRef.current = true;
         cachedAssignees = list;
+        saveSessionJson(SKEY_ASSIGNEES, list);
         setAssignees(list);
       })
       .catch(() => {});
@@ -439,6 +570,7 @@ function Inbox({ meName }: { meName: string }) {
   const onCleared = useCallback(
     (conversationId: string) => {
       messagesCache.delete(conversationId);
+      saveSessionMessages(messagesCache);
       if (conversationId === activeIdRef.current) {
         setMessages([]);
         setActivity([]);
@@ -454,8 +586,16 @@ function Inbox({ meName }: { meName: string }) {
   const selectConversation = useCallback(
     (id: string) => {
       cachedActiveIdByPath[pathname] = id;
+      saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
       setActiveId(id);
       setReopenError(null);
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get('chat') !== id) {
+          url.searchParams.set('chat', id);
+          window.history.replaceState(null, '', url.toString());
+        }
+      }
       const c = conversations.find((x) => x.id === id);
       if (c?.status !== 'closed') return;
       setConversationStatus(id, 'open')
@@ -504,10 +644,26 @@ function Inbox({ meName }: { meName: string }) {
     return () => observer.disconnect();
   }, [pathname]);
 
+  // Synchronize state when switching tabs (/inbox, /my-chats, /leads, /collaborations)
+  useEffect(() => {
+    const cachedConvos = cachedConversationsByPath[pathname];
+    if (cachedConvos && cachedConvos.length > 0) {
+      setConversations(cachedConvos);
+    }
+    const targetActiveId = (typeof window !== 'undefined' ? new URL(window.location.href).searchParams.get('chat') : null) ?? cachedActiveIdByPath[pathname] ?? null;
+    setActiveId(targetActiveId);
+    setSortOrder('newest');
+    setMenuFilters(EMPTY_MENU_FILTERS);
+    setStatusFilter('all');
+    setFilterType('all');
+    setSearchQuery('');
+  }, [pathname]);
+
   useEffect(() => {
     fetchPermissions()
       .then((p) => {
         cachedPermissions = p;
+        saveSessionJson(SKEY_PERMS, p);
         setPermissions(p);
       })
       .catch(() => {});
@@ -525,6 +681,7 @@ function Inbox({ meName }: { meName: string }) {
     fetchUnreadTotal()
       .then((t) => {
         cachedUnreadTotal = t;
+        saveSessionJson(SKEY_UNREAD, t);
         setUnreadTotal(t);
       })
       .catch(() => {});
@@ -546,6 +703,14 @@ function Inbox({ meName }: { meName: string }) {
   const openConversation = useCallback(
     (id: string) => {
       cachedActiveIdByPath[pathname] = id;
+      saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get('chat') !== id) {
+          url.searchParams.set('chat', id);
+          window.history.replaceState(null, '', url.toString());
+        }
+      }
       if (!conversationsRef.current.some((c) => c.id === id))
         fetchConversation(id)
           .then((c) => {
@@ -568,11 +733,14 @@ function Inbox({ meName }: { meName: string }) {
     return () => window.removeEventListener(OPEN_CHAT_EVENT, onOpen);
   }, [openConversation]);
 
-  // Opened with ?chat=<id> (e.g. after "Assign to Me" moves a lead to My Chats): open that chat
+  // Opened with ?chat=<id> (e.g. after "Assign to Me" moves a lead to My Chats): open that chat; with &profile=1
+  // (the profile panel's "Open in a new tab") also open its contact profile
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get('chat');
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('chat');
+    if (id && params.get('profile') === '1') setProfileOpen(true);
     if (id) openConversation(id);
-  }, [pathname, openConversation]);
+  }, [pathname, openConversation, setProfileOpen]);
 
   // "Assign to Me" on a New Lead. Only works while it's still unassigned (the server makes sure exactly one person
   // gets it); then it's yours and opens in My Chats. Nobody's role changes.
@@ -704,6 +872,30 @@ function Inbox({ meName }: { meName: string }) {
     socket.on('assignment:you', ({ conversationId }: { conversationId: string }) => {
       if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
     });
+    // Contact profile edited or remarks changed (by anyone): the open profile panel follows
+    socket.on('contact:updated', (c: { id: string; leadStage?: string | null }) => {
+      window.dispatchEvent(new CustomEvent(CONTACT_UPDATED_EVENT, { detail: c }));
+      // The chat header's stage follows (it reads the stage from the chat list)
+      patchConversations((x) => (x.contact.id === c.id ? { ...x, contact: { ...x.contact, leadStage: c.leadStage ?? null } } : x));
+    });
+    socket.on('contact:properties', () => window.dispatchEvent(new Event(CUSTOM_PROPERTIES_EVENT)));
+    // A contact was deleted (admins): their chat leaves the list at once; restored: it comes back
+    socket.on('contact:deleted', ({ conversationId }: { conversationId: string | null }) => {
+      if (!conversationId) return;
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeIdRef.current === conversationId) setActiveId(null);
+    });
+    socket.on('contact:restored', () => loadConversations());
+    // Stages edited in Settings → Customer lifecycle; a deleted stage moved its contacts (chat list pills follow)
+    socket.on('leadStages:changed', (d: StagesChanged) => {
+      stagesChanged(d ?? {});
+      const moved = d?.moved;
+      if (moved) patchConversations((x) => (x.contact.leadStage === moved.from ? { ...x, contact: { ...x.contact, leadStage: moved.to } } : x));
+    });
+    socket.on('contact:remarks', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(CONTACT_REMARKS_EVENT, { detail: e })));
+    socket.on('contact:lists', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LISTS_EVENT, { detail: e })));
+    socket.on('contactList:saved', (l: { id: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LIST_SAVED_EVENT, { detail: l })));
+    socket.on('contactList:deleted', (l: { id: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LIST_DELETED_EVENT, { detail: l })));
     // Pinned/unpinned in another of your tabs; "Mark as unread" by anyone
     socket.on('conversation:pinned', ({ conversationId, pinned }: { conversationId: string; pinned: boolean }) =>
       patchConversations((c) => (c.id === conversationId ? { ...c, pinned } : c)),
@@ -790,6 +982,7 @@ function Inbox({ meName }: { meName: string }) {
           activity: activityItems,
           cursor,
         });
+        saveSessionMessages(messagesCache);
         setMessages(page.nodes);
         setActivity(activityItems);
         setOlderCursor(cursor);
@@ -813,6 +1006,7 @@ function Inbox({ meName }: { meName: string }) {
         if (c) {
           c.messages = next;
           c.cursor = cursor;
+          saveSessionMessages(messagesCache);
         }
         return next;
       });
@@ -863,17 +1057,17 @@ function Inbox({ meName }: { meName: string }) {
     : undefined;
 
   return (
-    <div className="flex h-full w-full overflow-hidden">
+    <div suppressHydrationWarning className="flex h-full w-full overflow-hidden">
       {/* Left Conversations List Panel */}
       <ConversationList
         conversations={filteredConversations}
         sortOrder={sortOrder}
-        onSortChange={setSortOrder}
+        onSortChange={onSortOrderChange}
         statusFilter={statusFilter}
-        onStatusFilterChange={setStatusFilter}
+        onStatusFilterChange={onStatusFilterChange}
         statusCounts={statusCounts}
         menuFilters={menuFilters}
-        onMenuFiltersChange={setMenuFilters}
+        onMenuFiltersChange={onMenuFiltersChange}
         totalCount={conversations.length}
         meId={permissions?.userId ?? null}
         unassignedCount={unassignedCount}
@@ -885,7 +1079,7 @@ function Inbox({ meName }: { meName: string }) {
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         filterType={filterType}
-        onFilterChange={setFilterType}
+        onFilterChange={onFilterTypeChange}
         labels={labels}
         assignees={assignees}
         myAssignee={myAssignee}
@@ -912,7 +1106,10 @@ function Inbox({ meName }: { meName: string }) {
               const next = p.some((x) => x.id === m.id) ? p : [...p, m];
               if (activeIdRef.current) {
                 const c = messagesCache.get(activeIdRef.current);
-                if (c) c.messages = next;
+                if (c) {
+                  c.messages = next;
+                  saveSessionMessages(messagesCache);
+                }
               }
               return next;
             });
@@ -928,6 +1125,14 @@ function Inbox({ meName }: { meName: string }) {
           }}
           onClosed={() => {
             cachedActiveIdByPath[pathname] = null;
+            saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
+            if (typeof window !== 'undefined') {
+              const url = new URL(window.location.href);
+              if (url.searchParams.has('chat')) {
+                url.searchParams.delete('chat');
+                window.history.replaceState(null, '', url.toString());
+              }
+            }
             setActiveId(null);
           }}
           onCleared={() => onCleared(active.id)}
@@ -938,9 +1143,21 @@ function Inbox({ meName }: { meName: string }) {
           activity={messagesChatId === active.id ? activity : []}
           meId={permissions?.userId ?? null}
           onTyping={(isTyping) => sendTyping(active.id, isTyping)}
+          profileOpen={profileOpen}
+          onToggleProfile={() => setProfileOpen(!profileOpen)}
         />
       ) : (
         <EmptyChatState />
+      )}
+      {active && profileOpen && (
+        <ContactPanel
+          conversation={active}
+          viewer={permissions && { userId: permissions.userId, isAdmin: ['owner', 'admin'].includes(permissions.role) }}
+          labels={labels}
+          onConversationLabels={onConversationLabels}
+          onOpenLabels={(anchor) => openPicker(active.id, anchor)}
+          onClose={() => setProfileOpen(false)}
+        />
       )}
 
       {headerSlot &&
@@ -1065,6 +1282,31 @@ function ConversationList({
   loading: boolean;
   typing: TypingState;
 }) {
+  const listContainerRef = useRef<HTMLDivElement>(null);
+  const scrollKey = `support:scroll:list:${mine ? 'mine' : leads ? 'leads' : collab ? 'collab' : 'inbox'}`;
+  const restoredScrollRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const el = listContainerRef.current;
+    if (!el) return;
+    if (restoredScrollRef.current === scrollKey) return;
+    if (conversations.length === 0) return;
+    const saved = sessionStorage.getItem(scrollKey);
+    if (saved !== null) {
+      el.scrollTop = Number(saved);
+      restoredScrollRef.current = scrollKey;
+    }
+  }, [scrollKey, conversations.length]);
+
+  const onListScroll = useCallback(() => {
+    const el = listContainerRef.current;
+    if (el) {
+      try {
+        sessionStorage.setItem(scrollKey, String(el.scrollTop));
+      } catch {}
+    }
+  }, [scrollKey]);
+
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const presence = usePresence(); // online / away / offline dots next to assignees
@@ -1090,9 +1332,9 @@ function ConversationList({
   }
 
   return (
-    <section className="flex w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
+    <section className="relative z-30 flex h-full min-h-0 w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
       {/* Top Header Metrics + Refresh Button */}
-      <div className="flex items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
+      <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
         <StatusMenu value={statusFilter} onChange={onStatusFilterChange} counts={statusCounts} />
         <div className="flex items-center gap-0.5">
             {/* Sort: Newest ⇄ Oldest (by last activity) */}
@@ -1132,24 +1374,12 @@ function ConversationList({
               </svg>
             </button>
             <FilterMenu value={menuFilters} onChange={onMenuFiltersChange} labels={labels} assignees={assignees} />
-        {/* <button
-          onClick={onRefresh}
-          title="Refresh conversations"
-          className={`flex h-6 w-6 items-center justify-center rounded-md text-faint hover:bg-surface-strong hover:text-body transition ${loading ? 'animate-spin text-primary' : ''}`}
-        >
-          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-            <path d="M16 21h5v-5" />
-          </svg>
-        </button> */}
         </div>
       </div>
 
       {/* Search Input (opened from the 🔍 icon above) */}
       {(searchOpen || searchQuery) && (
-      <div className="px-3 py-1">
+      <div className="shrink-0 px-3 py-1">
         <div className="relative">
           <input
             ref={searchInputRef}
@@ -1181,51 +1411,8 @@ function ConversationList({
       </div>
       )}
 
-      {/* Filter Dropdown */}
-      <div className="flex items-center gap-1.5 px-3 py-1.5">
-        {/* <div className="relative min-w-0 flex-1">
-          <select
-            value={filterType}
-            onChange={(e) => onFilterChange(e.target.value)}
-            className="w-full appearance-none rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-body outline-hidden hover:border-line-strong focus:border-primary cursor-pointer"
-          >
-            <option value="all">All</option>
-            <option value="unread">Unread</option>
-            <option value="unreplied">Unreplied</option> */}
-            {/* Chats nobody holds yet (New Leads shows only these; My Chats is already "assigned to me") */}
-            {/* {!mine && !leads && !collab && <option value="assigned:unassigned">Unassigned{unassignedCount === null ? '' : ` (${unassignedCount})`}</option>} */}
-            {/* Only your own chats here; no per-person entries (My Chats is already "assigned to me") */}
-            {/* {!mine && !leads && !collab && myAssignee && (
-              <optgroup label="Assigned">
-                <option value="assigned:me">Assigned to me ({myAssignee.conversationCount})</option>
-              </optgroup>
-            )} */}
-            {/* {labels.length > 0 && (
-              <optgroup label="Labels">
-                {labels.map((l) => (
-                  <option key={l.id} value={`label:${l.id}`}>
-                    {l.name} ({l.conversationCount})
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select> */}
-          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-faint">
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </div>
-        </div>
-        {/* <button
-          onClick={(e) => onOpenLabels(null, e.currentTarget)}
-          title="Manage labels"
-          className={`flex h-7.5 w-7.5 shrink-0 items-center justify-center rounded-lg border border-line text-faint hover:border-line-strong hover:text-body transition ${pickerConversationId === null ? 'border-primary text-primary' : ''}`}
-        >
-          <TagIcon />
-        </button> */}
-      {/* </div> */}
-      {/* Quick filters: All · Unread · Unreplied (same filter as the dropdown above) */}
-      <div className="flex items-center gap-1.5 border-b border-line-soft px-3 pb-2 pt-0.5">
+      {/* Quick filters: All · Unread · Unreplied (sticky at the top of the chat list) */}
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-3 pb-2 pt-0.5">
         {(
           [
             ['all', 'All'],
@@ -1252,7 +1439,7 @@ function ConversationList({
 
 
       {/* Conversation List / Empty State */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={listContainerRef} onScroll={onListScroll} className="flex-1 min-h-0 overflow-y-auto" style={{ scrollbarGutter: 'stable' }}>
         {conversations.length === 0 && conversationsError ? (
           <div className="flex flex-col items-start gap-2.5 p-5 text-xs leading-relaxed text-muted">
             <p className="text-danger">{conversationsError}</p>
@@ -1350,11 +1537,12 @@ function ConversationList({
                         <p className="mt-0.5 truncate text-[11px] font-medium text-accent">typing…</p>
                       ) : (
                         <p className={`mt-0.5 truncate text-[11px] ${attention ? 'font-semibold text-ink' : 'text-muted'}`}>
-                          {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage?.body || 'No messages yet'}
+                          {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage ? (filePreview(c.lastMessage) ?? (c.lastMessage.body || 'No messages yet')) : 'No messages yet'}
                         </p>
                       )}
-                      {(c.labels.length > 0 || c.assignee) && (
+                      {(c.labels.length > 0 || c.assignee || c.contact.leadStage) && (
                         <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                          <StagePill value={c.contact.leadStage} />
                           {c.assignee && (
                             <span
                               title={`Assigned to ${c.assignee.name}`}
@@ -1403,7 +1591,7 @@ function ConversationList({
 // Right Area Empty State with WhatsApp Wallpaper Pattern
 function EmptyChatState() {
   return (
-    <section className="relative flex-1 bg-chat-bg overflow-hidden">
+    <section className="relative z-10 flex h-full min-w-0 flex-1 overflow-hidden bg-chat-bg">
       {/* WhatsApp Doodle Ambient Texture */}
       <div
         className="pointer-events-none absolute inset-0 bg-chat-doodle opacity-[0.06]"
@@ -1433,6 +1621,8 @@ function ChatPanel({
   onTyping,
   activity,
   meId,
+  profileOpen,
+  onToggleProfile,
 }: {
   conversation: Conversation;
   messages: Message[];
@@ -1460,9 +1650,21 @@ function ChatPanel({
   // This chat's history (closed, assigned, labelled, edited…), shown between the messages
   activity: Activity[];
   meId: string | null;
+  // Contact profile side panel (the (i) button)
+  profileOpen: boolean;
+  onToggleProfile: () => void;
 }) {
   const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
+  // Emoji picker and image sending
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [imageFile, setImageFile] = useState<File | null>(null); // the image or document about to be sent
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
+  // Voice note: the recorder replaces the message box while recording / previewing
+  const [voiceMode, setVoiceMode] = useState(false);
+  useEffect(() => setVoiceMode(false), [conversation.id]);
   const [error, setError] = useState('');
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -1575,6 +1777,41 @@ function ChatPanel({
     }
   }
 
+  // Emoji goes in at the cursor (or replaces the selection); the picker stays open for more
+  function insertEmoji(emoji: string) {
+    const el = inputRef.current;
+    const next = insertAt(text, emoji, el?.selectionStart ?? text.length, el?.selectionEnd ?? text.length);
+    setText(next.text);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(next.cursor, next.cursor);
+    });
+  }
+
+  async function sendImageWithCaption(caption: string) {
+    if (!imageFile) return;
+    const m = await sendFile(conversation.id, imageFile, caption);
+    onSent(m);
+    setImageFile(null);
+  }
+
+  async function sendVoiceNote(recording: Blob) {
+    const m = await sendVoice(conversation.id, recording);
+    onSent(m);
+    setVoiceMode(false);
+  }
+
+  // A chosen or dropped file: checked first (type, size), then the preview window
+  function pickFile(f: File | undefined, many = false) {
+    if (!f) return;
+    const r = checkFile(f);
+    if ('problem' in r) return setError(r.problem);
+    setError(many ? 'One file at a time: sending the first one.' : '');
+    setImageFile(f);
+  }
+  // Files can be sent (and dropped) only where the message box is: an open chat you may reply in
+  const canAttach = !isClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+
   async function changeStatus(status: ConversationStatus, until?: Date) {
     setStatusBusy(true);
     setError('');
@@ -1681,12 +1918,77 @@ function ChatPanel({
       .map((a) => ({ kind: 'activity' as const, at: a.createdAt, id: a.id, a })),
   ].sort((x, y) => x.at.localeCompare(y.at));
 
-  // Scroll only when something newer arrives or conversation changes, not when older messages are prepended
+  // Scroll only when something newer arrives or conversation changes, restoring saved scroll on refresh
   const lastId = stream.at(-1)?.id;
+  const chatScrollKey = `support:scroll:chat:${conversation.id}`;
+  const prevScrollHeightRef = useRef<number | null>(null);
+  const prevConvIdRef = useRef<string>(conversation.id);
+  const prevLastIdRef = useRef<string | undefined>(lastId);
+
+  const onChatScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    try {
+      sessionStorage.setItem(chatScrollKey, String(e.currentTarget.scrollTop));
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     const el = messagesContainerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [conversation.id, lastId]);
+    if (!el) return;
+
+    // 1. Switched to a different conversation
+    if (prevConvIdRef.current !== conversation.id) {
+      prevConvIdRef.current = conversation.id;
+      prevLastIdRef.current = lastId;
+      try {
+        const saved = sessionStorage.getItem(chatScrollKey);
+        if (saved !== null) {
+          el.scrollTop = Number(saved);
+          return;
+        }
+      } catch {}
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    // 2. Older messages were loaded (anchoring scroll)
+    if (prevScrollHeightRef.current !== null) {
+      const diff = el.scrollHeight - prevScrollHeightRef.current;
+      el.scrollTop += diff;
+      prevScrollHeightRef.current = null;
+      return;
+    }
+
+    // 3. New message arrived at bottom
+    if (prevLastIdRef.current !== lastId) {
+      prevLastIdRef.current = lastId;
+      const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+      if (isNearBottom) {
+        el.scrollTop = el.scrollHeight;
+        try {
+          sessionStorage.setItem(chatScrollKey, String(el.scrollTop));
+        } catch {}
+      }
+      return;
+    }
+
+    // 4. Initial mount / refresh: restore scroll if saved
+    try {
+      const saved = sessionStorage.getItem(chatScrollKey);
+      if (saved !== null) {
+        el.scrollTop = Number(saved);
+        return;
+      }
+    } catch {}
+    el.scrollTop = el.scrollHeight;
+  }, [conversation.id, lastId, chatScrollKey]);
+
+  const handleLoadOlder = () => {
+    const el = messagesContainerRef.current;
+    if (el) prevScrollHeightRef.current = el.scrollHeight;
+    onLoadOlder?.();
+  };
 
   async function send(body: string) {
     setError('');
@@ -1701,7 +2003,44 @@ function ChatPanel({
   const contactName = contactDisplayName(conversation.contact);
 
   return (
-    <section className="relative flex min-w-0 flex-1 flex-col bg-chat-bg">
+    <section
+      className="relative z-10 flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-chat-bg"
+      // Drag a photo or document onto the chat to send it (same checks and preview as the paperclip)
+      onDragEnter={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = canAttach ? 'copy' : 'none';
+      }}
+      onDragLeave={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (!dragDepth.current) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        dragDepth.current = 0;
+        setDragging(false);
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        const files = e.dataTransfer.files;
+        pickFile(files[0], files.length > 1);
+      }}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-3 z-40 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-surface/85 text-center">
+          <svg className="h-9 w-9 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+          </svg>
+          <p className="mt-2 text-sm font-semibold text-ink">{canAttach ? 'Drop to send' : "Files can't be sent in this chat"}</p>
+          <p className="mt-0.5 text-xs text-muted">{canAttach ? 'JPEG or PNG images up to 5 MB · PDF, Word, Excel, PowerPoint or text up to 100 MB' : isClosed ? 'Reopen the chat first.' : 'Assign it to yourself first.'}</p>
+        </div>
+      )}
       {/* Ambient Doodle Pattern */}
       <div
         className="pointer-events-none absolute inset-0 bg-chat-doodle opacity-[0.05]"
@@ -1710,6 +2049,15 @@ function ChatPanel({
       {/* Chat Top Header (above the message stream so its ⋮ menu opens on top of the messages) */}
       <header className="relative z-20 flex h-14 shrink-0 items-center justify-between border-b border-line/90 bg-surface px-5 shadow-2xs">
         <div className="flex min-w-0 items-center gap-3">
+          {/* Lead stage: one click to change it (saved to the customer's profile) */}
+          <StageMenu
+            contactId={conversation.contact.id}
+            value={conversation.contact.leadStage}
+            conversationId={conversation.id}
+            contactName={contactName}
+            onSaved={(c) => window.dispatchEvent(new CustomEvent(CONTACT_UPDATED_EVENT, { detail: c }))}
+          />
+          <span className="h-6 w-px shrink-0 bg-line" aria-hidden="true" />
           <ContactAvatar contact={conversation.contact} size="h-9 w-9 text-xs" />
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
@@ -1776,6 +2124,19 @@ function ChatPanel({
             <TagIcon className="h-3 w-3" />
             <span>{conversation.labels.length > 0 ? `Labels (${conversation.labels.length})` : 'Label'}</span>
           </button>
+          <button
+            type="button"
+            title={profileOpen ? 'Hide contact profile' : 'Contact profile'}
+            aria-label="Contact profile"
+            aria-pressed={profileOpen}
+            onClick={onToggleProfile}
+            className={`flex h-7 w-7 items-center justify-center rounded-full border transition ${profileOpen ? 'border-primary text-primary' : 'border-line text-body-soft hover:bg-surface-strong hover:text-body'}`}
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 16v-4M12 8h.01" />
+            </svg>
+          </button>
           {!isClosed && (
             <ChatOptionsMenu
               disabled={statusBusy}
@@ -1818,7 +2179,7 @@ function ChatPanel({
       </header>
 
       {searchOpen && (
-        <div className="relative z-10 flex items-center gap-2 border-b border-line/90 bg-surface px-4 py-1.5 text-xs">
+        <div className="relative z-10 flex shrink-0 items-center gap-2 border-b border-line/90 bg-surface px-4 py-1.5 text-xs">
           <svg className="h-3.5 w-3.5 shrink-0 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="11" cy="11" r="8" />
             <path d="m21 21-4.3-4.3" />
@@ -1869,11 +2230,16 @@ function ChatPanel({
       )}
 
       {/* Messages Stream (the ref scrolls it to the newest message) */}
-      <div ref={messagesContainerRef} className="relative z-10 flex-1 space-y-2.5 overflow-y-auto px-6 py-4">
+      <div
+        ref={messagesContainerRef}
+        onScroll={onChatScroll}
+        style={{ scrollbarGutter: 'stable' }}
+        className="relative z-10 flex-1 min-h-0 space-y-2.5 overflow-y-auto px-6 py-4"
+      >
         {onLoadOlder && (
           <div className="flex justify-center">
             <button
-              onClick={onLoadOlder}
+              onClick={handleLoadOlder}
               className="rounded-full bg-surface/90 px-3 py-1 text-[11px] font-medium text-body-soft shadow-xs hover:bg-surface transition"
             >
               Load earlier messages
@@ -1881,7 +2247,7 @@ function ChatPanel({
           </div>
         )}
         {stream.map((item, i) => {
-          // WhatsApp-style day separator (Today / Yesterday / date, in Dubai time) where the day changes
+          // WhatsApp-style day separator (Today / Yesterday / date, in the app time zone) where the day changes
           const day = dayKey(item.at);
           const separator = (i === 0 || dayKey(stream[i - 1].at) !== day) && (
             <div className="flex justify-center py-1">
@@ -1920,7 +2286,7 @@ function ChatPanel({
       </div>
 
       {/* Bottom Message Composer */}
-      <footer className="relative z-10 border-t border-line/90 bg-surface p-3">
+      <footer className="relative z-10 shrink-0 border-t border-line/90 bg-surface p-3">
         {error && (
           <div className="mb-2 rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</div>
         )}
@@ -1982,6 +2348,9 @@ function ChatPanel({
             {claimError && <p className="rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger">{claimError}</p>}
           </div>
         ) : (
+        voiceMode ? (
+          <VoiceRecorder onSend={sendVoiceNote} onClose={() => setVoiceMode(false)} />
+        ) : (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1993,11 +2362,17 @@ function ChatPanel({
           }}
           className="flex items-center gap-2"
         >
-          {/* Emoji Button */}
+          {/* Emoji: opens the picker above the message box; picks go in at the cursor */}
+          <div className="relative">
+          {emojiOpen && <EmojiPicker onPick={insertEmoji} onClose={() => setEmojiOpen(false)} />}
           <button
             type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-faint hover:bg-surface-strong hover:text-body-soft transition"
+            data-emoji-toggle
+            aria-expanded={emojiOpen}
+            onClick={() => setEmojiOpen((o) => !o)}
+            className={`flex h-9 w-9 items-center justify-center rounded-xl transition hover:bg-surface-strong ${emojiOpen ? 'text-primary' : 'text-faint hover:text-body-soft'}`}
             title="Add emoji"
+            aria-label="Add emoji"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
@@ -2006,12 +2381,28 @@ function ChatPanel({
               <line x1="15" y1="9" x2="15.01" y2="9" />
             </svg>
           </button>
+          </div>
 
-          {/* Attachment Paperclip Button */}
+          {/* Attach an image (JPEG/PNG up to 5 MB): preview + caption, then send */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPT}
+            className="hidden"
+            aria-label="Choose a file"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = ''; // the same file can be chosen again
+              pickFile(f);
+            }}
+          />
           <button
             type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-faint hover:bg-surface-strong hover:text-body-soft transition"
-            title="Attach media"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!!editing}
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-faint hover:bg-surface-strong hover:text-body-soft transition disabled:opacity-40"
+            title="Send an image or document (or drag a file onto the chat)"
+            aria-label="Send an image or document"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
@@ -2060,7 +2451,25 @@ function ChatPanel({
             className="flex-1 resize-none rounded-xl border border-line bg-surface-muted/70 px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
           />
 
-          {/* Send Button */}
+          {/* Empty message box: microphone to record a voice note (like WhatsApp); otherwise Send */}
+          {!text.trim() && !editing ? (
+            <button
+              type="button"
+              onClick={() => {
+                setError('');
+                setEmojiOpen(false);
+                setVoiceMode(true);
+              }}
+              title="Record a voice message"
+              aria-label="Record a voice message"
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-on-primary shadow-xs transition hover:bg-primary-hover"
+            >
+              <svg className="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="3" width="6" height="11" rx="3" />
+                <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+              </svg>
+            </button>
+          ) : (
           <button
             type="submit"
             disabled={!text.trim() || busy}
@@ -2071,8 +2480,10 @@ function ChatPanel({
               <path d="m3.4 20.4 17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
             </svg>
           </button>
+          )}
         </form>
-        )}
+        ))}
+        {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
       </footer>
 
       {menu && (

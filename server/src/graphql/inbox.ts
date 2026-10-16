@@ -55,6 +55,11 @@ export const typeDefs = /* GraphQL */ `
     deletedAt: DateTime
     "Increases on every edit/delete; pass it back to editMessage so concurrent edits are detected"
     version: Int!
+    "Images and documents sent from the app: their type, e.g. image/png or application/pdf (the file: GET /inbox/messages/{id}/media). Null otherwise."
+    mediaMime: String
+    mediaSize: Int
+    "Documents: the file name"
+    mediaName: String
   }
 
   input EditMessageInput {
@@ -149,6 +154,17 @@ export const typeDefs = /* GraphQL */ `
     waId: String
     name: String
     body: String
+    "Dev/test: a file the customer sends (stored straight away)"
+    media: SimulateMediaInput
+  }
+
+  input SimulateMediaInput {
+    "image | video | audio | voice | document | sticker"
+    type: String!
+    mime: String!
+    base64: String!
+    filename: String
+    caption: String
   }
 
   extend type Query {

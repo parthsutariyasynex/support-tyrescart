@@ -79,6 +79,12 @@
   background-position: 0 0, 20px 20px;
 }
 
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   @apply bg-canvas text-ink antialiased selection:bg-primary-soft selection:text-primary;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
@@ -120,4 +126,22 @@ body {
   [aria-disabled='true'] {
     cursor: not-allowed;
   }
+}
+
+/* Voice message progress bar (app/inbox/voice.tsx): a small round handle in the brand colour */
+.voice-progress::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: var(--color-primary);
+  border: none;
+}
+.voice-progress::-moz-range-thumb {
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: var(--color-primary);
+  border: none;
 }

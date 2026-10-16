@@ -1,4 +1,5 @@
 import type { Server, Socket } from 'socket.io';
+import { cachedSettingsOf } from './services/workspaceSettings.js';
 import { env } from './env.js';
 
 // Live presence per workspace member, from the Socket.IO connections themselves (no database state):
@@ -20,7 +21,6 @@ const MAX_ACTIVITY_PER_MIN = 60;
 const byWorkspace = new Map<string, Map<string, Person>>();
 let io: Server | null = null;
 
-const awayAfterMs = () => Math.max(1, env.presenceAwayMinutes) * 60_000;
 
 function people(workspaceId: string) {
   let m = byWorkspace.get(workspaceId);
@@ -45,14 +45,17 @@ export function listPresence(workspaceId: string): PresenceEntry[] {
 }
 
 // Marks everyone idle for longer than `idleMs` (default: the configured away time) as away
-export function sweepPresence(now = Date.now(), idleMs = awayAfterMs()) {
+export function sweepPresence(now = Date.now(), idleMs?: number) {
   let changed = 0;
-  for (const [workspaceId, m] of byWorkspace)
+  for (const [workspaceId, m] of byWorkspace) {
+    // The workspace's own away time (Settings → Workspace preferences), unless a test passes one
+    const limit = idleMs ?? Math.max(1, cachedSettingsOf(workspaceId).awayMinutes) * 60_000;
     for (const [userId, p] of m)
-      if (p.status === 'online' && now - p.lastActiveAt >= idleMs) {
+      if (p.status === 'online' && now - p.lastActiveAt >= limit) {
         setStatus(workspaceId, userId, p, 'away');
         changed++;
       }
+  }
   return changed;
 }
 

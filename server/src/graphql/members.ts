@@ -7,6 +7,8 @@ import {
   removeMember,
   setMemberActive,
   updateMember,
+  updateMyName,
+  updateMyProfile,
   updateMemberRole,
 } from '../services/members.js';
 import { withMe } from './auth.js';
@@ -70,6 +72,16 @@ export const typeDefs = /* GraphQL */ `
     joinLinkInfo(token: String!): JoinLinkInfo!
   }
 
+  input MyProfileInput {
+    name: String
+    phone: String
+    jobTitle: String
+    "IANA time zone, e.g. Asia/Dubai; empty = the app default"
+    timeZone: String
+    "Settings → WhatsApp QR code; empty = none"
+    qrMessage: String
+  }
+
   extend type Mutation {
     "Admins only. New email: creates the account and emails an invite. Existing account: adds it to this workspace."
     inviteMember(input: InviteMemberInput!): InviteResult!
@@ -77,6 +89,10 @@ export const typeDefs = /* GraphQL */ `
     updateMemberRole(userId: ID!, role: String!): TeamMember!
     "Admins only: change a member's name or set them a new password (not the owner's, not your own password)"
     updateMember(userId: ID!, input: UpdateMemberInput!): TeamMember!
+    "Settings → My profile: change your own name (any role)"
+    updateMyName(name: String!): TeamMember!
+    "Settings → General → Profile: your name, phone number, job title and time zone (only the fields sent change; empty clears)"
+    updateMyProfile(input: MyProfileInput!): User!
     "Admins only; not for the owner or yourself. false: they can't sign in here, sessions are cut, nothing is deleted."
     setMemberActive(userId: ID!, active: Boolean!): TeamMember!
     "Admins only; not for the owner or yourself. Their account stays; they lose access to this workspace at once."
@@ -95,6 +111,8 @@ export const resolvers = {
   },
   Mutation: {
     inviteMember: authed(({ input }: { input: unknown }, auth) => inviteMember(auth, input)),
+    updateMyProfile: authed((input: { input: unknown }, auth) => updateMyProfile(auth, input.input)),
+    updateMyName: authed(({ name }: { name: string }, auth) => updateMyName(auth, name)),
     updateMemberRole: authed(({ userId, role }: { userId: string; role: string }, auth) => updateMemberRole(auth, userId, role)),
     updateMember: authed(({ userId, input }: { userId: string; input: unknown }, auth) => updateMember(auth, userId, input)),
     setMemberActive: authed(({ userId, active }: { userId: string; active: boolean }, auth) => setMemberActive(auth, userId, active)),

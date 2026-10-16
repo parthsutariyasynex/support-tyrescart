@@ -2,14 +2,16 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { API_URL, getToken, isNetworkError, setToken } from '@/lib/api';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
-import { type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
+import { ME_CHANGED_EVENT, type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
 import { APP_NAME } from '@/lib/brand';
 import { menuItemMatches } from '@/lib/menu';
 import { revalidateOnReturn } from '@/lib/revalidate';
+import { setBusinessDayStart } from '@/lib/snooze';
+import { setTimeZone } from '@/lib/time';
 import {
   type AssignmentEvent,
   type ReminderEvent,
@@ -27,6 +29,7 @@ import {
 import { AssignedToast } from './inbox/messages';
 import { playPing, showDesktopNotification, unlockSound } from './inbox/notifications';
 import { MenuSearch } from './MenuSearch';
+import { UserAvatar } from './UserAvatar';
 import { PresenceDot } from './PresenceDot';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
@@ -37,14 +40,58 @@ import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 const SHOW_UNBUILT_FEATURES = false;
 
 export type Me = {
-  user: { id: string; name: string; email: string };
+  user: { id: string; name: string; email: string; phone?: string | null; jobTitle?: string | null; timeZone?: string | null; avatarUpdatedAt?: string | null; qrMessage?: string | null };
   // Your role in this workspace (owner | admin | supervisor | agent)
   role?: string;
-  workspace: { id: string; name: string; whatsapp: { displayPhone: string | null; phoneNumberId?: string; wabaId?: string } | null };
+  workspace: {
+    id: string;
+    name: string;
+    whatsapp: { displayPhone: string | null; phoneNumberId?: string; wabaId?: string } | null;
+    // Workspace preferences that every page needs (Settings → Company settings → Workspace preferences)
+    settings?: { defaultTimeZone: string; defaultCountry: string; businessDayStartHour: number };
+  };
 };
 
+const ME_STORAGE_KEY = 'support:me';
+const SIDEBAR_STORAGE_KEY = 'support:sidebarOpen';
+
+function readStoredMe(): Me | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(ME_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredSidebar(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const raw = sessionStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return raw !== null ? raw === 'true' : true;
+  } catch {
+    return true;
+  }
+}
+
+// In-memory copies for in-app navigation. Session storage is read only after mount (see the layout effect in
+// AppShell): reading it while this file loads, or in the first render, makes the browser's first render differ from
+// the server's ("Loading…"), which is a hydration error.
 let cachedMe: Me | null = null;
 let cachedSidebarOpen = true;
+let restoredFromStorage = false;
+
+// The last app page before Settings, for Settings' "Back to app" (kept for this tab, so a refresh in Settings still
+// goes back to the right place)
+const LAST_APP_PATH_KEY = 'support:lastAppPath';
+export function settingsReturnPath() {
+  try {
+    return sessionStorage.getItem(LAST_APP_PATH_KEY) || '/inbox';
+  } catch {
+    return '/inbox';
+  }
+}
 
 // Pages that show the chat list and conversation (the inbox page component): a toast click opens the chat in place
 const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations'];
@@ -59,6 +106,25 @@ export function AppShell({
   const router = useRouter();
   const pathname = usePathname();
   const [me, setMe] = useState<Me | null>(cachedMe);
+  // Dates and times below are shown in your chosen time zone (Settings → General → System preference); idempotent,
+  // set before the children render so they format with it
+  if (me) {
+    setTimeZone(me.user.timeZone, me.workspace.settings?.defaultTimeZone);
+    setBusinessDayStart(me.workspace.settings?.businessDayStartHour);
+  }
+  // After a full page load: restore the saved user and sidebar before the first paint (no loading flash), once
+  // hydration is done, so the first render matches the server's
+  useLayoutEffect(() => {
+    if (restoredFromStorage) return;
+    restoredFromStorage = true;
+    const storedMe = readStoredMe();
+    if (storedMe && !cachedMe) {
+      cachedMe = storedMe;
+      setMe(storedMe);
+    }
+    cachedSidebarOpen = readStoredSidebar();
+    setSidebarOpen(cachedSidebarOpen);
+  }, []);
   // Your own Online / Away / Offline tag in the header, live on every page (this connection also reports your
   // activity, so Away is measured across the whole app, not only the chat pages)
   const presence = usePresence();
@@ -142,6 +208,9 @@ export function AppShell({
 
   function toggleSidebar(open: boolean) {
     cachedSidebarOpen = open;
+    try {
+      sessionStorage.setItem(SIDEBAR_STORAGE_KEY, String(open));
+    } catch {}
     setSidebarOpen(open);
   }
 
@@ -167,6 +236,9 @@ export function AppShell({
     try {
       const { token } = await request();
       cachedMe = null;
+      try {
+        sessionStorage.removeItem(ME_STORAGE_KEY);
+      } catch {}
       setToken(token);
       window.location.assign('/inbox');
     } catch (err) {
@@ -215,6 +287,9 @@ export function AppShell({
         .then((m) => {
           if (cancelled) return;
           cachedMe = m;
+          try {
+            sessionStorage.setItem(ME_STORAGE_KEY, JSON.stringify(m));
+          } catch {}
           setMe(m);
           setBootError(null);
           rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
@@ -228,16 +303,33 @@ export function AppShell({
             return;
           }
           cachedMe = null;
+          try {
+            sessionStorage.removeItem(ME_STORAGE_KEY);
+          } catch {}
           router.replace('/login');
         });
     load();
+    // Settings → My profile changed your name: show it everywhere at once
+    window.addEventListener(ME_CHANGED_EVENT, load);
     const unbindRevalidate = revalidateOnReturn(load); // back to this tab: role, name or workspace may have changed meanwhile
     return () => {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
+      window.removeEventListener(ME_CHANGED_EVENT, load);
       unbindRevalidate();
     };
   }, [router, retryNonce]);
+
+  // Settings is a full page (its own menu and "Back to app"), like a separate area of the app
+  const fullPage = pathname.startsWith('/settings');
+  useEffect(() => {
+    if (fullPage) return;
+    try {
+      sessionStorage.setItem(LAST_APP_PATH_KEY, pathname + window.location.search);
+    } catch {
+      // private mode: Back to app goes to the Inbox
+    }
+  }, [fullPage, pathname]);
 
   if (!me) {
     return (
@@ -266,14 +358,14 @@ export function AppShell({
   }
 
   const isConnected = !!me.workspace.whatsapp?.displayPhone;
-  const userInitial = (me.user.name || me.user.email || 'U').charAt(0).toUpperCase();
   const workspaceInitial = (me.workspace.name || 'W').charAt(0).toUpperCase();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-shell font-sans antialiased text-ink-soft">
-      {/* 1. Expandable / Collapsible Left Sidebar */}
+    <div suppressHydrationWarning className="flex h-screen w-full overflow-hidden bg-shell font-sans antialiased text-ink-soft">
+      {/* 1. Expandable / Collapsible Left Sidebar (not on Settings, which is a full page with its own menu) */}
+      {!fullPage && (
       <aside
-        className={`relative flex shrink-0 flex-col justify-between border-r border-line/80 bg-surface z-30 transition-all duration-200 ease-in-out ${
+        className={`relative flex shrink-0 flex-col justify-between border-r border-line/80 bg-surface z-30 transition-[width] duration-200 ease-in-out ${
           sidebarOpen ? 'w-60' : 'w-14'
         }`}
       >
@@ -306,7 +398,7 @@ export function AppShell({
             </div>
 
             {/* Navigation Menus */}
-            <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4 text-xs">
+            <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4 text-xs" style={{ scrollbarGutter: 'stable' }}>
               {/* Active Menu: CONVERSATIONS */}
               <div>
                 <p className="px-2 pb-1.5 text-[10px] font-bold tracking-wider text-faint uppercase">
@@ -758,10 +850,13 @@ export function AppShell({
           </div>
         )}
       </aside>
+      )}
 
       {/* 2. Main Content Area (Header + Workspace) */}
       <div className="flex flex-1 flex-col overflow-hidden min-w-0">
         {/* Top Header Bar */}
+        {/* The contact details page has its own header row ("← View contact details"), so no top bar there */}
+        {!pathname.startsWith('/contacts/') && !fullPage && (
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-line/80 bg-surface px-6">
           {/* Header Left: Back + Title + Connection Badge + Subtitle */}
           <div className="flex min-w-0 items-center gap-3">
@@ -776,7 +871,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname.startsWith('/contacts/') ? 'View contact details' : pathname.startsWith('/settings') ? 'Settings' : pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -792,7 +887,11 @@ export function AppShell({
                 )}
               </div>
               <p className="truncate text-[11px] text-faint -mt-0.5">
-                {pathname === '/account'
+                {pathname.startsWith('/contacts/')
+                  ? 'Everything about this customer: activity, chat, remarks, media, labels and lists'
+                  : pathname.startsWith('/settings')
+                  ? 'Your profile, password and notifications'
+                  : pathname === '/account'
                   ? 'Your details and password'
                   : pathname === '/teams'
                   ? 'Everyone in this workspace: name, email, role and status'
@@ -924,7 +1023,12 @@ export function AppShell({
             </button> */}
 
             {/* Page-specific header controls (the inbox renders its Assign dropdown here) */}
-            <div id="app-header-actions" className="flex items-center gap-3 shrink-0 min-w-[154px] justify-end" />
+            <div
+              id="app-header-actions"
+              className={`flex items-center gap-3 shrink-0 justify-end ${
+                CHAT_PAGES.includes(pathname) ? 'min-w-[130px]' : ''
+              }`}
+            />
 
             {/* Automation menu: features not built yet (each item only showed an alert), hidden until they exist */}
             {SHOW_UNBUILT_FEATURES && (
@@ -1084,10 +1188,12 @@ export function AppShell({
               </svg>
             </Link> */}
 
-            <button
-  type="button"
+            {/* Settings: your profile, password and notifications (and workspace pages for admins) */}
+            <Link
+  href="/settings"
   title="Settings"
-  className="flex h-7.5 w-7.5 items-center justify-center rounded-full border border-line text-muted hover:bg-surface-muted transition"
+  aria-label="Settings"
+  className={`flex h-7.5 w-7.5 items-center justify-center rounded-full border transition ${pathname.startsWith('/settings') ? 'border-primary bg-primary-subtle text-primary' : 'border-line text-muted hover:bg-surface-muted'}`}
 >
   <svg
     className="h-4 w-4"
@@ -1099,7 +1205,7 @@ export function AppShell({
     <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
     <circle cx="12" cy="12" r="3" />
   </svg>
-</button>
+</Link>
 
             {/* Vertical Separator */}
             <div className="h-5 w-px bg-line" />
@@ -1110,9 +1216,7 @@ export function AppShell({
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className="flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-1.5 pr-3 text-xs text-body shadow-2xs hover:bg-surface-muted transition cursor-pointer"
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-secondary text-[10px] font-bold text-on-primary">
-                  {userInitial}
-                </span>
+                <UserAvatar me={me} className="h-5 w-5 text-[10px]" />
                 <span className="font-semibold max-w-[120px] truncate">{me.user.name || me.user.email}</span>
                 <PresenceDot status={myStatus} withLabel />
                 <RoleBadge role={me.role} />
@@ -1125,9 +1229,7 @@ export function AppShell({
                 <div className="absolute right-0 top-11 w-64 rounded-2xl border border-line bg-surface shadow-xl z-50 overflow-hidden">
                   {/* User Profile Header Card */}
                   <div className="flex items-center gap-3 px-4 py-3.5 border-b border-line-soft">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-sm font-bold text-on-primary">
-                      {userInitial}
-                    </div>
+                    <UserAvatar me={me} className="h-10 w-10 text-sm" />
                     <div className="min-w-0 flex-1">
                       <p className="flex items-center gap-1.5 text-xs font-bold text-ink">
                         <span className="truncate">{me.user.name || 'User'}</span>
@@ -1141,7 +1243,7 @@ export function AppShell({
                   {/* Your own account: change password */}
                   <div className="p-1 pt-2 text-xs">
                     <Link
-                      href="/account"
+                      href="/settings?tab=password"
                       onClick={() => setUserMenuOpen(false)}
                       className="flex items-center gap-3 rounded-xl px-3 py-2 text-body hover:bg-surface-strong transition"
                     >
@@ -1228,6 +1330,9 @@ export function AppShell({
                     <button
                       onClick={() => {
                         cachedMe = null;
+                        try {
+                          sessionStorage.removeItem(ME_STORAGE_KEY);
+                        } catch {}
                         setToken(null);
                         router.replace('/login');
                       }}
@@ -1246,6 +1351,7 @@ export function AppShell({
             </div>
           </div>
         </header>
+        )}
 
         {/* Dynamic Children (Inbox, Settings, etc.) */}
         <main className="flex-1 min-h-0 overflow-hidden">{children(me)}</main>

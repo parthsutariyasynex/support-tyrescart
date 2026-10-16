@@ -141,7 +141,7 @@ export async function changePassword(auth: { userId: string; workspaceId: string
 
 export async function getMe(auth: { userId: string; workspaceId: string }) {
   const [user, workspace] = await Promise.all([
-    prisma.user.findUnique({ where: { id: auth.userId }, select: { id: true, name: true, email: true } }),
+    prisma.user.findUnique({ where: { id: auth.userId }, select: { id: true, name: true, email: true, phone: true, jobTitle: true, timeZone: true, avatarUpdatedAt: true, qrMessage: true } }),
     prisma.workspace.findUnique({
       where: { id: auth.workspaceId },
       include: { whatsapp: { select: { displayPhone: true, phoneNumberId: true, wabaId: true } } },

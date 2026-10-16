@@ -6,11 +6,13 @@ import { yoga } from './graphql/index.js';
 import { initRealtime } from './realtime.js';
 import { authRouter } from './routes/auth.js';
 import { inboxRouter } from './routes/inbox.js';
+import { meRouter } from './routes/me.js';
 import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
 import { startSnoozeWaker } from './services/conversationStatus.js';
+import { startDeletedContactsPurge } from './services/deletedContacts.js';
 import { AppError } from './services/errors.js';
 
 const app = express();
@@ -24,6 +26,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/auth', authRouter);
 app.use('/webhook', webhookRouter);
 app.use('/inbox', inboxRouter);
+app.use('/me', meRouter);
 app.use('/settings', settingsRouter);
 app.use('/reports', reportsRouter);
 
@@ -31,6 +34,7 @@ app.use('/reports', reportsRouter);
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof AppError) return res.status(err.status).json({ error: err.message });
   if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'That file is too large (images up to 5 MB, voice messages up to 16 MB, documents up to 100 MB)' });
   console.error(err);
   res.status(500).json({ error: 'Something went wrong' });
 });
@@ -40,8 +44,10 @@ initRealtime(server);
 server.listen(env.port, () => console.log(`API running on http://localhost:${env.port}`));
 const stopReminders = startAssignmentReminders();
 const stopSnoozeWaker = startSnoozeWaker();
+const stopPurge = startDeletedContactsPurge();
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
     stopReminders();
     stopSnoozeWaker();
+    stopPurge();
   });

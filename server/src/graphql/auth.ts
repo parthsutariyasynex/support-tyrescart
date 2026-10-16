@@ -1,3 +1,4 @@
+import { settingsOf } from '../services/workspaceSettings.js';
 import { verifyToken } from '../auth.js';
 import { changePassword, getMe, login, register } from '../services/auth.js';
 import { requestPasswordReset, resetPassword } from '../services/passwordReset.js';
@@ -9,6 +10,15 @@ export const typeDefs = /* GraphQL */ `
     id: ID!
     name: String!
     email: String!
+    "Your own phone number (international format) and job title, from Settings → General (only ever returned to you)"
+    phone: String
+    jobTitle: String
+    "Your time zone for dates and times (IANA, e.g. Asia/Dubai); null = the app default"
+    timeZone: String
+    "When your profile picture last changed (GET /me/avatar); null = no picture"
+    avatarUpdatedAt: DateTime
+    "Settings → WhatsApp QR code: the first message filled in for customers (only returned to you)"
+    qrMessage: String
   }
 
   type Workspace {
@@ -16,6 +26,8 @@ export const typeDefs = /* GraphQL */ `
     name: String!
     createdAt: DateTime!
     whatsapp: WhatsAppAccount
+    "Workspace preferences (Settings → Company settings)"
+    settings: WorkspaceSettings!
   }
 
   type AuthPayload {
@@ -88,6 +100,9 @@ export async function withMe(result: { token: string; userId: string }) {
 }
 
 export const resolvers = {
+  Workspace: {
+    settings: (w: { id: string }) => settingsOf(w.id),
+  },
   Query: {
     me: authed((_args, auth) => getMe(auth)),
     workspaces: authed((_args, auth) => listWorkspaces(auth)),

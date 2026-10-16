@@ -15,11 +15,11 @@ export type AssignmentRecord = {
   createdAt: string;
 };
 
-export type ReportRange = { from?: string | null; to?: string | null };
+export type ReportRange = { from?: string | null; to?: string | null; conversationId?: string | null };
 
 export async function fetchAssignmentReport(range: ReportRange = {}, first = 1000) {
-  const query = `query AssignmentReport($from: DateTime, $to: DateTime, $first: Int) {
-    assignmentReport(from: $from, to: $to, first: $first) {
+  const query = `query AssignmentReport($from: DateTime, $to: DateTime, $conversationId: ID, $first: Int) {
+    assignmentReport(from: $from, to: $to, conversationId: $conversationId, first: $first) {
       id conversationId contactName contactWaId
       previousAssignee { memberId userId name }
       newAssignee { memberId userId name }
@@ -27,7 +27,14 @@ export async function fetchAssignmentReport(range: ReportRange = {}, first = 100
       reason createdAt
     }
   }`;
-  return (await gql<{ assignmentReport: AssignmentRecord[] }>(query, { from: range.from ?? null, to: range.to ?? null, first })).assignmentReport;
+  return (
+    await gql<{ assignmentReport: AssignmentRecord[] }>(query, {
+      from: range.from ?? null,
+      to: range.to ?? null,
+      conversationId: range.conversationId ?? null,
+      first,
+    })
+  ).assignmentReport;
 }
 
 // Downloads the CSV export (GET /reports/assignments.csv) with the signed-in user's token
@@ -35,6 +42,7 @@ export async function downloadAssignmentReportCsv(range: ReportRange = {}) {
   const params = new URLSearchParams();
   if (range.from) params.set('from', range.from);
   if (range.to) params.set('to', range.to);
+  if (range.conversationId) params.set('conversationId', range.conversationId);
   const token = getToken();
   const res = await fetch(`${API_URL}/reports/assignments.csv${params.size ? `?${params}` : ''}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
