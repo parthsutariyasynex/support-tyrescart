@@ -8,7 +8,10 @@
     "test": "tsx --test lib/*.test.ts"
   },
   "dependencies": {
+    "@types/qrcode": "1.5.5",
+    "libphonenumber-js": "^1.12.10",
     "next": "^16.4.0",
+    "qrcode": "1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "socket.io-client": "^4.8.4"

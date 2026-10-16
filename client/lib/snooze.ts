@@ -1,11 +1,11 @@
-import { APP_TIME_ZONE, formatTime } from './time';
+import { currentTimeZone, formatTime } from './time';
 
 // Snooze choices in the chat menu, as absolute times from `now`. "Tomorrow 9:00" and "Monday 9:00" are 9:00 in the
-// app's time zone (Dubai), like every other time shown in the app, whatever the viewer's device is set to.
+// app's time zone (Dubai unless changed in Settings), like every other time shown in the app, whatever the viewer's device is set to.
 export type SnoozeChoice = { key: string; label: string; until: Date };
 
 // The calendar date and weekday in the app time zone
-function zonedParts(d: Date, timeZone = APP_TIME_ZONE) {
+function zonedParts(d: Date, timeZone = currentTimeZone()) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' })
       .formatToParts(d)
@@ -16,18 +16,24 @@ function zonedParts(d: Date, timeZone = APP_TIME_ZONE) {
 }
 
 // The instant that is `hour:00` on the given calendar day in the app time zone
-export function zonedAt(year: number, month: number, day: number, hour: number, timeZone = APP_TIME_ZONE) {
+export function zonedAt(year: number, month: number, day: number, hour: number, timeZone = currentTimeZone()) {
   const guess = new Date(Date.UTC(year, month - 1, day, hour));
   const p = zonedParts(guess, timeZone);
   const shown = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
   return new Date(guess.getTime() - (shown - guess.getTime()));
 }
 
-export function snoozeChoices(now = new Date(), timeZone = APP_TIME_ZONE): SnoozeChoice[] {
+// "Tomorrow" and "Monday" wake at the start of the business day (Settings → Workspace preferences; 9:00 by default)
+let businessDayStartHour = 9;
+export function setBusinessDayStart(hour: number | null | undefined) {
+  businessDayStartHour = Number.isInteger(hour) && hour! >= 0 && hour! <= 23 ? hour! : 9;
+}
+
+export function snoozeChoices(now = new Date(), timeZone = currentTimeZone()): SnoozeChoice[] {
   const today = zonedParts(now, timeZone);
   const dayPlus = (n: number) => {
     const d = new Date(Date.UTC(today.year, today.month - 1, today.day + n));
-    return zonedAt(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), 9, timeZone);
+    return zonedAt(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), businessDayStartHour, timeZone);
   };
   const daysToMonday = ((8 - today.weekday) % 7) || 7; // next Monday, never today
   return [
@@ -41,6 +47,6 @@ export function snoozeChoices(now = new Date(), timeZone = APP_TIME_ZONE): Snooz
 // "15 Oct, 14:16" in the app time zone
 export function snoozedUntilText(iso: string | null | undefined, locale?: string) {
   if (!iso) return '';
-  const day = new Intl.DateTimeFormat(locale, { timeZone: APP_TIME_ZONE, day: 'numeric', month: 'short' }).format(new Date(iso));
+  const day = new Intl.DateTimeFormat(locale, { timeZone: currentTimeZone(), day: 'numeric', month: 'short' }).format(new Date(iso));
   return `${day}, ${formatTime(iso, locale)}`;
 }

@@ -1,3 +1,4 @@
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
@@ -166,6 +167,72 @@ export async function updateMember(auth: AuthPayload, userId: string, rawInput: 
   if (password !== undefined) await disconnectUser(userId);
   await announcePermissions(auth.workspaceId, userId); // the new name reaches the team list and the Assign menu
   if (name !== undefined) await announceAssignee(auth.workspaceId, member.id);
+  return toMember(await prisma.member.findUniqueOrThrow({ where, include: memberInclude }));
+}
+
+// Settings → General → Profile: your own name, phone number and job title. Only the fields sent change; an empty
+// phone or job title clears it. The phone must be a real number with its country code (stored as +971501234567).
+const validTimeZone = (tz: string) => {
+  try {
+    return /^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/.test(tz) && !!new Intl.DateTimeFormat('en', { timeZone: tz });
+  } catch {
+    return false;
+  }
+};
+const profileSchema = z.object({
+  name: updateSchema.shape.name,
+  phone: z
+    .string()
+    .trim()
+    .max(30, 'Phone number is too long')
+    .transform((v, ctx) => {
+      if (!v) return null;
+      const n = parsePhoneNumberFromString(v.startsWith('+') ? v : `+${v}`);
+      if (!n?.isValid()) {
+        ctx.addIssue({ code: 'custom', message: 'Enter a valid phone number with its country code, e.g. +971 50 123 4567' });
+        return z.NEVER;
+      }
+      return n.number;
+    })
+    .nullable()
+    .optional(),
+  jobTitle: z.string().trim().max(100, 'Job title is too long').transform((v) => v || null).nullable().optional(),
+  // Settings → WhatsApp QR code: the first message filled in for customers who open your link ('' = none)
+  qrMessage: z.string().trim().max(300, 'The first message can be up to 300 characters').transform((v) => v || null).nullable().optional(),
+  timeZone: z
+    .string()
+    .trim()
+    .max(64)
+    .transform((v, ctx) => {
+      if (!v) return null;
+      if (!validTimeZone(v)) {
+        ctx.addIssue({ code: 'custom', message: 'Choose a time zone from the list' });
+        return z.NEVER;
+      }
+      return v;
+    })
+    .nullable()
+    .optional(),
+});
+export async function updateMyProfile(auth: AuthPayload, rawInput: unknown) {
+  const input = parse(profileSchema, rawInput ?? {});
+  if (input.name !== undefined) await updateMyName(auth, input.name);
+  const data = Object.fromEntries(Object.entries({ phone: input.phone, jobTitle: input.jobTitle, timeZone: input.timeZone, qrMessage: input.qrMessage }).filter(([, v]) => v !== undefined));
+  if (Object.keys(data).length) await prisma.user.update({ where: { id: auth.userId }, data: { ...data, updatedBy: auth.userId } });
+  return prisma.user.findUniqueOrThrow({ where: { id: auth.userId }, select: { id: true, name: true, email: true, phone: true, jobTitle: true, timeZone: true, qrMessage: true } });
+}
+
+// Settings → My profile: anyone changes their own name (the same rules as an admin's edit). Every workspace they
+// belong to sees the new name live (team list, Assign menu, presence, chat bubbles).
+export async function updateMyName(auth: AuthPayload, rawName: unknown) {
+  const { name } = parse(z.object({ name: updateSchema.shape.name.unwrap() }), { name: rawName });
+  const where = { userId_workspaceId: { userId: auth.userId, workspaceId: auth.workspaceId } };
+  if (!(await prisma.member.findUnique({ where }))) throw notFound('Member');
+  await prisma.user.update({ where: { id: auth.userId }, data: { name, updatedBy: auth.userId } });
+  for (const m of await prisma.member.findMany({ where: { userId: auth.userId }, select: { id: true, workspaceId: true } })) {
+    await announcePermissions(m.workspaceId, auth.userId);
+    await announceAssignee(m.workspaceId, m.id);
+  }
   return toMember(await prisma.member.findUniqueOrThrow({ where, include: memberInclude }));
 }
 

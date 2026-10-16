@@ -5,6 +5,9 @@ import { createPortal } from 'react-dom';
 import type { Message } from '@/lib/inbox';
 import { highlightSegments } from '@/lib/messageSearch';
 import { formatDateTime, formatTime } from '@/lib/time';
+import { ChatImage, ChatPlayer, DocumentCard } from './composerExtras';
+import { VoicePlayer } from './voice';
+import { isMediaPlaceholder } from '@/lib/media';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
 const LONG_PRESS_MS = 450;
@@ -122,6 +125,29 @@ export function MessageBubble({
             <DeletedText />
           </p>
         ) : (
+          <>
+          {/* Files (yours or the customer's): picture, player or document card; the caption under it */}
+          {(m.type === 'image' || m.type === 'sticker') && m.mediaMime && (
+            <div className="mb-1 mt-0.5">
+              <ChatImage messageId={m.id} />
+            </div>
+          )}
+          {m.type === 'video' && m.mediaMime && (
+            <div className="mb-1 mt-0.5">
+              <ChatPlayer messageId={m.id} kind="video" />
+            </div>
+          )}
+          {(m.type === 'audio' || m.type === 'voice') && m.mediaMime && (
+            <div className="mb-1 mt-0.5">
+              <VoicePlayer messageId={m.id} />
+            </div>
+          )}
+          {m.type === 'document' && m.mediaMime && (
+            <div className="mb-1 mt-0.5">
+              <DocumentCard messageId={m.id} name={m.mediaName || 'Document'} mime={m.mediaMime} size={m.mediaSize} />
+            </div>
+          )}
+          {(m.mediaMime ? m.body && !isMediaPlaceholder(m.body) : true) && (
           <p className="whitespace-pre-wrap break-words pr-3 text-[13px] leading-relaxed">
             {highlightTerm
               ? highlightSegments(m.body, highlightTerm).map((seg, i) =>
@@ -135,6 +161,8 @@ export function MessageBubble({
                 )
               : m.body}
           </p>
+          )}
+          </>
         )}
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-faint">
           {m.editedAt && !m.deletedAt && (

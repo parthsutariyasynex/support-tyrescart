@@ -8,3 +8,6 @@ node_modules
 # Raw DB dumps and migration backups contain real emails and password hashes -- never commit these.
 # Already-tracked files under backups/ need a separate, explicit cleanup (see deployment plan).
 backups/
+
+# Images sent from the app (kept per workspace; never commit customer media)
+uploads/

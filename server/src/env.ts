@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'node:path';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -20,6 +21,8 @@ export const env = {
   assignmentReminderMinutes: Number(process.env.ASSIGNMENT_REMINDER_MINUTES ?? 5),
   // Minutes without activity on any tab before a connected person shows as Away
   presenceAwayMinutes: Number(process.env.PRESENCE_AWAY_MINUTES ?? 5),
+  // Where copies of images sent from the app are kept (one folder per workspace); back it up with the database
+  uploadsDir: path.resolve(process.env.UPLOADS_DIR || 'uploads'),
   // Creating new workspaces (sign-up without a team link, "Create workspace"): closed in production unless
   // ALLOW_WORKSPACE_CREATION=true; open elsewhere so development and the e2e tests can set up workspaces.
   // Admins add users from the Teams page instead.

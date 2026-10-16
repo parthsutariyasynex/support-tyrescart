@@ -1,8 +1,8 @@
 import { gql } from './api';
 
 const ME_FIELDS = `
-  user { id name email }
-  workspace { id name whatsapp { displayPhone phoneNumberId wabaId } }
+  user { id name email phone jobTitle timeZone avatarUpdatedAt qrMessage }
+  workspace { id name whatsapp { displayPhone phoneNumberId wabaId } settings { defaultTimeZone defaultCountry businessDayStartHour } }
 `;
 
 export const LOGIN = `
@@ -67,4 +67,31 @@ export async function resetPassword(token: string, password: string) {
 export async function changeMyPassword(currentPassword: string, newPassword: string) {
   const query = `mutation ChangeMyPassword($c: String!, $n: String!) { changeMyPassword(currentPassword: $c, newPassword: $n) { token } }`;
   return (await gql<{ changeMyPassword: { token: string } }>(query, { c: currentPassword, n: newPassword })).changeMyPassword;
+}
+
+// Settings → My profile: change your own name. Tells the app shell to reload who you are (header, menus).
+export const ME_CHANGED_EVENT = 'app:me-changed';
+export async function updateMyName(name: string) {
+  const r = (await gql<{ updateMyName: { name: string } }>(`mutation UpdateMyName($n: String!) { updateMyName(name: $n) { name } }`, { n: name })).updateMyName;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(ME_CHANGED_EVENT));
+  return r;
+}
+
+// "First name" / "Last name" from a full name (the first word, then the rest) and back
+export function splitName(full: string) {
+  const parts = full.trim().split(/\s+/).filter(Boolean);
+  return { first: parts[0] ?? '', last: parts.slice(1).join(' ') };
+}
+export const joinName = (first: string, last: string) => [first.trim(), last.trim()].filter(Boolean).join(' ');
+
+// Settings → General: name, phone number, job title and time zone (only what's sent changes; empty clears)
+export async function updateMyProfile(input: { name?: string; phone?: string; jobTitle?: string; timeZone?: string; qrMessage?: string }) {
+  const r = (
+    await gql<{ updateMyProfile: { name: string; phone: string | null; jobTitle: string | null; timeZone: string | null } }>(
+      `mutation UpdateMyProfile($i: MyProfileInput!) { updateMyProfile(input: $i) { name phone jobTitle timeZone } }`,
+      { i: input },
+    )
+  ).updateMyProfile;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(ME_CHANGED_EVENT));
+  return r;
 }

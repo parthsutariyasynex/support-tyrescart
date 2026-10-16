@@ -6,9 +6,15 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isSupervisorOrAbove } from './roles.js';
 import { emitToWorkspace } from '../realtime.js';
-import { type ApprovedTemplate, listApprovedTemplates, sendTemplate, sendText } from '../whatsapp.js';
+import { type ApprovedTemplate, listApprovedTemplates, sendAudio, sendDocument, sendImage, sendTemplate, sendText, uploadMedia } from '../whatsapp.js';
+import { prepareVoice } from './voice.js';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { AppError, notFound } from './errors.js';
+import { recordActivity } from './activity.js';
+import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './incomingMedia.js';
 import { withSender } from './senders.js';
+import { defaultStageValue } from './leadStages.js';
 import { parse } from './validate.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -75,8 +81,9 @@ const conversationInclude = {
 // `labelId` keeps only conversations that have that label; `assignee` is a member id, 'unassigned', or 'me'
 // (assigned to `viewerId`'s membership); `status` is 'open' or 'closed' (omit for both).
 export async function listConversations(workspaceId: string, page?: unknown, viewerId?: string) {
+  // Chats of deleted contacts (Settings → Recently deleted contacts) are left out everywhere
   const query = {
-    where: { workspaceId },
+    where: { workspaceId, contact: { deletedAt: null } },
     orderBy: [{ lastMessageAt: 'desc' as const }, { id: 'desc' as const }],
     include: conversationInclude,
   };
@@ -101,6 +108,7 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
     : [];
   const where: Prisma.ConversationWhereInput = {
       workspaceId,
+      contact: { deletedAt: null },
       ...(labelId ? { labels: { some: { labelId } } } : {}),
       ...(assignee === 'collaborating'
         ? // Collaborations: chats I've been added to as a collaborator
@@ -131,7 +139,8 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
 
 // Every lookup is scoped to the caller's workspace, so other workspaces' data reads as "not found"
 export async function requireConversation(workspaceId: string, id: string) {
-  const conversation = await prisma.conversation.findFirst({ where: { id, workspaceId }, include: { contact: true } });
+  // A deleted contact's chat can't be opened or used until the contact is restored
+  const conversation = await prisma.conversation.findFirst({ where: { id, workspaceId, contact: { deletedAt: null } }, include: { contact: true } });
   if (!conversation) throw notFound('Conversation');
   return conversation;
 }
@@ -239,17 +248,17 @@ export function pickTemplateLanguage(templates: ApprovedTemplate[], name: string
   return chosen.language;
 }
 
-// `sentById` is the agent sending it; it decides who may edit or delete the message later
-export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
-  const input = parse(sendSchema, rawInput);
+// Everything that must be true before your team sends the customer anything (text, image or template)
+async function checkCanSend(workspaceId: string, conversationId: string, sentById: string | undefined, freeForm: boolean) {
   const conversation = await requireConversation(workspaceId, conversationId);
   const account = await requireAccount(workspaceId);
 
   if (conversation.status === 'closed')
     throw new AppError('This chat is closed. Reopen it to reply.', 409, 'CONVERSATION_CLOSED');
 
+  // Free-form messages (text, images) only within 24 hours of the customer's last message; templates any time
   const windowOpen = conversation.lastInboundAt && Date.now() - conversation.lastInboundAt.getTime() < DAY;
-  if (input.type === 'text' && !windowOpen)
+  if (freeForm && !windowOpen)
     throw new AppError('24-hour window closed. Send an approved template instead.', 400, 'WINDOW_CLOSED');
 
   // Chats started before numbers were validated may lack the country code; WhatsApp would send to the wrong number
@@ -266,6 +275,147 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
     if (!sender || !isSupervisorOrAbove(sender.role))
       throw new AppError('Assign this chat to yourself before replying (New Leads → Assign to Me).', 409, 'NOT_ASSIGNED');
   }
+  return { conversation, account };
+}
+
+// --- Images and documents
+
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // WhatsApp's limit for images
+export const DOCUMENT_MAX_BYTES = 100 * 1024 * 1024; // WhatsApp's limit for documents
+export const CAPTION_MAX = 1024;
+const OLE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]; // old Office files (.doc .xls .ppt)
+const ZIP = [0x50, 0x4b, 0x03, 0x04]; // new Office files (.docx .xlsx .pptx) are zip files
+// What can be sent, checked from the file's first bytes (not just the type the browser reports)
+const FILE_TYPES: Record<string, { kind: 'image' | 'document'; ext: string; magic: number[] | 'text' }> = {
+  'image/jpeg': { kind: 'image', ext: 'jpg', magic: [0xff, 0xd8, 0xff] },
+  'image/png': { kind: 'image', ext: 'png', magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  'application/pdf': { kind: 'document', ext: 'pdf', magic: [0x25, 0x50, 0x44, 0x46, 0x2d] }, // %PDF-
+  'application/msword': { kind: 'document', ext: 'doc', magic: OLE },
+  'application/vnd.ms-excel': { kind: 'document', ext: 'xls', magic: OLE },
+  'application/vnd.ms-powerpoint': { kind: 'document', ext: 'ppt', magic: OLE },
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { kind: 'document', ext: 'docx', magic: ZIP },
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': { kind: 'document', ext: 'xlsx', magic: ZIP },
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': { kind: 'document', ext: 'pptx', magic: ZIP },
+  'text/plain': { kind: 'document', ext: 'txt', magic: 'text' },
+};
+
+// The bytes must really be the kind of file they claim to be. Returns the type, its kind and extension.
+export function checkFile(bytes: Buffer | undefined, mime: string | undefined, kind: 'image' | 'document') {
+  const type = (mime ?? '').toLowerCase().split(';')[0].trim();
+  const spec = FILE_TYPES[type];
+  if (!spec || spec.kind !== kind)
+    throw new AppError(kind === 'image' ? 'Only JPEG and PNG images can be sent' : 'Only PDF, Word, Excel, PowerPoint and text files can be sent', 415, 'UNSUPPORTED_MEDIA');
+  if (!bytes?.length) throw new AppError('The file is empty', 400, 'BAD_USER_INPUT');
+  const max = kind === 'image' ? IMAGE_MAX_BYTES : DOCUMENT_MAX_BYTES;
+  if (bytes.length > max) throw new AppError(kind === 'image' ? 'Images can be up to 5 MB' : 'Documents can be up to 100 MB', 413, 'TOO_LARGE');
+  const valid =
+    spec.magic === 'text'
+      ? !bytes.subarray(0, 8192).includes(0) // plain text has no NUL bytes
+      : spec.magic.every((b, i) => bytes[i] === b);
+  if (!valid) throw new AppError(`That file isn't a valid ${spec.ext.toUpperCase()} file`, 415, 'UNSUPPORTED_MEDIA');
+  return { mime: type, ext: spec.ext };
+}
+// Kept for callers/tests that only handle images
+export const checkImage = (bytes: Buffer | undefined, mime: string | undefined) => checkFile(bytes, mime, 'image');
+
+// A safe file name to show and send: no folders or control characters, at most 200 characters, right extension
+export function cleanFileName(raw: unknown, ext: string) {
+  const base = (typeof raw === 'string' ? raw : '').replace(/[\\/\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const name = base || `document.${ext}`;
+  return name.toLowerCase().endsWith(`.${ext}`) ? name : `${name}.${ext}`;
+}
+
+// Sends an image or a document (optional caption): a copy is kept on the server so the app can show or download it,
+// then it's uploaded to WhatsApp and sent. A WhatsApp failure is kept as a failed message (like text), not lost.
+export async function sendMediaMessage(
+  kind: 'image' | 'document' | 'voice',
+  workspaceId: string,
+  conversationId: string,
+  bytes: Buffer | undefined,
+  mime: string | undefined,
+  rawCaption: unknown,
+  rawName: unknown,
+  sentById?: string,
+) {
+  // Voice notes are checked (and WebM repackaged to OGG/Opus) by prepareVoice; images and documents by checkFile
+  const voice = kind === 'voice' ? prepareVoice(bytes, mime) : null;
+  const file = voice ?? checkFile(bytes, mime, kind as 'image' | 'document');
+  const data = voice ? voice.bytes : bytes!;
+  const caption = kind === 'voice' ? '' : typeof rawCaption === 'string' ? rawCaption.trim() : '';
+  if (caption.length > CAPTION_MAX) throw new AppError(`Caption is too long (max ${CAPTION_MAX} characters)`, 400, 'BAD_USER_INPUT');
+  const fileName = kind === 'document' ? cleanFileName(rawName, file.ext) : null;
+  const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, true);
+
+  const message = await prisma.message.create({
+    data: { conversationId, direction: 'out', type: kind, body: caption, status: 'pending', sentById, mediaMime: file.mime, mediaSize: data.length, mediaName: fileName },
+  });
+  const relative = path.join(workspaceId, `${message.id}.${file.ext}`);
+  await mkdir(path.join(env.uploadsDir, workspaceId), { recursive: true });
+  await writeFile(path.join(env.uploadsDir, relative), data);
+  await prisma.message.update({ where: { id: message.id }, data: { mediaPath: relative } });
+
+  let saved;
+  try {
+    const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
+    const wamid =
+      kind === 'image'
+        ? await sendImage(account, conversation.contact.waId, mediaId, caption || undefined)
+        : kind === 'voice'
+          ? await sendAudio(account, conversation.contact.waId, mediaId)
+          : await sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined);
+    saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
+  } catch (err) {
+    saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
+  }
+  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
+  emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
+  const label = kind === 'image' ? '[Photo]' : kind === 'voice' ? '[Voice message]' : `[Document] ${fileName}`;
+  await recordActivity({
+    workspaceId,
+    conversationId,
+    actorId: sentById ?? null,
+    type: 'message_sent',
+    data: { preview: caption ? `${label} ${caption}`.slice(0, 200) : label, messageType: kind, status: saved.status },
+  });
+  return saved;
+}
+
+export const sendImageMessage = (workspaceId: string, conversationId: string, bytes: Buffer | undefined, mime: string | undefined, rawCaption: unknown, sentById?: string) =>
+  sendMediaMessage('image', workspaceId, conversationId, bytes, mime, rawCaption, null, sentById);
+
+// The stored copy of an image or document message, for members of its workspace only
+export async function readMessageMedia(workspaceId: string, messageId: string) {
+  let message = await prisma.message.findFirst({
+    where: { id: messageId, conversation: { workspaceId } },
+    select: { mediaPath: true, mediaMime: true, mediaName: true, deletedAt: true, waMediaId: true },
+  });
+  // A customer's file that isn't downloaded yet (or failed before): try now
+  if (message && !message.mediaPath && message.waMediaId && !message.deletedAt) {
+    try {
+      await fetchIncomingMedia(workspaceId, messageId);
+    } catch (err) {
+      throw new AppError(`Couldn't download this file from WhatsApp: ${(err as Error).message}`, 502, 'MEDIA_UNAVAILABLE');
+    }
+    message = await prisma.message.findFirst({
+      where: { id: messageId, conversation: { workspaceId } },
+      select: { mediaPath: true, mediaMime: true, mediaName: true, deletedAt: true, waMediaId: true },
+    });
+  }
+  if (!message?.mediaPath || !message.mediaMime || message.deletedAt) throw notFound('File');
+  const full = path.resolve(env.uploadsDir, message.mediaPath);
+  if (!full.startsWith(env.uploadsDir + path.sep)) throw notFound('File'); // never outside the uploads folder
+  try {
+    return { bytes: await readFile(full), mime: message.mediaMime, name: message.mediaName };
+  } catch {
+    throw notFound('File');
+  }
+}
+
+// `sentById` is the agent sending it; it decides who may edit or delete the message later
+export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
+  const input = parse(sendSchema, rawInput);
+  const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, input.type !== 'template');
+
   const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;
@@ -288,6 +438,14 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   }
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
+  // Contact details page activity log: "Message sent by …" (not the chat timeline or the bell; the chat shows the bubble)
+  await recordActivity({
+    workspaceId,
+    conversationId,
+    actorId: sentById ?? null,
+    type: 'message_sent',
+    data: { preview: body.slice(0, 200), messageType: input.type, status: saved.status },
+  });
   return saved;
 }
 
@@ -313,8 +471,8 @@ export async function startConversation(workspaceId: string, rawInput: unknown, 
   const { waId, name } = parse(startSchema, rawInput);
   const contact = await prisma.contact.upsert({
     where: { workspaceId_waId: { workspaceId, waId } },
-    update: {},
-    create: { workspaceId, waId, name: name || null, createdBy },
+    update: { deletedAt: null, deletedBy: null }, // starting a chat with a deleted contact brings them back
+    create: { workspaceId, waId, name: name || null, createdBy, leadStage: await defaultStageValue(workspaceId) },
   });
   return prisma.conversation.upsert({
     where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
@@ -327,11 +485,28 @@ const simulateSchema = z.object({
   waId: z.string().default('919999999999'),
   name: z.string().default('Test Customer'),
   body: z.string().min(1).max(4096).default('Hi, is my order shipped?'),
+  // Dev/test: a file "sent by the customer" (stored straight away, no WhatsApp download)
+  media: z
+    .object({
+      type: z.enum(['image', 'video', 'audio', 'voice', 'document', 'sticker']),
+      mime: z.string().min(3).max(100),
+      base64: z.string().min(1).max(14_000_000),
+      filename: z.string().max(200).optional(),
+      caption: z.string().max(1024).optional(),
+    })
+    .optional(),
 });
 
 // Dev only: fake an incoming customer message without Meta
 export async function simulateIncoming(workspaceId: string, rawInput: unknown) {
   if (env.isProd) throw new AppError('Not available in production', 403, 'FORBIDDEN');
-  const { waId, name, body } = parse(simulateSchema, rawInput ?? {});
-  await saveIncoming(workspaceId, { waId, name, type: 'text', body });
+  const { waId, name, body, media } = parse(simulateSchema, rawInput ?? {});
+  if (!media) {
+    await saveIncoming(workspaceId, { waId, name, type: 'text', body });
+    return;
+  }
+  const message = await saveIncoming(workspaceId, { waId, name, type: media.type, body: media.caption?.trim() || `[${media.type === 'voice' ? 'audio' : media.type}]` });
+  if (!message) return;
+  if (media.filename) await prisma.message.update({ where: { id: message.id }, data: { mediaName: cleanIncomingName(media.filename) } });
+  await storeIncomingMedia(workspaceId, message.id, Buffer.from(media.base64, 'base64'), media.mime);
 }

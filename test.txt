@@ -44,3 +44,34 @@ va6JAhQfqObBGw6hSvya07ik2xZgZiapGZ7VOHhni31zDHhE#JQNiHW9W45Tq_rvwav_So_zCC0hDklh
  
 https://support.tyrescart.ae/login
  
+
+
+
+
+
+
+
+
+
+Live env
+
+ PORT=5000
+DATABASE_URL="mysql://supportusr:oUNi3J2ezyNoKerOPkw3@localhost:3306/supportdb"
+JWT_SECRET=4883e3803f8445389ffc84902ef41ba92141295d30011a284d49cad4026435eb
+WEB_ORIGIN=https://support.tyrescart.ae
+
+# From developers.facebook.com > your app
+META_APP_SECRET=655147d69841f5a774fa105627531571
+# Any string you choose; enter the same value in Meta's webhook settings
+META_VERIFY_TOKEN=5effe6de41cadf80ba5ce431491745921025e8c0b9e88d27
+GRAPH_API_VERSION=v21.0
+
+# Public address of the web app, used in emailed links (e.g. password reset)
+APP_URL=https://support.tyrescart.ae
+
+# Email for invites and "Forgot password" (Gmail app password, SSL on 465)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=task.klever@gmail.com
+SMTP_PASS=msch rzdt lqdx ykoo
+MAIL_FROM="support-tyrescart <task.klever@gmail.com>"

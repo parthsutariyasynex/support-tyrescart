@@ -1,4 +1,5 @@
-import { listConversationActivity, listNotifications, markNotificationsSeen, unreadTotal } from '../services/activity.js';
+import { listContactActivity, listConversationActivity, listNotifications, markNotificationsSeen, unreadTotal } from '../services/activity.js';
+import { getPermissions } from '../services/permissions.js';
 import { clearedAt } from '../services/conversationClear.js';
 import { authed } from './shared.js';
 
@@ -30,6 +31,8 @@ export const typeDefs = /* GraphQL */ `
   extend type Query {
     "Timeline for a chat, oldest first (customer messages are left out; they're bubbles)"
     conversationActivity(conversationId: ID!): [Activity!]!
+    "Contact details page: everything for this customer's chat, newest first (customer messages, profile changes and remarks included)"
+    contactActivity(contactId: ID!): [Activity!]!
     notifications: NotificationFeed!
     "Unread customer messages across the workspace"
     unreadTotal: Int!
@@ -42,6 +45,10 @@ export const typeDefs = /* GraphQL */ `
 
 export const resolvers = {
   Query: {
+    contactActivity: authed(async ({ contactId }: { contactId: string }, auth) => {
+      await getPermissions(auth); // members only
+      return listContactActivity(auth.workspaceId, contactId);
+    }),
     // Like messages: a chat you cleared hides its earlier history from you only
     conversationActivity: authed(async ({ conversationId }: { conversationId: string }, { workspaceId, userId }) =>
       listConversationActivity(workspaceId, conversationId, undefined, await clearedAt(userId, conversationId)),

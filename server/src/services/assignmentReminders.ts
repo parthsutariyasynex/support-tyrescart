@@ -1,4 +1,5 @@
 import { env } from '../env.js';
+import { settingsOf } from './workspaceSettings.js';
 import { prisma } from '../prisma.js';
 import { emitToUser } from '../realtime.js';
 
@@ -54,11 +55,14 @@ export function isDue(c: Parameters<typeof pendingSince>[0] & Pick<Row, 'reminde
 }
 
 // Chats due now (all workspaces, or one). Read-only (claiming happens in sendAssignmentReminders).
-export async function findChatsNeedingAttention(now = new Date(), ms = thresholdMs(), workspaceId?: string) {
+export async function findChatsNeedingAttention(now = new Date(), msOrDefault?: number, workspaceId?: string) {
+  const explicit = msOrDefault !== undefined;
+  const ms = msOrDefault ?? thresholdMs();
   const rows: Row[] = await prisma.conversation.findMany({
     where: {
       ...(workspaceId ? { workspaceId } : {}),
       status: 'open',
+      contact: { deletedAt: null },
       OR: [{ assignedToId: { not: null }, OR: [{ assigneeOpenedAt: null }, { unread: { gt: 0 } }] }, { assignedToId: null, unread: { gt: 0 } }],
     },
     select: {
@@ -76,7 +80,11 @@ export async function findChatsNeedingAttention(now = new Date(), ms = threshold
       assignedTo: { select: { userId: true, active: true } },
     },
   });
-  return rows.filter((c) => isDue(c, now, ms));
+  if (explicit) return rows.filter((c) => isDue(c, now, ms));
+  // Each workspace's own reminder time (Settings → Workspace preferences; 0 = off there)
+  const minutes = new Map<string, number>();
+  for (const id of new Set(rows.map((r) => r.workspaceId))) minutes.set(id, (await settingsOf(id)).reminderMinutes);
+  return rows.filter((c) => isDue(c, now, thresholdMs(minutes.get(c.workspaceId) ?? env.assignmentReminderMinutes)));
 }
 
 async function recipients(workspaceId: string, c: Row, membersCache: Map<string, string[]>) {
@@ -91,7 +99,7 @@ async function recipients(workspaceId: string, c: Row, membersCache: Map<string,
 
 // One check: claims every due chat (compare-and-set on reminderSentAt) and sends one event per person listing their
 // chats. Returns how many people were reminded. workspaceId limits it to one workspace (the dev trigger).
-export async function sendAssignmentReminders(now = new Date(), ms = thresholdMs(), workspaceId?: string) {
+export async function sendAssignmentReminders(now = new Date(), ms?: number, workspaceId?: string) {
   const due = await findChatsNeedingAttention(now, ms, workspaceId);
   const byPerson = new Map<string, { workspaceId: string; userId: string; chats: ReminderChat[] }>();
   const membersCache = new Map<string, string[]>();
@@ -128,8 +136,9 @@ export function startAssignmentReminders(minutes = env.assignmentReminderMinutes
   }
   console.log(`[reminders] chats waiting ${minutes} min are reminded, then every ${minutes} min until resolved`);
   const ms = minutes * 60_000;
+  // Each workspace's reminder time applies (Settings → Workspace preferences); `minutes` is the default and the pace
   const tick = () =>
-    sendAssignmentReminders(new Date(), ms, workspaceId)
+    sendAssignmentReminders(new Date(), undefined, workspaceId)
       .then((n) => {
         if (n && !env.isProd) console.log(`[reminders] ${n} ${n === 1 ? 'person' : 'people'} reminded`);
         onTick?.(n);

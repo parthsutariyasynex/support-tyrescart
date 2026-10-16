@@ -16,6 +16,39 @@ export const LABEL_COLORS = [
   '#8e8e93',
 ];
 
+// Names for the palette colours (Settings → Labels colour filter); any other colour is "Custom"
+const COLOR_NAMES: Record<string, string> = {
+  '#25d366': 'Green',
+  '#128c7e': 'Teal',
+  '#34b7f1': 'Blue',
+  '#5e5ce6': 'Indigo',
+  '#a259ff': 'Purple',
+  '#ff6fb5': 'Pink',
+  '#ff3b30': 'Red',
+  '#ff9500': 'Orange',
+  '#ffcc00': 'Yellow',
+  '#8e8e93': 'Grey',
+};
+export const colorName = (color: string) => COLOR_NAMES[color.toLowerCase()] ?? `Custom (${color.toLowerCase()})`;
+
+// Settings → Labels list: search by name, filter by colour ('' = all), sort by name; then one page of it
+export function filterLabels<L extends Pick<Label, 'name' | 'color'>>(labels: L[], query: string, color: string, sort: 'asc' | 'desc') {
+  const q = query.trim().toLowerCase();
+  return labels
+    .filter((l) => (!q || l.name.toLowerCase().includes(q)) && (!color || l.color.toLowerCase() === color.toLowerCase()))
+    .sort((a, b) => (sort === 'asc' ? 1 : -1) * a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
+}
+export function pageOf<T>(items: T[], page: number, size: number) {
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  const current = Math.min(Math.max(1, page), pages);
+  return { items: items.slice((current - 1) * size, current * size), page: current, pages };
+}
+// The colours the labels use, in palette order, then any custom ones
+export function usedColors(labels: Pick<Label, 'color'>[]) {
+  const used = [...new Set(labels.map((l) => l.color.toLowerCase()))];
+  return [...LABEL_COLORS.filter((c) => used.includes(c)), ...used.filter((c) => !(LABEL_COLORS as readonly string[]).includes(c))];
+}
+
 const LABEL_FIELDS = 'id name color conversationCount';
 
 export async function fetchLabels() {

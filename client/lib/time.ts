@@ -1,17 +1,37 @@
-// Every date and time in the app is shown in Dubai time, whatever the viewer's device is set to.
+// Every date and time in the app is shown in one time zone, whatever the viewer's device is set to: Dubai, unless
+// the signed-in user picked another in Settings → General → System preference (setTimeZone, from AppShell).
 // The API sends UTC ISO strings (e.g. 2026-10-10T10:16:20.992Z); only the display is converted, here.
 // `locale` is left to the viewer's browser (undefined) except in tests; `now` is only passed by tests.
 export const APP_TIME_ZONE = 'Asia/Dubai';
+
+let timeZone = APP_TIME_ZONE;
+export const currentTimeZone = () => timeZone;
+// null/empty or unknown = the default
+let workspaceZone = APP_TIME_ZONE;
+// The workspace's default (Settings → Workspace preferences), used when a person hasn't chosen their own
+export const defaultTimeZone = () => workspaceZone;
+export function setTimeZone(tz: string | null | undefined, workspaceDefault?: string | null) {
+  workspaceZone = workspaceDefault && isTimeZone(workspaceDefault) ? workspaceDefault : APP_TIME_ZONE;
+  timeZone = tz && isTimeZone(tz) ? tz : workspaceZone;
+}
+export function isTimeZone(tz: string) {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 type When = string | number | Date;
 const toDate = (when: When) => (when instanceof Date ? when : new Date(when));
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
 function formatter(locale: string | undefined, options: Intl.DateTimeFormatOptions) {
-  const key = `${locale ?? ''}|${JSON.stringify(options)}`;
+  const key = `${timeZone}|${locale ?? ''}|${JSON.stringify(options)}`;
   let f = formatters.get(key);
   if (!f) {
-    f = new Intl.DateTimeFormat(locale, { timeZone: APP_TIME_ZONE, ...options });
+    f = new Intl.DateTimeFormat(locale, { timeZone, ...options });
     formatters.set(key, f);
   }
   return f;
@@ -27,14 +47,14 @@ export const formatDateTime = (when: When, locale?: string) =>
     toDate(when),
   );
 
-// The calendar day in Dubai as YYYY-MM-DD (for grouping and comparing days)
+// The calendar day (in the app's time zone) as YYYY-MM-DD (for grouping and comparing days)
 export function dayKey(when: When) {
   const parts = formatter('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(toDate(when));
   const get = (type: string) => parts.find((p) => p.type === type)?.value;
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-// Whole Dubai calendar days from `when` to `now` (0 = same day, 1 = the day before)
+// Whole calendar days (app time zone) from `when` to `now` (0 = same day, 1 = the day before)
 function daysAgo(when: When, now: When) {
   const utcMidnight = (key: string) => {
     const [y, m, d] = key.split('-').map(Number);

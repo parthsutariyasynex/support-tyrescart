@@ -22,10 +22,21 @@ export type ActivityType =
   | 'message_edited'
   | 'message_deleted'
   | 'message_restored'
-  | 'message_received';
+  | 'message_received'
+  // Customer profile (contact details page only)
+  | 'contact_updated'
+  | 'remark_added'
+  | 'remark_edited'
+  | 'remark_deleted'
+  | 'message_sent'
+  | 'list_added'
+  | 'list_removed';
 
+// Profile edits and remarks are only for the contact details page's activity log: never in the chat timeline or
+// anyone's bell (so the chat and the notifications stay exactly as they were)
+const PROFILE_ONLY: ActivityType[] = ['contact_updated', 'remark_added', 'remark_edited', 'remark_deleted', 'message_sent', 'list_added', 'list_removed'];
 // Customer messages already appear as bubbles, so they're only in the bell, not the chat timeline
-const NOT_IN_TIMELINE: ActivityType[] = ['message_received'];
+const NOT_IN_TIMELINE: ActivityType[] = ['message_received', ...PROFILE_ONLY];
 
 type Row = Prisma.ActivityEventGetPayload<{ include: { conversation: { select: { contact: true } } } }>;
 
@@ -56,6 +67,8 @@ export async function recordActivity(e: {
   try {
     const row = await prisma.activityEvent.create({ data: e, include });
     const activity = await toActivity(row);
+    // Profile entries go only to the contact details page (its own event): not the chat timeline, not the bell
+    if (PROFILE_ONLY.includes(e.type)) return emitToWorkspace(e.workspaceId, 'contact:activity', activity);
     // Chat timelines (anyone who has the chat open) keep getting every event
     emitToWorkspace(e.workspaceId, 'activity:new', activity);
     // The bell is per person: owners/admins get everything; everyone else only what concerns them (their chats,
@@ -126,7 +139,7 @@ export async function listNotifications({ userId, workspaceId }: AuthPayload, fi
     select: { notificationsSeenAt: true, role: true },
   });
   if (!member) return { items: [], unseen: 0, seenAt: null };
-  const where: Prisma.ActivityEventWhereInput = { workspaceId, AND: [notMine, visibleTo(userId, member.role)] };
+  const where: Prisma.ActivityEventWhereInput = { workspaceId, type: { notIn: PROFILE_ONLY }, AND: [notMine, visibleTo(userId, member.role)] };
   const [rows, unseen] = await Promise.all([
     prisma.activityEvent.findMany({
       where,
@@ -151,6 +164,21 @@ export async function markNotificationsSeen({ userId, workspaceId }: AuthPayload
 
 // Total unread customer messages in the workspace (browser tab title)
 export async function unreadTotal(workspaceId: string) {
-  const { _sum } = await prisma.conversation.aggregate({ where: { workspaceId }, _sum: { unread: true } });
+  const { _sum } = await prisma.conversation.aggregate({ where: { workspaceId, contact: { deletedAt: null } }, _sum: { unread: true } });
   return _sum.unread ?? 0;
+}
+
+// Contact details page: everything that happened with this customer's chat (customer messages and profile
+// changes included), newest first
+export async function listContactActivity(workspaceId: string, contactId: string, first = 300) {
+  const conversation = await prisma.conversation.findFirst({ where: { workspaceId, contactId }, select: { id: true } });
+  if (!(await prisma.contact.findFirst({ where: { id: contactId, workspaceId }, select: { id: true } }))) throw notFound('Contact');
+  if (!conversation) return [];
+  const rows = await prisma.activityEvent.findMany({
+    where: { workspaceId, conversationId: conversation.id },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: Math.min(Math.max(first, 1), 500),
+    include,
+  });
+  return Promise.all(rows.map(toActivity));
 }

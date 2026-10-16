@@ -74,13 +74,21 @@ export function FilterMenu({
           setOpen((o) => !o);
           setSection(null);
         }}
-        className={`flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium hover:bg-surface-strong ${count ? 'text-primary' : 'text-body-soft'}`}
+        className={`flex w-[78px] items-center justify-between rounded-full px-2 py-1 text-[11px] font-medium hover:bg-surface-strong transition-colors ${count ? 'text-primary' : 'text-body-soft'}`}
       >
-        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M3 6h18M7 12h10M10 18h4" />
-        </svg>
-        Filter
-        {count > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] font-bold text-on-primary">{count}</span>}
+        <span className="flex items-center gap-1">
+          <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 6h18M7 12h10M10 18h4" />
+          </svg>
+          Filter
+        </span>
+        <span className="flex h-4 min-w-[16px] items-center justify-center">
+          {count > 0 ? (
+            <span className="rounded-full bg-primary px-1.5 text-[10px] font-bold text-on-primary">
+              {count}
+            </span>
+          ) : null}
+        </span>
       </button>
 
       {open && (

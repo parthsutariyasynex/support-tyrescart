@@ -7,6 +7,9 @@ import bcrypt from 'bcryptjs';
 import { createHash, createHmac } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { io as connectSocket, type Socket } from 'socket.io-client';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
+import { env } from '../src/env.js';
 import { prisma } from '../src/prisma.js';
 import { setMemberActive, updateMemberRole } from '../src/services/members.js';
 import { validSignature } from '../src/routes/webhook.js';
@@ -83,6 +86,8 @@ before(async () => {
 });
 
 after(async () => {
+  // Image copies the tests sent (one folder per test workspace)
+  for (const id of created.workspaceIds) await rm(path.join(env.uploadsDir, id), { recursive: true, force: true });
   // Delete children first: on MySQL 9 (macOS) the multi-path cascade Workspace -> Contact/Conversation
   // has left Conversation rows behind, so don't rely on it here.
   const workspaceId = { in: created.workspaceIds };
@@ -3935,6 +3940,471 @@ describe('new chat toast event: every member, name only, first message only', ()
     assert.equal(heard[0].contactName, 'Brand New');
     assert.ok(!JSON.stringify(heard).includes('private'));
     assert.deepEqual(outsiderHeard, []);
+  });
+});
+
+describe('contact profile: properties and remarks (chat side panel)', () => {
+  const FIELDS = 'id name firstName lastName email companyName jobTitle leadStage leadSource priority';
+  const GET = `query($id: ID!) { contact(id: $id) { ${FIELDS} } }`;
+  const UPDATE = `mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { ${FIELDS} } }`;
+  const REMARKS = `query($c: ID!) { contactRemarks(contactId: $c) { id body authorName createdById } }`;
+  const ADD = `mutation($c: ID!, $b: String!) { addContactRemark(contactId: $c, body: $b) { id body authorName } }`;
+  const DEL = `mutation($id: ID!) { deleteContactRemark(id: $id) }`;
+  let ws: { token: string; workspaceId: string };
+  let agent: { id: string; token: string };
+  let agent2: { id: string; token: string };
+  let contactId = '';
+  async function member(name: string): Promise<{ id: string; token: string }> {
+    const email = `e2e-contact-${name.toLowerCase()}-${run}@example.com`;
+    const user = await prisma.user.create({ data: { name, email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } } });
+    created.userIds.push(user.id);
+    return { id: user.id, token: (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token };
+  }
+  before(async () => {
+    ws = await newWorkspace('contactprofile');
+    agent = await member('Kiran');
+    agent2 = await member('Lata');
+    await ok(SIMULATE, { i: { waId: '917880000001', name: 'Profile Person', body: 'hi' } }, ws.token);
+    contactId = (await ok(`{ conversations { nodes { contact { id } } } }`, {}, ws.token)).conversations.nodes[0].contact.id;
+  });
+
+  test('empty at first; options come from the API', async () => {
+    const conv = (await ok(`query($id: ID!) { contact(id: $id) { conversationId } }`, { id: contactId }, agent.token)).contact.conversationId;
+    assert.equal(conv, (await ok(`{ conversations { nodes { id } } }`, {}, ws.token)).conversations.nodes[0].id); // links to its chat
+    const c = (await ok(GET, { id: contactId }, agent.token)).contact;
+    assert.equal(c.name, 'Profile Person');
+    for (const k of ['firstName', 'lastName', 'email', 'companyName', 'jobTitle', 'leadSource', 'priority']) assert.equal(c[k], null, k);
+    assert.equal(c.leadStage, 'new'); // a new customer starts on the workspace's default stage (Settings → Customer lifecycle)
+    const o = (await ok(`{ contactFieldOptions { leadStages { value label } leadSources { value } priorities { value } remarkMaxLength } }`, {}, agent.token)).contactFieldOptions;
+    assert.ok(o.leadStages.some((x: any) => x.value === 'won' && x.label === 'Won'));
+    assert.deepEqual(o.priorities.map((x: any) => x.value), ['low', 'medium', 'high', 'urgent']);
+    assert.equal(o.remarkMaxLength, 2000);
+  });
+
+  test('any member edits; only sent fields change; empty clears; everyone hears contact:updated', async () => {
+    const heard: any[] = [];
+    const live = connectSocket(API, { auth: { token: agent2.token }, transports: ['websocket'], forceNew: true });
+    live.on('contact:updated', (d) => heard.push(d));
+    await new Promise<void>((r) => live.on('connect', () => r()));
+    const c = (await ok(UPDATE, { id: contactId, i: { firstName: '  Satya ', email: 'SATYA@Example.com', leadStage: 'qualified', priority: 'high' } }, agent.token)).updateContact;
+    assert.deepEqual([c.firstName, c.email, c.leadStage, c.priority, c.companyName], ['Satya', 'satya@example.com', 'qualified', 'high', null]);
+    const c2 = (await ok(UPDATE, { id: contactId, i: { companyName: 'TyresCart', priority: '' } }, ws.token)).updateContact;
+    assert.deepEqual([c2.firstName, c2.companyName, c2.priority], ['Satya', 'TyresCart', null]);
+    await new Promise((r) => setTimeout(r, 300));
+    live.disconnect();
+    assert.equal(heard.length, 2);
+    assert.equal(heard[1].companyName, 'TyresCart');
+    // An incoming WhatsApp message updates the WhatsApp name but never the team's fields
+    await ok(SIMULATE, { i: { waId: '917880000001', name: 'New WA Name', body: 'again' } }, ws.token);
+    const after = (await ok(GET, { id: contactId }, ws.token)).contact;
+    assert.deepEqual([after.name, after.firstName, after.companyName], ['New WA Name', 'Satya', 'TyresCart']);
+  });
+
+  test('country (from the phone until set), subscriber, channel and last contact times', async () => {
+    const Q = `query($id: ID!) { contact(id: $id) { country phoneCountry subscribed waBsuid waUsername } }`;
+    const c0 = (await ok(Q, { id: contactId }, agent.token)).contact;
+    assert.deepEqual([c0.country, c0.phoneCountry, c0.subscribed, c0.waBsuid, c0.waUsername], [null, 'India', true, null, null]);
+    const u = (await ok(`mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { country subscribed } }`, { id: contactId, i: { country: 'Oman', subscribed: false } }, agent.token)).updateContact;
+    assert.deepEqual([u.country, u.subscribed], ['Oman', false]);
+    assert.equal(await errorCode(`mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { id } }`, { id: contactId, i: { country: 'x'.repeat(101) } }, agent.token), 'BAD_USER_INPUT');
+    const conv = (await ok(`{ conversations { nodes { id channel lastInboundAt lastOutboundAt } } }`, {}, ws.token)).conversations.nodes[0];
+    assert.equal(conv.channel, 'WhatsApp'); // no business number connected in this test workspace
+    assert.ok(conv.lastInboundAt);
+    assert.equal(conv.lastOutboundAt, null);
+    await prisma.message.create({ data: { conversationId: conv.id, direction: 'out', type: 'text', body: 'ok', status: 'sent' } });
+    assert.ok((await ok(`{ conversations { nodes { lastOutboundAt } } }`, {}, ws.token)).conversations.nodes[0].lastOutboundAt);
+  });
+
+  test('WhatsApp BSUID and username are saved from the webhook when Meta sends them', async () => {
+    const { parseWebhookMessage } = await import('../src/messages.js');
+    const msg = { from: '917880000001', id: `wamid.${run}`, type: 'text', text: { body: 'x' } };
+    assert.deepEqual(parseWebhookMessage(msg, [{ wa_id: '917880000001', user_id: 'IN.123abc', profile: { name: 'P', username: 'satya.k' } }]), { waId: '917880000001', name: 'P', waMessageId: `wamid.${run}`, type: 'text', body: 'x', bsuid: 'IN.123abc', username: 'satya.k' });
+    assert.equal('bsuid' in parseWebhookMessage(msg, [{ wa_id: '917880000001', profile: { name: 'P' } }]), false);
+  });
+
+  test('validation: bad email, unknown choice, too long; other workspaces and signed-out refused', async () => {
+    assert.equal(await errorCode(UPDATE, { id: contactId, i: { email: 'not-an-email' } }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(UPDATE, { id: contactId, i: { leadStage: 'maybe' } }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(UPDATE, { id: contactId, i: { jobTitle: 'x'.repeat(101) } }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(UPDATE, { id: contactId, i: { firstName: 'Hack' } }, B.token), 'NOT_FOUND');
+    assert.equal(await errorCode(GET, { id: contactId }, B.token), 'NOT_FOUND');
+    assert.equal(await errorCode(REMARKS, { c: contactId }, B.token), 'NOT_FOUND');
+    assert.equal(await errorCode(GET, { id: contactId }, 'bad-token'), 'UNAUTHENTICATED');
+    assert.equal((await ok(GET, { id: contactId }, ws.token)).contact.firstName, 'Satya');
+  });
+
+  test('remarks: anyone adds; newest first; only the author or an admin deletes; contact:remarks is broadcast', async () => {
+    const heard: any[] = [];
+    const live = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    live.on('contact:remarks', (d) => heard.push(d));
+    await new Promise<void>((r) => live.on('connect', () => r()));
+    const r1 = (await ok(ADD, { c: contactId, b: '  Prefers Michelin  ' }, agent.token)).addContactRemark;
+    assert.deepEqual([r1.body, r1.authorName], ['Prefers Michelin', 'Kiran']);
+    const r2 = (await ok(ADD, { c: contactId, b: 'Call after 5pm' }, agent2.token)).addContactRemark;
+    assert.deepEqual((await ok(REMARKS, { c: contactId }, agent.token)).contactRemarks.map((r: any) => r.body), ['Call after 5pm', 'Prefers Michelin']);
+    assert.equal(await errorCode(ADD, { c: contactId, b: '   ' }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(ADD, { c: contactId, b: 'x'.repeat(2001) }, agent.token), 'BAD_USER_INPUT');
+    // Editing: the author or an admin; marked as edited; same validation; broadcast
+    const EDIT = `mutation($id: ID!, $b: String!) { updateContactRemark(id: $id, body: $b) { id body editedAt authorName } }`;
+    const e1 = (await ok(EDIT, { id: r1.id, b: ' Prefers Michelin Pilot Sport ' }, agent.token)).updateContactRemark;
+    assert.deepEqual([e1.body, e1.authorName, !!e1.editedAt], ['Prefers Michelin Pilot Sport', 'Kiran', true]);
+    const same = (await ok(EDIT, { id: r2.id, b: 'Call after 5pm' }, agent2.token)).updateContactRemark;
+    assert.equal(same.editedAt, null); // unchanged text: not marked as edited
+    assert.equal(await errorCode(EDIT, { id: r2.id, b: 'hijack' }, agent.token), 'FORBIDDEN'); // Kiran can't edit Lata's
+    assert.equal((await ok(EDIT, { id: r2.id, b: 'Call after 6pm' }, ws.token)).updateContactRemark.body, 'Call after 6pm'); // owner/admin can
+    assert.equal(await errorCode(EDIT, { id: r1.id, b: '  ' }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(EDIT, { id: r1.id, b: 'x'.repeat(2001) }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(EDIT, { id: r1.id, b: 'x' }, B.token), 'NOT_FOUND');
+    assert.equal(await errorCode(DEL, { id: r2.id }, agent.token), 'FORBIDDEN'); // Kiran can't delete Lata's
+    assert.equal(await errorCode(DEL, { id: r2.id }, B.token), 'NOT_FOUND');
+    assert.equal((await ok(DEL, { id: r1.id }, agent.token)).deleteContactRemark, true); // own
+    assert.equal((await ok(DEL, { id: r2.id }, ws.token)).deleteContactRemark, true); // owner/admin
+    assert.deepEqual((await ok(REMARKS, { c: contactId }, agent.token)).contactRemarks, []);
+    await new Promise((r) => setTimeout(r, 300));
+    live.disconnect();
+    assert.equal(heard.length, 6); // 2 adds, 2 edits (the unchanged one isn't broadcast), 2 deletes
+    assert.ok(heard.every((h) => h.contactId === contactId && Object.keys(h).length === 1)); // no remark text over the socket
+  });
+});
+
+describe('chat files (profile panel Attachments): media messages only, newest first, per workspace', () => {
+  test('lists photos/documents with type, direction and time; never text; respects Clear chat; other workspaces refused', async () => {
+    const ws = await newWorkspace('chatfiles');
+    await ok(SIMULATE, { i: { waId: '917881000001', name: 'Files Person', body: 'hello' } }, ws.token);
+    const conv = (await ok(`{ conversations { nodes { id } } }`, {}, ws.token)).conversations.nodes[0].id;
+    const t0 = Date.now();
+    const mk = (type: string, direction: string, ms: number) =>
+      prisma.message.create({ data: { conversationId: conv, direction, type, body: `[${type}]`, status: direction === 'in' ? 'received' : 'sent', createdAt: new Date(t0 + ms) } });
+    await mk('image', 'in', 1000);
+    await mk('document', 'out', 2000);
+    await mk('location', 'in', 3000); // not a file
+    const FILES = `query($c: ID!) { chatFiles(conversationId: $c) { type direction createdAt } }`;
+    const files = (await ok(FILES, { c: conv }, ws.token)).chatFiles;
+    assert.deepEqual(files.map((f: any) => [f.type, f.direction]), [['document', 'out'], ['image', 'in']]);
+    assert.equal(await errorCode(FILES, { c: conv }, B.token), 'NOT_FOUND');
+    // Cleared for this user: earlier files are hidden from them
+    await prisma.conversationClear.create({ data: { userId: (await prisma.member.findFirstOrThrow({ where: { workspaceId: ws.workspaceId } })).userId, conversationId: conv, clearedAt: new Date(t0 + 1500) } });
+    assert.deepEqual((await ok(FILES, { c: conv }, ws.token)).chatFiles.map((f: any) => f.type), ['document']);
+  });
+});
+
+describe('contact lists (profile panel Lists)', () => {
+  test('create, add/remove customers, counts, live events, permissions and isolation', async () => {
+    const ws = await newWorkspace('contactlists');
+    const email = `e2e-lists-agent-${run}@example.com`;
+    const user = await prisma.user.create({ data: { name: 'Lia', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } } });
+    created.userIds.push(user.id);
+    const agent = (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token;
+    await ok(SIMULATE, { i: { waId: '917882000001', name: 'List Person', body: 'hi' } }, ws.token);
+    const contactId = (await ok(`{ conversations { nodes { contact { id } } } }`, {}, ws.token)).conversations.nodes[0].contact.id;
+    const CREATE = `mutation($n: String!) { createContactList(name: $n) { id name contactCount } }`;
+    const ADD = `mutation($c: ID!, $l: ID!) { addContactToList(contactId: $c, listId: $l) { id name } }`;
+    const REMOVE = `mutation($c: ID!, $l: ID!) { removeContactFromList(contactId: $c, listId: $l) { id name } }`;
+    const ALL = `{ contactLists { name contactCount } }`;
+    const heard: any[] = [];
+    const live = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    live.on('contact:lists', (d) => heard.push(d));
+    await new Promise<void>((r) => live.on('connect', () => r()));
+
+    const vip = (await ok(CREATE, { n: '  VIP ' }, agent)).createContactList; // an agent can create
+    assert.deepEqual([vip.name, vip.contactCount], ['VIP', 0]);
+    const leads = (await ok(CREATE, { n: 'Leads' }, ws.token)).createContactList;
+    assert.equal(await errorCode(CREATE, { n: 'vip' }, ws.token), 'DUPLICATE'); // case-insensitive
+    assert.equal(await errorCode(CREATE, { n: '  ' }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(CREATE, { n: 'x'.repeat(101) }, ws.token), 'BAD_USER_INPUT');
+
+    assert.deepEqual((await ok(ADD, { c: contactId, l: vip.id }, agent)).addContactToList.map((l: any) => l.name), ['VIP']);
+    assert.deepEqual((await ok(ADD, { c: contactId, l: leads.id }, agent)).addContactToList.map((l: any) => l.name), ['Leads', 'VIP']);
+    await ok(ADD, { c: contactId, l: vip.id }, agent); // twice: no duplicate
+    assert.deepEqual((await ok(ALL, {}, agent)).contactLists, [{ name: 'Leads', contactCount: 1 }, { name: 'VIP', contactCount: 1 }]);
+    assert.deepEqual((await ok(`query($id: ID!) { contact(id: $id) { lists { name } } }`, { id: contactId }, agent)).contact.lists.map((l: any) => l.name), ['Leads', 'VIP']);
+    assert.deepEqual((await ok(REMOVE, { c: contactId, l: leads.id }, agent)).removeContactFromList.map((l: any) => l.name), ['VIP']);
+
+    // Other workspaces see and touch nothing
+    assert.deepEqual((await ok(ALL, {}, B.token)).contactLists.filter((l: any) => ['VIP', 'Leads'].includes(l.name) && l.contactCount > 0), []);
+    assert.equal(await errorCode(ADD, { c: contactId, l: vip.id }, B.token), 'NOT_FOUND');
+    // Deleting: owners/admins only; memberships go with it
+    assert.equal(await errorCode(`mutation($id: ID!) { deleteContactList(id: $id) }`, { id: vip.id }, agent), 'FORBIDDEN');
+    assert.equal((await ok(`mutation($id: ID!) { deleteContactList(id: $id) }`, { id: vip.id }, ws.token)).deleteContactList, true);
+    assert.deepEqual((await ok(`query($id: ID!) { contact(id: $id) { lists { name } } }`, { id: contactId }, agent)).contact.lists, []);
+    await new Promise((r) => setTimeout(r, 300));
+    live.disconnect();
+    assert.ok(heard.length >= 4 && heard.every((h) => h.contactId === contactId));
+  });
+});
+
+describe('contact property view: per person', () => {
+  test('default until saved; saved per user; validated', async () => {
+    const ws = await newWorkspace('propview');
+    const GET = `{ myPropertyView { personal order hidden } }`;
+    const SAVE = `mutation($i: PropertyViewInput!) { savePropertyView(input: $i) { personal order hidden } }`;
+    assert.deepEqual((await ok(GET, {}, ws.token)).myPropertyView, { personal: false, order: [], hidden: [] });
+    const saved = (await ok(SAVE, { i: { personal: true, order: ['email', 'firstName', 'email'], hidden: ['waBsuid'] } }, ws.token)).savePropertyView;
+    assert.deepEqual(saved, { personal: true, order: ['email', 'firstName'], hidden: ['waBsuid'] });
+    assert.deepEqual((await ok(GET, {}, ws.token)).myPropertyView, saved);
+    assert.deepEqual((await ok(GET, {}, B.token)).myPropertyView.hidden.includes('waBsuid'), false); // someone else's is untouched
+    assert.equal(await errorCode(SAVE, { i: { personal: true, order: ['bad key!'], hidden: [] } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(GET, {}, 'bad-token'), 'UNAUTHENTICATED');
+  });
+});
+
+describe('contact details activity log: profile edits and remarks', () => {
+  test('logged for the contact page only; never in the chat timeline or the bell', async () => {
+    const ws = await newWorkspace('contactlog');
+    const email = `e2e-contactlog-agent-${run}@example.com`;
+    const user = await prisma.user.create({ data: { name: 'Lok', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } } });
+    created.userIds.push(user.id);
+    const agent = (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token;
+    await ok(SIMULATE, { i: { waId: '917883000001', name: 'Log Person', body: 'hello there' } }, ws.token);
+    const conv = (await ok(`{ conversations { nodes { id contact { id } } } }`, {}, ws.token)).conversations.nodes[0];
+    const contactId = conv.contact.id;
+    const heardTimeline: any[] = [];
+    const heardContact: any[] = [];
+    const heardBell: any[] = [];
+    const live = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    live.on('activity:new', (a) => heardTimeline.push(a));
+    live.on('contact:activity', (a) => heardContact.push(a));
+    live.on('notification:new', (a) => heardBell.push(a));
+    await new Promise<void>((r) => live.on('connect', () => r()));
+    await ok(`mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { id } }`, { id: contactId, i: { companyName: 'TyresCart', leadStage: 'won', subscribed: false } }, agent);
+    await ok(`mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { id } }`, { id: contactId, i: { companyName: 'TyresCart' } }, agent); // no change: not logged
+    const r = (await ok(`mutation($c: ID!, $b: String!) { addContactRemark(contactId: $c, body: $b) { id } }`, { c: contactId, b: 'Prefers Michelin' }, agent)).addContactRemark;
+    await ok(`mutation($id: ID!) { deleteContactRemark(id: $id) }`, { id: r.id }, agent);
+    await new Promise((res) => setTimeout(res, 400));
+    live.disconnect();
+    const log = (await ok(`query($c: ID!) { contactActivity(contactId: $c) { type actorName data } }`, { c: contactId }, ws.token)).contactActivity;
+    assert.deepEqual(log.map((a: any) => a.type), ['remark_deleted', 'remark_added', 'contact_updated', 'message_received']); // newest first, customer message included
+    const changes = JSON.parse(log[2].data).changes;
+    assert.deepEqual(changes.map((c: any) => [c.label, c.from, c.to]), [['Company name', null, 'TyresCart'], ['Lead stage', 'New', 'Won'], ['Subscriber', 'Yes', 'No']]);
+    assert.equal(log[2].actorName, 'Lok');
+    assert.equal(JSON.parse(log[1].data).text, 'Prefers Michelin');
+    // Not in the chat timeline, not in the bell (live or stored)
+    assert.deepEqual((await ok(`query($c: ID!) { conversationActivity(conversationId: $c) { type } }`, { c: conv.id }, ws.token)).conversationActivity.map((a: any) => a.type), []);
+    assert.equal(heardTimeline.length, 0);
+    assert.equal(heardBell.filter((a) => /contact_|remark_/.test(a.type)).length, 0);
+    assert.equal((await ok(`{ notifications { items { type } } }`, {}, ws.token)).notifications.items.filter((a: any) => /contact_|remark_/.test(a.type)).length, 0);
+    assert.equal(heardContact.length, 3);
+    assert.equal(await errorCode(`query($c: ID!) { contactActivity(contactId: $c) { type } }`, { c: contactId }, B.token), 'NOT_FOUND');
+
+    // List changes and team replies: logged too, still contact-page only
+    const heard2: any[] = [];
+    const live2 = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    live2.on('activity:new', (x) => heard2.push(['timeline', x.type]));
+    live2.on('notification:new', (x) => heard2.push(['bell', x.type]));
+    await new Promise<void>((res) => live2.on('connect', () => res()));
+    const vip = (await ok(`mutation($n: String!) { createContactList(name: $n) { id } }`, { n: 'VIP' }, agent)).createContactList;
+    await ok(`mutation($c: ID!, $l: ID!) { addContactToList(contactId: $c, listId: $l) { id } }`, { c: contactId, l: vip.id }, agent);
+    await ok(`mutation($c: ID!, $l: ID!) { addContactToList(contactId: $c, listId: $l) { id } }`, { c: contactId, l: vip.id }, agent); // already in: not logged again
+    await ok(`mutation($c: ID!, $l: ID!) { removeContactFromList(contactId: $c, listId: $l) { id } }`, { c: contactId, l: vip.id }, agent);
+    await ok(`mutation($c: ID!, $l: ID!) { addContactToList(contactId: $c, listId: $l) { id } }`, { c: contactId, l: vip.id }, agent);
+    await ok(`mutation($id: ID!) { deleteContactList(id: $id) }`, { id: vip.id }, ws.token);
+    // A team reply (the workspace gets a test WhatsApp number; Meta refuses the fake token, so it ends up "failed" —
+    // the reply is still logged, as the other send tests do)
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-contactlog-${run}`, accessToken: 'fake-token' } });
+    await ok(`mutation($i: SendTextInput!) { sendTextMessage(input: $i) { id } }`, { i: { conversationId: conv.id, body: 'We have your tyres in stock' } }, ws.token);
+    await new Promise((res) => setTimeout(res, 400));
+    live2.disconnect();
+    const log2 = (await ok(`query($c: ID!) { contactActivity(contactId: $c) { type actorName data } }`, { c: contactId }, ws.token)).contactActivity;
+    const types2 = log2.map((x: any) => x.type);
+    assert.deepEqual(types2.slice(0, 5), ['message_sent', 'list_removed', 'list_added', 'list_removed', 'list_added']);
+    assert.equal(JSON.parse(log2[0].data).preview, 'We have your tyres in stock');
+    assert.equal(log2[0].actorName, 'contactlog'); // the owner replied
+    assert.deepEqual(JSON.parse(log2[1].data), { list: 'VIP', reason: 'list_deleted' });
+    assert.equal(log2[1].actorName, 'contactlog'); // the owner deleted the list
+    assert.deepEqual(JSON.parse(log2[2].data), { list: 'VIP' });
+    assert.deepEqual(heard2.filter(([, t]) => /message_sent|list_/.test(t)), []); // not in the chat timeline or anyone's bell
+    assert.deepEqual((await ok(`query($c: ID!) { conversationActivity(conversationId: $c) { type } }`, { c: conv.id }, ws.token)).conversationActivity, []);
+  });
+});
+
+describe('sending images from the chat', () => {
+  // A real 1x1 PNG
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const upload = (token: string, conversationId: string, body: Buffer, type = 'image/png', caption = '') =>
+    fetch(`${API}/inbox/conversations/${conversationId}/images${caption ? `?caption=${encodeURIComponent(caption)}` : ''}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': type },
+      body: new Uint8Array(body),
+    }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+
+  test('stores a copy, sends via WhatsApp (refused here: fake token), served only to the workspace; checks type, size and rules', async () => {
+    const ws = await newWorkspace('images');
+    await ok(SIMULATE, { i: { waId: '917884000001', name: 'Image Person', body: 'send me a photo' } }, ws.token);
+    const conv = (await ok(`{ conversations { nodes { id } } }`, {}, ws.token)).conversations.nodes[0].id;
+    // No WhatsApp number connected yet
+    assert.equal((await upload(ws.token, conv, PNG)).status, 400);
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-images-${run}`, accessToken: 'fake-token' } });
+
+    const r = await upload(ws.token, conv, PNG, 'image/png', 'Your new tyres 🛞');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.type, r.body.direction, r.body.body, r.body.mediaMime, r.body.mediaSize, r.body.status], ['image', 'out', 'Your new tyres 🛞', 'image/png', PNG.length, 'failed']);
+    // The stored copy comes back byte for byte, to members only
+    const media = await fetch(`${API}/inbox/messages/${r.body.id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } });
+    assert.equal(media.status, 200);
+    assert.equal(media.headers.get('content-type'), 'image/png');
+    assert.ok(Buffer.from(await media.arrayBuffer()).equals(PNG));
+    assert.equal((await fetch(`${API}/inbox/messages/${r.body.id}/media`, { headers: { Authorization: `Bearer ${B.token}` } })).status, 404);
+    assert.equal((await fetch(`${API}/inbox/messages/${r.body.id}/media`)).status, 401);
+    // GraphQL shows it in the chat with its type
+    const msgs = (await ok(`query($c: ID!) { messages(conversationId: $c) { nodes { type body mediaMime } } }`, { c: conv }, ws.token)).messages.nodes;
+    assert.deepEqual(msgs.at(-1), { type: 'image', body: 'Your new tyres 🛞', mediaMime: 'image/png' });
+    // Activity log (contact page): "Message sent" with [Photo]
+    const contactId = (await ok(`{ conversations { nodes { contact { id } } } }`, {}, ws.token)).conversations.nodes[0].contact.id;
+    const log = (await ok(`query($c: ID!) { contactActivity(contactId: $c) { type data } }`, { c: contactId }, ws.token)).contactActivity;
+    assert.equal(JSON.parse(log[0].data).preview, '[Photo] Your new tyres 🛞');
+
+    // Refused: not an image, a fake image, too large, too long a caption, another workspace's chat
+    assert.equal((await upload(ws.token, conv, Buffer.from('hello'), 'text/plain')).status, 415);
+    assert.equal((await upload(ws.token, conv, Buffer.from('not really a png'), 'image/png')).status, 415);
+    assert.equal((await upload(ws.token, conv, Buffer.concat([PNG, Buffer.alloc(5 * 1024 * 1024)]), 'image/png')).status, 413);
+    assert.equal((await upload(ws.token, conv, PNG, 'image/png', 'x'.repeat(1025))).status, 400);
+    assert.equal((await upload(B.token, conv, PNG)).status, 404);
+    // Same rules as text: 24-hour window
+    await prisma.conversation.update({ where: { id: conv }, data: { lastInboundAt: new Date(Date.now() - 25 * 3600_000) } });
+    const late = await upload(ws.token, conv, PNG);
+    assert.equal(late.status, 400);
+    assert.match(late.body.error, /24-hour window/);
+  });
+});
+
+describe('sending documents from the chat', () => {
+  const PDF = Buffer.from('%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n');
+  const send = (token: string, conversationId: string, body: Buffer, type: string, name = '', caption = '') =>
+    fetch(`${API}/inbox/conversations/${conversationId}/documents?name=${encodeURIComponent(name)}${caption ? `&caption=${encodeURIComponent(caption)}` : ''}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': type },
+      body: new Uint8Array(body),
+    }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+
+  test('PDF/Office/text with their name; stored, downloadable by members; checked from the file itself', async () => {
+    const ws = await newWorkspace('documents');
+    await ok(SIMULATE, { i: { waId: '917885000001', name: 'Doc Person', body: 'send the quote' } }, ws.token);
+    const conv = (await ok(`{ conversations { nodes { id contact { id } } } }`, {}, ws.token)).conversations.nodes[0];
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-docs-${run}`, accessToken: 'fake-token' } });
+
+    const r = await send(ws.token, conv.id, PDF, 'application/pdf', 'Quote/../2026', 'Your quote');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.type, r.body.mediaMime, r.body.mediaName, r.body.body, r.body.mediaSize], ['document', 'application/pdf', 'Quote .. 2026.pdf', 'Your quote', PDF.length]);
+    const dl = await fetch(`${API}/inbox/messages/${r.body.id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } });
+    assert.equal(dl.status, 200);
+    assert.match(dl.headers.get('content-disposition') ?? '', /attachment; filename\*=UTF-8''Quote%20\.\.%202026\.pdf/);
+    assert.ok(Buffer.from(await dl.arrayBuffer()).equals(PDF));
+    assert.equal((await fetch(`${API}/inbox/messages/${r.body.id}/media`, { headers: { Authorization: `Bearer ${B.token}` } })).status, 404);
+    // Word (new format = zip), text
+    const docx = await send(ws.token, conv.id, Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(30)]), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'Invoice');
+    assert.equal(docx.body.mediaName, 'Invoice.docx');
+    assert.equal((await send(ws.token, conv.id, Buffer.from('Opening hours: 9-6'), 'text/plain', 'hours.txt')).status, 200);
+    // Shows in the chat files list (Attachments / Media) and the activity log
+    const files = (await ok(`query($c: ID!) { chatFiles(conversationId: $c) { type } }`, { c: conv.id }, ws.token)).chatFiles;
+    assert.equal(files.filter((f: any) => f.type === 'document').length, 3);
+    const log = (await ok(`query($c: ID!) { contactActivity(contactId: $c) { type data } }`, { c: conv.contact.id }, ws.token)).contactActivity;
+    assert.equal(JSON.parse(log.find((x: any) => x.type === 'message_sent' && JSON.parse(x.data).messageType === 'document').data).preview.startsWith('[Document] '), true);
+    // Refused: wrong kind, a fake PDF, an image on the document route, too large
+    assert.equal((await send(ws.token, conv.id, Buffer.from('MZ\x90\x00'), 'application/x-msdownload', 'virus.exe')).status, 415);
+    assert.equal((await send(ws.token, conv.id, Buffer.from('not a pdf'), 'application/pdf', 'fake.pdf')).status, 415);
+    assert.equal((await send(ws.token, conv.id, Buffer.from([0xff, 0xd8, 0xff, 0x00]), 'image/jpeg', 'photo.jpg')).status, 415);
+    assert.equal((await send(ws.token, conv.id, Buffer.concat([PDF, Buffer.alloc(100 * 1024 * 1024)]), 'application/pdf', 'huge.pdf')).status, 413);
+    assert.equal((await send(B.token, conv.id, PDF, 'application/pdf', 'x.pdf')).status, 404);
+  });
+});
+
+describe('media customers send', () => {
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  test('stored and shown live; listed in the files with details; served to members only', async () => {
+    const ws = await newWorkspace('incomingmedia');
+    const updates: any[] = [];
+    const live = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    live.on('message:updated', (m) => updates.push(m));
+    await new Promise<void>((r) => live.on('connect', () => r()));
+    const SIM_MEDIA = `mutation($i: SimulateIncomingInput) { simulateIncomingMessage(input: $i) }`;
+    await ok(SIM_MEDIA, { i: { waId: '917886000001', name: 'Media Person', media: { type: 'image', mime: 'image/png', base64: PNG.toString('base64'), caption: 'my tyre' } } }, ws.token);
+    await ok(SIM_MEDIA, { i: { waId: '917886000001', name: 'Media Person', media: { type: 'document', mime: 'application/pdf', base64: Buffer.from('%PDF-1.4 x').toString('base64'), filename: 'invoice.pdf' } } }, ws.token);
+    await ok(SIM_MEDIA, { i: { waId: '917886000001', name: 'Media Person', media: { type: 'voice', mime: 'audio/ogg; codecs=opus', base64: Buffer.from('OggS fake').toString('base64') } } }, ws.token);
+    await new Promise((r) => setTimeout(r, 300));
+    live.disconnect();
+    const conv = (await ok(`{ conversations { nodes { id lastMessage { type } } } }`, {}, ws.token)).conversations.nodes[0];
+    const msgs = (await ok(`query($c: ID!) { messages(conversationId: $c) { nodes { id type body mediaMime mediaName direction } } }`, { c: conv.id }, ws.token)).messages.nodes;
+    assert.deepEqual(msgs.map((m: any) => [m.type, m.body, m.mediaMime, m.mediaName, m.direction]), [
+      ['image', 'my tyre', 'image/png', null, 'in'],
+      ['document', '[document]', 'application/pdf', 'invoice.pdf', 'in'],
+      ['voice', '[audio]', 'audio/ogg', null, 'in'],
+    ]);
+    assert.equal(updates.length, 3); // each file appeared live once stored
+    const files = (await ok(`query($c: ID!) { chatFiles(conversationId: $c) { type mediaMime mediaName mediaSize available direction } }`, { c: conv.id }, ws.token)).chatFiles;
+    assert.deepEqual(files.map((f: any) => [f.type, f.available, f.direction]), [['voice', true, 'in'], ['document', true, 'in'], ['image', true, 'in']]);
+    assert.equal(files[2].mediaSize, PNG.length);
+    const img = await fetch(`${API}/inbox/messages/${msgs[0].id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } });
+    assert.equal(img.headers.get('content-type'), 'image/png');
+    assert.ok(Buffer.from(await img.arrayBuffer()).equals(PNG));
+    const pdf = await fetch(`${API}/inbox/messages/${msgs[1].id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } });
+    assert.match(pdf.headers.get('content-disposition') ?? '', /invoice\.pdf/);
+    assert.equal((await fetch(`${API}/inbox/messages/${msgs[0].id}/media`, { headers: { Authorization: `Bearer ${B.token}` } })).status, 404);
+    // A customer file WhatsApp hasn't given us (no number connected here): not available, opening says so
+    const placeholder = await prisma.message.create({ data: { conversationId: conv.id, direction: 'in', type: 'video', body: '[video]', status: 'received', waMediaId: 'MEDIA-X', mediaMime: 'video/mp4' } });
+    assert.equal((await fetch(`${API}/inbox/messages/${placeholder.id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } })).status, 404);
+  });
+});
+
+describe('sending voice notes', () => {
+  test('a browser recording is stored as OGG/Opus voice and sent as audio; checked like other files', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const webm = await readFile(new URL('./fixtures/voice-chrome.webm', import.meta.url));
+    const ws = await newWorkspace('voicenotes');
+    await ok(SIMULATE, { i: { waId: '917887000001', name: 'Voice Person', body: 'call me back' } }, ws.token);
+    const conv = (await ok(`{ conversations { nodes { id contact { id } } } }`, {}, ws.token)).conversations.nodes[0];
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws.workspaceId, wabaId: 'w', phoneNumberId: `pn-voice-${run}`, accessToken: 'fake-token' } });
+    const send = (token: string, body: Buffer, type: string) =>
+      fetch(`${API}/inbox/conversations/${conv.id}/voice`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': type }, body: new Uint8Array(body) }).then(async (r) => ({
+        status: r.status,
+        body: await r.json().catch(() => null),
+      }));
+    const r = await send(ws.token, webm, 'audio/webm;codecs=opus');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.type, r.body.direction, r.body.mediaMime, r.body.body], ['voice', 'out', 'audio/ogg', '']);
+    const file = await fetch(`${API}/inbox/messages/${r.body.id}/media`, { headers: { Authorization: `Bearer ${ws.token}` } });
+    assert.equal(file.headers.get('content-type'), 'audio/ogg');
+    const ogg = Buffer.from(await file.arrayBuffer());
+    assert.equal(ogg.subarray(0, 4).toString('latin1'), 'OggS');
+    assert.equal(ogg.length, r.body.mediaSize);
+    // Listed as a voice message in the files and the activity log
+    assert.equal((await ok(`query($c: ID!) { chatFiles(conversationId: $c) { type } }`, { c: conv.id }, ws.token)).chatFiles[0].type, 'voice');
+    const log = (await ok(`query($c: ID!) { contactActivity(contactId: $c) { type data } }`, { c: conv.contact.id }, ws.token)).contactActivity;
+    assert.equal(JSON.parse(log.find((x: any) => x.type === 'message_sent').data).preview, '[Voice message]');
+    // Refused: not audio, fake WebM, too large, another workspace, outside the 24-hour window
+    assert.equal((await send(ws.token, Buffer.from('hello'), 'text/plain')).status, 415);
+    assert.equal((await send(ws.token, Buffer.from('not webm'), 'audio/webm')).status, 415);
+    assert.equal((await send(ws.token, Buffer.concat([Buffer.from('OggS'), Buffer.alloc(16 * 1024 * 1024)]), 'audio/ogg')).status, 413);
+    assert.equal((await send(B.token, webm, 'audio/webm')).status, 404);
+    await prisma.conversation.update({ where: { id: conv.id }, data: { lastInboundAt: new Date(Date.now() - 25 * 3600_000) } });
+    const late = await send(ws.token, webm, 'audio/webm');
+    assert.equal(late.status, 400);
+    assert.match(late.body.error, /24-hour window/);
+  });
+});
+
+describe('settings: my profile', () => {
+  test('anyone renames themselves; validated; shown to the team; other users untouched', async () => {
+    const ws = await newWorkspace('myname');
+    const email = `e2e-myname-agent-${run}@example.com`;
+    const user = await prisma.user.create({ data: { name: 'Old Name', email, passwordHash: await bcrypt.hash('password123', 4), members: { create: { role: 'agent', workspaceId: ws.workspaceId } } } });
+    created.userIds.push(user.id);
+    const agent = (await ok(`mutation($i: LoginInput!) { login(input: $i) { token } }`, { i: { email, password: 'password123' } })).login.token;
+    const M = `mutation($n: String!) { updateMyName(name: $n) { name } }`;
+    assert.equal((await ok(M, { n: '  Satya Kumar ' }, agent)).updateMyName.name, 'Satya Kumar');
+    assert.equal((await ok(`{ me { user { name } } }`, {}, agent)).me.user.name, 'Satya Kumar');
+    const team = (await ok(`{ members { name } }`, {}, ws.token)).members.map((m: any) => m.name);
+    assert.ok(team.includes('Satya Kumar'));
+    assert.equal(await errorCode(M, { n: '   ' }, agent), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(M, { n: 'x'.repeat(192) }, agent), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(M, { n: 'X' }, 'bad-token'), 'UNAUTHENTICATED');
+    // Phone number and job title
+    const P = `mutation($i: MyProfileInput!) { updateMyProfile(input: $i) { name phone jobTitle } }`;
+    assert.deepEqual((await ok(P, { i: { phone: '+971 50 123 4567', jobTitle: ' Fleet manager ' } }, agent)).updateMyProfile, { name: 'Satya Kumar', phone: '+971501234567', jobTitle: 'Fleet manager' });
+    assert.deepEqual((await ok(`{ me { user { phone jobTitle } } }`, {}, agent)).me.user, { phone: '+971501234567', jobTitle: 'Fleet manager' });
+    assert.equal((await ok(P, { i: { phone: '971501234567' } }, agent)).updateMyProfile.phone, '+971501234567'); // + added
+    assert.equal(await errorCode(P, { i: { phone: '12345' } }, agent), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(P, { i: { jobTitle: 'x'.repeat(101) } }, agent), 'BAD_USER_INPUT');
+    assert.deepEqual((await ok(P, { i: { phone: '', jobTitle: '' } }, agent)).updateMyProfile, { name: 'Satya Kumar', phone: null, jobTitle: null });
   });
 });
 
