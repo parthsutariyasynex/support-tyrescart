@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { usePathname, useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
-import { API_URL, getToken } from '@/lib/api';
+import { API_URL, getToken, isNetworkError } from '@/lib/api';
 import {
   type Conversation,
   type ConversationStatus,
@@ -174,6 +174,9 @@ function Inbox({ meName }: { meName: string }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all');
   const [loading, setLoading] = useState(false);
+  // Set only when the list failed to load and nothing is on screen for it (a background refresh failing while
+  // chats are already showing stays silent — the on-screen list is still good, no need to alarm anyone over it)
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [labels, setLabels] = useState<Label[]>(cachedLabels);
   const [picker, setPicker] = useState<PickerTarget | null>(null);
   // AppShell's header slot for the bell and the Assign box. Resolved after mount (see the effect below): during the
@@ -252,6 +255,7 @@ function Inbox({ meName }: { meName: string }) {
       .then((page) => {
         if (filterKey(filter) !== filterKey(filterRef.current)) return;
         if (seq !== loadSeqRef.current) return;
+        setConversationsError(null);
         setServerSearchedTerm(filter.search ?? '');
         // A search result replaces the list outright (never merged with chats loaded earlier that no longer match)
         if (!loadedMoreRef.current || filter.search) {
@@ -264,7 +268,15 @@ function Inbox({ meName }: { meName: string }) {
           return [...page.nodes, ...prev.filter((c) => !fresh.has(c.id))].sort(byLatest);
         });
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (filterKey(filter) !== filterKey(filterRef.current)) return;
+        if (seq !== loadSeqRef.current) return;
+        // Chats are already on screen: don't replace them with an error banner over a failed background refresh
+        if (cachedConversationsByPath[pathname]?.length) return;
+        setConversationsError(
+          isNetworkError(err) ? (err as Error).message : (err as Error).message || 'Could not load conversations.',
+        );
+      })
       .finally(() => setLoading(false));
   }, [updateConversations, pathname]);
 
@@ -868,6 +880,7 @@ function Inbox({ meName }: { meName: string }) {
         activeId={activeId}
         onSelect={selectConversation}
         onRefresh={loadConversations}
+        conversationsError={conversationsError}
         onLoadMore={conversationsCursor ? loadMoreConversations : undefined}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -984,6 +997,7 @@ function ConversationList({
   activeId,
   onSelect,
   onRefresh,
+  conversationsError,
   onLoadMore,
   searchQuery,
   sortOrder,
@@ -1021,6 +1035,9 @@ function ConversationList({
   activeId: string | null;
   onSelect: (id: string) => void;
   onRefresh: () => void;
+  // Set when the list failed to load and the screen has nothing to show for it; offers Retry instead of the usual
+  // empty-state copy
+  conversationsError?: string | null;
   onLoadMore?: () => void;
   searchQuery: string;
   sortOrder: SortOrder;
@@ -1236,7 +1253,17 @@ function ConversationList({
 
       {/* Conversation List / Empty State */}
       <div className="flex-1 overflow-y-auto">
-        {conversations.length === 0 && filterType !== 'all' ? (
+        {conversations.length === 0 && conversationsError ? (
+          <div className="flex flex-col items-start gap-2.5 p-5 text-xs leading-relaxed text-muted">
+            <p className="text-danger">{conversationsError}</p>
+            <button
+              onClick={onRefresh}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-[11px] font-semibold text-body shadow-2xs hover:bg-surface-muted transition cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
+        ) : conversations.length === 0 && filterType !== 'all' ? (
           <p className="p-5 text-xs leading-relaxed text-muted">No conversations match this filter.</p>
         ) : conversations.length === 0 && leads ? (
           <p className="p-5 text-xs leading-relaxed text-muted">

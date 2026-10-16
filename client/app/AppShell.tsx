@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { API_URL, getToken, setToken } from '@/lib/api';
+import { API_URL, getToken, isNetworkError, setToken } from '@/lib/api';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
 import { type WorkspaceSummary, fetchMe, fetchWorkspaces, switchWorkspace } from '@/lib/auth';
 import { APP_NAME } from '@/lib/brand';
@@ -197,33 +197,69 @@ export function AppShell({
     };
   }, []);
 
+  // Set when "me" fails to load because the backend can't be reached (e.g. mid-restart during a deploy) rather
+  // than because the sign-in itself is invalid. Kept separate from a real auth failure so a brief backend restart
+  // doesn't sign people out: we keep the token, show a retry state, and keep trying instead of bouncing to /login.
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
   useEffect(() => {
     if (!getToken()) {
       cachedMe = null;
       router.replace('/login');
       return;
     }
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const load = () =>
       fetchMe<Me>()
         .then((m) => {
+          if (cancelled) return;
           cachedMe = m;
           setMe(m);
+          setBootError(null);
           rememberWorkspace(m.user.email, m.workspace.id); // next sign-in opens this workspace again
         })
-        .catch(() => {
+        .catch((err) => {
+          if (cancelled) return;
+          if (isNetworkError(err)) {
+            // Backend unreachable right now: stay signed in and keep retrying rather than treating it as logged out
+            setBootError((err as Error).message);
+            retryTimer = setTimeout(load, 4000);
+            return;
+          }
           cachedMe = null;
           router.replace('/login');
         });
     load();
-    return revalidateOnReturn(load); // back to this tab: role, name or workspace may have changed meanwhile
-  }, [router]);
+    const unbindRevalidate = revalidateOnReturn(load); // back to this tab: role, name or workspace may have changed meanwhile
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      unbindRevalidate();
+    };
+  }, [router, retryNonce]);
 
   if (!me) {
     return (
       <div className="grid h-screen place-items-center bg-page text-sm text-muted font-medium">
         <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-          <span>Loading {APP_NAME}...</span>
+          {bootError ? (
+            <>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-danger-soft text-danger text-base font-bold">!</div>
+              <span className="max-w-xs text-center">{bootError}</span>
+              <button
+                onClick={() => setRetryNonce((n) => n + 1)}
+                className="rounded-full bg-secondary px-4 py-1.5 text-xs font-semibold text-on-primary shadow-xs hover:bg-secondary-hover transition cursor-pointer"
+              >
+                Retry now
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="h-8 w-8 animate-spin rounded-full border-3 border-primary border-t-transparent" />
+              <span>Loading {APP_NAME}...</span>
+            </>
+          )}
         </div>
       </div>
     );

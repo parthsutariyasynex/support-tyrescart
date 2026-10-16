@@ -11,6 +11,7 @@
     "dev:server": "npm run dev --workspace=server",
     "build:client": "npm run build --workspace=client",
     "start:client": "npm run start --workspace=client",
-    "start:server": "npm run start --workspace=server"
+    "start:server": "npm run start --workspace=server",
+    "deploy": "bash scripts/deploy.sh"
   }
 }
