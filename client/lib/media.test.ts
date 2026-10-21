@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { checkFile, documentLabel, filePreview, fileType, formatSize, imageProblem, isMediaPlaceholder } from './media';
+import { checkFile, documentLabel, filePreview, fileType, formatSize, imageProblem, isMediaPlaceholder, pastedName } from './media';
 
 const MB = 1024 * 1024;
 describe('files before sending', () => {
@@ -34,4 +34,13 @@ describe('files before sending', () => {
     assert.equal(filePreview({ type: 'document', body: '[document]', mediaName: 'invoice.pdf' }), '📄 invoice.pdf');
     assert.equal(filePreview({ type: 'text', body: 'hi' }), null);
   });
+});
+
+test('pasted screenshots get a readable name; copied files keep theirs', () => {
+  const at = new Date(2026, 9, 21, 14, 30, 5);
+  assert.equal(pastedName(new File(['x'], 'image.png', { type: 'image/png' }), at).name, 'Screenshot 2026-10-21 at 14.30.05.png');
+  assert.equal(pastedName(new File(['x'], '', { type: 'image/jpeg' }), at).name, 'Screenshot 2026-10-21 at 14.30.05.jpg');
+  const kept = pastedName(new File(['x'], 'invoice.pdf', { type: 'application/pdf' }), at);
+  assert.equal(kept.name, 'invoice.pdf');
+  assert.equal(pastedName(new File(['x'], 'image.png', { type: 'image/png' }), at).type, 'image/png');
 });

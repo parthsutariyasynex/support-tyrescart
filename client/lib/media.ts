@@ -128,3 +128,13 @@ export function filePreview(m: { type: string; body: string; mediaName?: string 
       return null;
   }
 }
+
+// A pasted screenshot comes as "image.png" (or with no name): give it a readable one, like the system's own
+// screenshots ("Screenshot 2026-10-21 at 14.30.05.png"). A copied file keeps its name.
+export function pastedName(file: File, now = new Date()) {
+  if (file.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name)) return file;
+  const ext = (file.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg');
+  const two = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())} at ${two(now.getHours())}.${two(now.getMinutes())}.${two(now.getSeconds())}`;
+  return new File([file], `Screenshot ${stamp}.${ext}`, { type: file.type, lastModified: file.lastModified });
+}

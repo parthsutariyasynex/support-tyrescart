@@ -100,10 +100,11 @@ export async function fetchConversations(
     assigneeIds?: string[] | null;
     from?: string | null;
     to?: string | null;
+    leadStage?: string | null; // a lifecycle stage's value (left menu)
   } = {},
 ) {
-  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime) {
-    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
+  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime, $leadStage: String) {
+    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to, leadStage: $leadStage) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
   }`;
   return (await gql<{ conversations: Connection<Conversation> }>(query, { first: PAGE_SIZE, after, ...filter }))
     .conversations;

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { API_URL, getToken, setToken } from '@/lib/api';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
@@ -30,6 +30,7 @@ import { AssignedToast } from './inbox/messages';
 import { playPing, showDesktopNotification, unlockSound } from './inbox/notifications';
 import { MenuSearch } from './MenuSearch';
 import { UserAvatar } from './UserAvatar';
+import { LifecycleMenu } from './LifecycleMenu';
 import { PresenceDot } from './PresenceDot';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
@@ -516,6 +517,11 @@ export function AppShell({
                   */}
                 </div>
               </div>
+
+              {/* LIFECYCLE STAGES: one click shows the Inbox's chats at that stage */}
+              <Suspense fallback={null}>
+                <LifecycleMenu matches={showItem} />
+              </Suspense>
 
               {/* HOME SECTION (Hidden for now)
               <div>
