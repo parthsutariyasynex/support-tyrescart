@@ -292,6 +292,12 @@ function readLabels(json: string | null) {
   }
 }
 
+// Standard properties this workspace renamed (Settings → Contact properties), e.g. companyName → "Garage name"
+export async function standardPropertyLabels(workspaceId: string) {
+  const def = await prisma.contactPropertyDefault.findUnique({ where: { workspaceId }, select: { labels: true } });
+  return readLabels(def?.labels ?? null);
+}
+
 // Admins only: rename a standard property for this workspace (its key and type stay); an empty name restores it
 export async function renameStandardProperty(auth: AuthPayload, rawKey: unknown, rawName: unknown) {
   await requireAdmin(auth);

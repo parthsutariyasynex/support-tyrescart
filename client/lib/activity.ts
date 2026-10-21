@@ -47,9 +47,10 @@ const assignedTo = (d: Record<string, string | null>, meId: string | null) =>
 
 // One-line description. `where: 'chat'` for the chat timeline ("closed this chat"), 'bell' names the customer.
 export function activityText(a: Activity, meId: string | null, where: 'chat' | 'bell') {
-  const who = a.actorId && a.actorId === meId ? 'You' : (a.actorName ?? 'Someone');
-  const chat = where === 'chat' ? 'this chat' : `the chat with ${a.contactName ?? 'a customer'}`;
   const d = details(a);
+  // A person, or the app itself (e.g. "Simple automations" routing a new chat)
+  const who = a.actorId && a.actorId === meId ? 'You' : (a.actorName ?? d.by ?? 'Someone');
+  const chat = where === 'chat' ? 'this chat' : `the chat with ${a.contactName ?? 'a customer'}`;
   switch (a.type) {
     case 'conversation_closed':
       return `${who} closed ${chat}`;

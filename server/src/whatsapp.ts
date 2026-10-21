@@ -1,10 +1,11 @@
 import { env } from './env.js';
+import { type TemplateInfo, parseTemplate } from './services/templateModel.js';
 
 type Account = { phoneNumberId: string; accessToken: string };
 
 async function graphPost(account: Account, payload: object) {
   const res = await fetch(
-    `https://graph.facebook.com/${env.graphVersion}/${account.phoneNumberId}/messages`,
+    `${env.graphBase}/${env.graphVersion}/${account.phoneNumberId}/messages`,
     {
       method: 'POST',
       headers: {
@@ -24,13 +25,18 @@ export function sendText(account: Account, to: string, body: string) {
   return graphPost(account, { to, type: 'text', text: { body } });
 }
 
+// A reaction to one of the chat's messages (its wamid); an empty emoji removes the business's reaction
+export function sendReaction(account: Account, to: string, messageId: string, emoji: string) {
+  return graphPost(account, { recipient_type: 'individual', to, type: 'reaction', reaction: { message_id: messageId, emoji } });
+}
+
 // Uploads an image or document to WhatsApp and returns its media id (used to send it right after)
 export async function uploadMedia(account: Account, bytes: Buffer, mime: string, fileName: string) {
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
   form.append('type', mime);
   form.append('file', new Blob([new Uint8Array(bytes)], { type: mime }), fileName);
-  const res = await fetch(`https://graph.facebook.com/${env.graphVersion}/${account.phoneNumberId}/media`, {
+  const res = await fetch(`${env.graphBase}/${env.graphVersion}/${account.phoneNumberId}/media`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${account.accessToken}` },
     body: form,
@@ -54,7 +60,7 @@ export function sendDocument(account: Account, to: string, mediaId: string, file
 // the access token). Refuses anything over maxBytes. fetchImpl is replaceable for tests.
 export async function downloadMedia(account: Account, mediaId: string, maxBytes: number, fetchImpl: typeof fetch = fetch) {
   const auth = { Authorization: `Bearer ${account.accessToken}` };
-  const infoRes = await fetchImpl(`https://graph.facebook.com/${env.graphVersion}/${encodeURIComponent(mediaId)}`, { headers: auth });
+  const infoRes = await fetchImpl(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(mediaId)}`, { headers: auth });
   const info = await infoRes.json().catch(() => ({}));
   if (!infoRes.ok || typeof info?.url !== 'string') throw new Error(info?.error?.message ?? `Graph API error ${infoRes.status}`);
   if (Number(info.file_size) > maxBytes) throw new Error('The file is too large to download');
@@ -75,32 +81,81 @@ export function sendTemplate(account: Account, to: string, name: string, languag
   return graphPost(account, { to, type: 'template', template: { name, language: { code: language } } });
 }
 
-export type ApprovedTemplate = { name: string; language: string; category: string; body: string; needsParameters: boolean };
+// needsParameters: it has {{variables}}, a media header or a coupon/code button, so it can't go out without values
+export type ApprovedTemplate = TemplateInfo & { needsParameters: boolean };
+type Waba = { wabaId: string; accessToken: string };
 
-// The account's APPROVED templates, one entry per name + language (each language is approved separately).
-// needsParameters: it has {{variables}} or a media header, which sending without parameters would fail on.
-export async function listApprovedTemplates(account: { wabaId: string; accessToken: string }): Promise<ApprovedTemplate[]> {
-  const templates: ApprovedTemplate[] = [];
+async function graphJson(url: string, token: string, init: RequestInit = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, ...(typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...((init.headers as Record<string, string>) ?? {}) },
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.error_user_msg || data?.error?.message || `Graph API error ${res.status}`);
+  return data;
+}
+
+// Every template of the account (each name + language is its own template), any status unless approvedOnly
+export async function listTemplates(account: Waba, approvedOnly = false): Promise<TemplateInfo[]> {
+  const out: TemplateInfo[] = [];
   let url: string | undefined =
-    `https://graph.facebook.com/${env.graphVersion}/${account.wabaId}/message_templates` +
-    '?fields=name,status,language,category,components&status=APPROVED&limit=100';
-  for (let page = 0; url && page < 10; page++) {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${account.accessToken}` } });
-    const data: any = await res.json();
-    if (!res.ok) throw new Error(data?.error?.message ?? `Graph API error ${res.status}`);
-    for (const t of data.data ?? []) {
-      if (t.status !== 'APPROVED') continue;
-      const components: any[] = t.components ?? [];
-      const needsParameters = components.some(
-        (c) =>
-          /\{\{.+?\}\}/.test(c.text ?? '') ||
-          (c.type === 'HEADER' && c.format && c.format !== 'TEXT') ||
-          (c.buttons ?? []).some((b: any) => /\{\{.+?\}\}/.test(b.url ?? '')),
-      );
-      const body = components.find((c) => c.type === 'BODY')?.text ?? '';
-      templates.push({ name: t.name, language: t.language, category: t.category, body, needsParameters });
-    }
+    `${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates` +
+    `?fields=id,name,status,language,category,components,rejected_reason,parameter_format&limit=100${approvedOnly ? '&status=APPROVED' : ''}`;
+  for (let page = 0; url && page < 20; page++) {
+    const data = await graphJson(url, account.accessToken);
+    for (const t of data.data ?? []) if (!approvedOnly || t.status === 'APPROVED') out.push(parseTemplate(t));
     url = data.paging?.next;
   }
-  return templates.sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
+  return out.sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
+}
+
+// The account's APPROVED templates, one entry per name + language (each language is approved separately)
+export async function listApprovedTemplates(account: Waba): Promise<ApprovedTemplate[]> {
+  return (await listTemplates(account, true)).map((t) => ({
+    ...t,
+    needsParameters:
+      !!t.header?.variables.length ||
+      ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(t.header?.format ?? '') ||
+      t.body.variables.length > 0 ||
+      t.buttons.some((b) => b.variables.length > 0 || b.type === 'COPY_CODE' || b.type === 'OTP'),
+  }));
+}
+
+// A template with its values (components built by templateModel.buildSendComponents)
+export function sendTemplateWithValues(account: Account, to: string, name: string, language: string, components: object[]) {
+  return graphPost(account, { to, type: 'template', template: { name, language: { code: language }, ...(components.length ? { components } : {}) } });
+}
+
+// Settings → Templates: submit a new template for Meta's review; returns its id and status (usually PENDING)
+export async function createTemplate(account: Waba, payload: { name: string; language: string; category: string; components: object[] }) {
+  const data = await graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates`, account.accessToken, {
+    method: 'POST',
+    body: JSON.stringify({ ...payload, allow_category_change: true }),
+  });
+  return { id: String(data.id ?? ''), status: String(data.status ?? 'PENDING'), category: String(data.category ?? payload.category) };
+}
+
+// Edit an existing template (Meta reviews it again)
+export async function editTemplate(account: Waba, templateId: string, payload: { category?: string; components: object[] }) {
+  await graphJson(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(templateId)}`, account.accessToken, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+// Delete a template: with its id only that language; without, every language of the name
+export async function deleteTemplate(account: Waba, name: string, templateId?: string) {
+  const q = new URLSearchParams({ name, ...(templateId ? { hsm_id: templateId } : {}) });
+  await graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates?${q}`, account.accessToken, { method: 'DELETE' });
+}
+
+// A sample file for a media header (Resumable Upload API of the Meta app): returns the handle Meta wants
+export async function uploadTemplateSample(appId: string, token: string, bytes: Buffer, mime: string, fileName: string) {
+  const q = new URLSearchParams({ file_name: fileName, file_length: String(bytes.length), file_type: mime });
+  const session = await graphJson(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(appId)}/uploads?${q}`, token, { method: 'POST' });
+  const res = await fetch(`${env.graphBase}/${env.graphVersion}/${session.id}`, {
+    method: 'POST',
+    headers: { Authorization: `OAuth ${token}`, file_offset: '0', 'Content-Type': mime },
+    body: new Uint8Array(bytes),
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok || typeof data?.h !== 'string') throw new Error(data?.error?.message ?? `Couldn't upload the sample file (${res.status})`);
+  return data.h as string;
 }

@@ -56,6 +56,7 @@
   --color-bubble-in: #ffffff;
   --color-bubble-out: #dcf8c6;
   --color-tick-read: oklch(68.5% 0.169 237.323);
+  --color-link: #027eb5; /* links in chat messages (WhatsApp's link blue) */
 
   /* Status */
   --color-warning: #996e23;

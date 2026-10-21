@@ -1,5 +1,7 @@
 import express, { Router } from 'express';
 import { requireAuth } from '../auth.js';
+import { sendTemplateMessage } from '../services/templates.js';
+import { withSender } from '../services/senders.js';
 import { env } from '../env.js';
 import { sweepPresence } from '../presence.js';
 import { wakeSnoozedConversations } from '../services/conversationStatus.js';
@@ -66,6 +68,24 @@ inboxRouter.post(
 );
 
 // An image or document message's stored copy (members of the workspace only). Documents download with their name.
+// Send an approved template whose header is an image, video or document: the body is the file; `name`,
+// `language` and `values` (JSON) are query parameters, `fileName` the document's name
+inboxRouter.post('/conversations/:id/template', express.raw({ type: () => true, limit: '100mb' }), async (req, res) => {
+  const body = Buffer.isBuffer(req.body) && req.body.length ? req.body : undefined;
+  let values: unknown;
+  try {
+    values = typeof req.query.values === 'string' && req.query.values ? JSON.parse(req.query.values) : undefined;
+  } catch {
+    return res.status(400).json({ error: 'Invalid values' });
+  }
+  const sent = await sendTemplateMessage(
+    req.auth!,
+    { conversationId: req.params.id, name: req.query.name, language: req.query.language || undefined, values },
+    { bytes: body, mime: req.headers['content-type'], name: typeof req.query.fileName === 'string' ? req.query.fileName : undefined },
+  );
+  res.json(await withSender(sent));
+});
+
 inboxRouter.get('/messages/:id/media', async (req, res) => {
   const { bytes, mime, name } = await readMessageMedia(req.auth!.workspaceId, req.params.id);
   res.setHeader('Content-Type', mime);

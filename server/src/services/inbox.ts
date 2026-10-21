@@ -231,7 +231,7 @@ async function templateLanguage(account: { wabaId: string; accessToken: string }
   return pickTemplateLanguage(approved, name, requested);
 }
 
-export function pickTemplateLanguage(templates: ApprovedTemplate[], name: string, requested?: string) {
+export function pickTemplateLanguage(templates: Pick<ApprovedTemplate, 'name' | 'language' | 'needsParameters'>[], name: string, requested?: string) {
   const approved = templates.filter((t) => t.name === name);
   const languages = approved.map((t) => t.language).join(', ');
   if (!approved.length)
@@ -251,7 +251,7 @@ export function pickTemplateLanguage(templates: ApprovedTemplate[], name: string
 }
 
 // Everything that must be true before your team sends the customer anything (text, image or template)
-async function checkCanSend(workspaceId: string, conversationId: string, sentById: string | undefined, freeForm: boolean) {
+export async function checkCanSend(workspaceId: string, conversationId: string, sentById: string | undefined, freeForm: boolean) {
   const conversation = await requireConversation(workspaceId, conversationId);
   const account = await requireAccount(workspaceId);
 

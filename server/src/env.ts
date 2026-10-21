@@ -15,6 +15,11 @@ export const env = {
   metaVerifyToken: required('META_VERIFY_TOKEN'),
   graphVersion: process.env.GRAPH_API_VERSION ?? 'v21.0',
   isProd: process.env.NODE_ENV === 'production',
+  // Meta's Graph API (overridable only so tests can point it at a mock; nothing to set in normal use)
+  graphBase: (process.env.GRAPH_API_BASE || 'https://graph.facebook.com').replace(/\/$/, ''),
+  // Meta app id: only needed to create templates with an image/video/document header (Meta wants a sample file,
+  // uploaded through the app's Resumable Upload API). Optional.
+  metaAppId: process.env.META_APP_ID || '',
   // Product name used in emails (subjects and text)
   appName: process.env.APP_NAME || 'support-tyrescart',
   // How often assignees are reminded (toast) about their open chats still waiting for a reply; 0 disables

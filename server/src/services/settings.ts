@@ -31,7 +31,7 @@ export async function connectWhatsApp(auth: AuthPayload, rawInput: unknown) {
   let info: any;
   try {
     r = await fetch(
-      `https://graph.facebook.com/${env.graphVersion}/${encodeURIComponent(phoneNumberId)}?fields=display_phone_number`,
+      `${env.graphBase}/${env.graphVersion}/${encodeURIComponent(phoneNumberId)}?fields=display_phone_number`,
       { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15_000) },
     );
     info = await r.json();

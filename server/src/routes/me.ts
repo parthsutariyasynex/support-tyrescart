@@ -8,8 +8,8 @@ meRouter.use(requireAuth);
 
 meRouter.put('/avatar', express.raw({ type: () => true, limit: '3mb' }), async (req, res) => {
   const body = Buffer.isBuffer(req.body) ? req.body : undefined;
-  const { avatarUpdatedAt } = await saveAvatar(req.auth!.userId, body, req.headers['content-type']);
-  res.json({ avatarUpdatedAt });
+  // const { avatarUpdatedAt } = await saveAvatar(req.auth!.userId, body, req.headers['content-type']);
+  // res.json({ avatarUpdatedAt });
 });
 
 meRouter.delete('/avatar', async (req, res) => {

@@ -5,6 +5,7 @@ import { recordActivity } from './services/activity.js';
 import { withSender } from './services/senders.js';
 import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/incomingMedia.js';
 import { defaultStageValue } from './services/leadStages.js';
+import { runAutomations } from './services/automations.js';
 
 type Incoming = {
   waId: string;
@@ -108,7 +109,8 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     type: 'message_received',
     data: { messageId: message.id, preview: m.body.slice(0, 100) },
   });
-  // TODO: run automations / bot replies here
+  // Simple automations (routing, auto-reply); they never stop the message from being saved
+  await runAutomations(workspaceId, conversation.id).catch((err) => console.error('[automations] failed', conversation.id, (err as Error).message));
   return message;
 }
 

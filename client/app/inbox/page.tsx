@@ -11,6 +11,7 @@ import {
   type Message,
   deleteMessage,
   editMessage,
+  reactToMessage,
   fetchConversation,
   fetchConversationCounts,
   fetchConversations,
@@ -52,6 +53,8 @@ import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, Cont
 import { EmojiPicker, FileSendDialog } from './composerExtras';
 import { VoiceRecorder } from './voice';
 import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
+import { TemplatePicker, TemplateSendDialog } from './templates';
+import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
 import { ACCEPT, checkFile, filePreview, pastedName, sendFile } from '@/lib/media';
@@ -1114,6 +1117,7 @@ function Inbox({ meName }: { meName: string }) {
       {/* Right Chat Panel with WhatsApp Doodle Background */}
       {active ? (
         <ChatPanel
+          meName={meName}
           conversation={active}
           messages={messagesChatId === active.id ? messages : []}
           onLoadOlder={olderCursor ? loadOlderMessages : undefined}
@@ -1625,6 +1629,7 @@ function ChatPanel({
   isChatLoading = false,
   onLoadOlder,
   onSent,
+  meName,
   onOpenLabels,
   viewer,
   onMessageUpdated,
@@ -1644,6 +1649,7 @@ function ChatPanel({
   onToggleProfile,
 }: {
   conversation: Conversation;
+  meName: string; // you: the "My name" quick fill when sending a template
   messages: Message[];
   isChatLoading?: boolean;
   onLoadOlder?: () => void;
@@ -1678,6 +1684,7 @@ function ChatPanel({
   // Emoji picker and image sending
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null); // the image or document about to be sent
+  const [template, setTemplate] = useState<Template | null>(null); // the template about to be sent (values to fill in)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
@@ -1830,6 +1837,19 @@ function ChatPanel({
   }
   // Files can be sent (and dropped) only where the message box is: an open chat you may reply in
   const canAttach = !isClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  // Reacting follows the reply rules (open chat you may write in); the message must have gone through WhatsApp
+  const canReact = !isClosed && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  async function react(m: Message, emoji: string | null) {
+    setError('');
+    const before = m;
+    onMessageUpdated({ ...m, teamReaction: emoji, teamReactionById: emoji ? (viewer?.userId ?? null) : null }); // shows at once
+    try {
+      onMessageUpdated(await reactToMessage(m.id, emoji));
+    } catch (err) {
+      onMessageUpdated(before);
+      setError((err as Error).message);
+    }
+  }
 
   async function changeStatus(status: ConversationStatus, until?: Date) {
     setStatusBusy(true);
@@ -2307,6 +2327,7 @@ function ChatPanel({
                 onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
                 highlightTerm={searchOpen ? searchText : ''}
                 currentMatch={searchOpen && m.id === currentMatchId}
+                onReact={canReact && !m.deletedAt && m.status !== 'failed' && m.status !== 'pending' ? (emoji) => react(m, emoji) : undefined}
               />
             </Fragment>
           );
@@ -2437,6 +2458,9 @@ function ChatPanel({
             </svg>
           </button>
 
+          {/* WhatsApp templates: the only messages allowed once the 24-hour window has closed */}
+          <TemplatePicker disabled={!!editing || isClosed} highlight={false} onPick={setTemplate} />
+
           {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
           <textarea
             ref={inputRef}
@@ -2512,6 +2536,16 @@ function ChatPanel({
         </form>
         ))}
         {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
+        {template && (
+          <TemplateSendDialog
+            template={template}
+            conversationId={conversation.id}
+            customer={{ name: conversation.contact.name, waId: conversation.contact.waId }}
+            meName={meName}
+            onSent={onSent}
+            onClose={() => setTemplate(null)}
+          />
+        )}
       </footer>
 
       {menu && (
