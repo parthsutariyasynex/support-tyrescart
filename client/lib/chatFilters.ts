@@ -1,4 +1,5 @@
 import type { Conversation } from './inbox';
+import { zonedInstant } from './time';
 
 // The chat list's "Filter by" menu. Within a group any choice matches (OR); across groups all must match (AND).
 // The server applies the same rules (conversations query), this mirrors them for live updates on screen.
@@ -16,8 +17,9 @@ export const EMPTY_MENU_FILTERS: MenuFilters = { labelIds: [], assigneeIds: [], 
 export const activeFilterCount = (f: MenuFilters) =>
   (f.labelIds.length ? 1 : 0) + (f.assigneeIds.length ? 1 : 0) + (f.from || f.to ? 1 : 0);
 
-export const dayStart = (day: string) => (day ? new Date(`${day}T00:00:00`).toISOString() : null);
-export const dayEnd = (day: string) => (day ? new Date(`${day}T23:59:59.999`).toISOString() : null);
+// A Dubai calendar day's first and last moment, for the server (not the browser's own time zone)
+export const dayStart = (day: string) => (day ? zonedInstant(day, '00:00:00.000').toISOString() : null);
+export const dayEnd = (day: string) => (day ? zonedInstant(day, '23:59:59.999').toISOString() : null);
 
 export function toServerFilter(f: MenuFilters) {
   return {

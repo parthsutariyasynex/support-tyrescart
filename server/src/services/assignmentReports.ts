@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
+import { dubaiIso } from '../time.js';
 import { AppError } from './errors.js';
 import { requireAdmin } from './permissions.js';
 
@@ -113,14 +114,14 @@ export function csvCell(value: string | null | undefined) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export const CSV_COLUMNS = ['Assigned at (UTC)', 'Chat ID', 'Customer', 'Customer number', 'Previous assignee', 'New assignee', 'Assigned by', 'Reason'];
+export const CSV_COLUMNS = ['Assigned at (Dubai time)', 'Chat ID', 'Customer', 'Customer number', 'Previous assignee', 'New assignee', 'Assigned by', 'Reason'];
 
 export function assignmentReportCsv(rows: AssignmentReportRow[]) {
   const lines = [CSV_COLUMNS.map(csvCell).join(',')];
   for (const r of rows)
     lines.push(
       [
-        r.createdAt.toISOString(),
+        dubaiIso(r.createdAt),
         r.conversationId,
         r.contactName,
         r.contactWaId, // digits only (international format without +), as stored

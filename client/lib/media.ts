@@ -1,5 +1,6 @@
 import { API_URL, getToken } from './api';
 import type { Message } from './inbox';
+import { clockKey, dayKey } from './time';
 
 // Sending images (JPEG/PNG up to 5 MB) and documents (PDF, Word, Excel, PowerPoint, text up to 100 MB) from the
 // chat: WhatsApp's limits. The server checks every file again, from the file itself.
@@ -134,7 +135,6 @@ export function filePreview(m: { type: string; body: string; mediaName?: string 
 export function pastedName(file: File, now = new Date()) {
   if (file.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name)) return file;
   const ext = (file.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg');
-  const two = (n: number) => String(n).padStart(2, '0');
-  const stamp = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())} at ${two(now.getHours())}.${two(now.getMinutes())}.${two(now.getSeconds())}`;
+  const stamp = `${dayKey(now)} at ${clockKey(now).replaceAll(':', '.')}`; // Dubai time
   return new File([file], `Screenshot ${stamp}.${ext}`, { type: file.type, lastModified: file.lastModified });
 }

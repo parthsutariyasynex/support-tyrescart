@@ -1,19 +1,18 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CountryCode } from 'libphonenumber-js';
 import { setToken } from '@/lib/api';
 import { removeMyAvatar, uploadMyAvatar } from '@/lib/avatar';
 import { changeMyPassword, joinName, requestPasswordReset, splitName, updateMyProfile } from '@/lib/auth';
 import { passwordsProblem } from '@/lib/password';
 import { presenceOf, usePresence } from '@/lib/presence';
-import { currentZoneName, filterTimeZones, joinPhone, phoneCountries, splitPhone, timeZoneLabel, timeZoneOptions } from '@/lib/profileOptions';
-import { defaultTimeZone } from '@/lib/time';
+import { joinPhone, phoneCountries, splitPhone, timeZoneLabel } from '@/lib/profileOptions';
+import { APP_TIME_ZONE } from '@/lib/time';
 import { showToast } from '@/lib/toasts';
 import { AppShell, type Me } from '../AppShell';
 import { FormMessage, buttonClass, inputClass } from '../AuthShell';
 import { PresenceDot } from '../PresenceDot';
-import { SearchSelect } from '../SearchSelect';
 import { UserAvatar } from '../UserAvatar';
 import { NotificationSettings } from './NotificationSettings';
 import { SettingsShell } from './SettingsShell';
@@ -228,7 +227,7 @@ function Profile({ me }: { me: Me }) {
 
       <PasswordSection email={me.user.email} />
       <TwoFactorSection />
-      <TimeZoneSection value={me.user.timeZone ?? null} />
+      <TimeZoneSection />
     </>
   );
 }
@@ -378,57 +377,17 @@ function TwoFactorSection() {
   );
 }
 
-// Every date and time in the app (chats, reports, reminders, snooze) in this zone; saved at once
-function TimeZoneSection({ value }: { value: string | null }) {
-  const options = useMemo(() => timeZoneOptions(), []);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const workspaceDefault = defaultTimeZone();
-  const current = value ?? workspaceDefault;
-  const device = currentZoneName(Intl.DateTimeFormat().resolvedOptions().timeZone);
-
-  async function choose(tz: string) {
-    if (tz === current) return;
-    setBusy(true);
-    setError('');
-    try {
-      await updateMyProfile({ timeZone: tz === workspaceDefault ? '' : tz });
-      showToast(`tz:${Date.now()}`, '', `Time zone: ${timeZoneLabel(tz)}.`, 'System preference');
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
+// Every date and time in the app (chats, reports, reminders, snooze, working hours) is shown in Dubai time
+function TimeZoneSection() {
   return (
     <section className={sectionClass}>
       <h3 className="text-lg font-bold text-ink">System preference</h3>
       <div className="mt-4">
-        {label('Your time zone', 'time-zone', 'Dates and times in chats, reports and reminders are shown in this time zone')}
-        <SearchSelect
-          id="time-zone"
-          label="Your time zone"
-          value={current}
-          options={options.some((o) => o.value === current) ? options : [{ value: current, label: timeZoneLabel(current), offsetMinutes: 0 }, ...options]}
-          filter={filterTimeZones}
-          onChange={choose}
-          placeholder="Search by city, country or UTC offset"
-          disabled={busy}
-        />
-        <p className="mt-1.5 text-[11px] text-faint">
-          Times in chats, reports and reminders are shown in this time zone.
-          {value === null && ' This is your workspace’s default.'}
-          {device && device !== current && (
-            <>
-              {' '}
-              <button type="button" disabled={busy} onClick={() => choose(device)} className="font-medium text-primary hover:underline">
-                Use this device&apos;s time zone ({timeZoneLabel(device)})
-              </button>
-            </>
-          )}
+        {label('Time zone', 'time-zone', 'Dates and times in chats, reports and reminders are shown in this time zone')}
+        <p id="time-zone" className={readOnlyClass}>
+          {timeZoneLabel(APP_TIME_ZONE)}
         </p>
-        {error && <div className="mt-3"><FormMessage>{error}</FormMessage></div>}
+        <p className="mt-1.5 text-[11px] text-faint">All dates and times in the app are shown in Dubai time, whatever this device&apos;s time zone is.</p>
       </div>
     </section>
   );

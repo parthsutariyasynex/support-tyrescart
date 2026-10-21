@@ -1,4 +1,5 @@
 import { API_URL, getToken, gql } from './api';
+import { zonedInstant } from './time';
 
 // Reports section (owners and admins only on the server). The assignment report is the only place the
 // Assignment Reason is ever shown: it is not part of chats, history or the activity timeline.
@@ -64,10 +65,10 @@ export async function downloadAssignmentReportCsv(range: ReportRange = {}) {
   return name;
 }
 
-// Local calendar day (yyyy-mm-dd) -> ISO bounds for the server (start of day / end of day, in the browser's zone)
+// Dubai calendar day (yyyy-mm-dd) -> ISO bounds for the server (start of day / end of day in Dubai time)
 export function dayStartIso(day: string) {
-  return day ? new Date(`${day}T00:00:00`).toISOString() : null;
+  return day ? zonedInstant(day, '00:00:00.000').toISOString() : null;
 }
 export function dayEndIso(day: string) {
-  return day ? new Date(`${day}T23:59:59.999`).toISOString() : null;
+  return day ? zonedInstant(day, '23:59:59.999').toISOString() : null;
 }

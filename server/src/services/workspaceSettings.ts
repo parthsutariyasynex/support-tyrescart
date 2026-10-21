@@ -3,6 +3,7 @@ import type { AuthPayload } from '../auth.js';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
 import { emitToWorkspace } from '../realtime.js';
+import { APP_TIME_ZONE } from '../time.js';
 import { getPermissions, requireAdmin } from './permissions.js';
 import { parse } from './validate.js';
 
@@ -11,7 +12,7 @@ import { parse } from './validate.js';
 // page. Read by: the web app (time zone, phone country, business day start for snooze), assignment reminders,
 // presence (away), and the deleted-contacts purge.
 export const DEFAULTS = {
-  defaultTimeZone: 'Asia/Dubai',
+  defaultTimeZone: APP_TIME_ZONE,
   defaultCountry: 'AE',
   businessDayStartHour: 9,
   reminderMinutes: () => env.assignmentReminderMinutes,
@@ -28,7 +29,8 @@ export type WorkspaceSettings = {
 };
 
 const withDefaults = (row: Partial<Record<keyof WorkspaceSettings, unknown>> | null): WorkspaceSettings => ({
-  defaultTimeZone: (row?.defaultTimeZone as string | null) ?? DEFAULTS.defaultTimeZone,
+  // Always Dubai: the app shows every time in Dubai time (a time zone saved earlier is kept but not used)
+  defaultTimeZone: APP_TIME_ZONE,
   defaultCountry: (row?.defaultCountry as string | null) ?? DEFAULTS.defaultCountry,
   businessDayStartHour: (row?.businessDayStartHour as number | null) ?? DEFAULTS.businessDayStartHour,
   reminderMinutes: (row?.reminderMinutes as number | null) ?? DEFAULTS.reminderMinutes(),
@@ -69,7 +71,13 @@ const isTimeZone = (tz: string) => {
   }
 };
 const updateSchema = z.object({
-  defaultTimeZone: z.string().trim().max(64).refine(isTimeZone, 'Choose a time zone from the list').optional(),
+  defaultTimeZone: z
+    .string()
+    .trim()
+    .max(64)
+    .refine(isTimeZone, 'Choose a time zone from the list')
+    .refine((tz) => tz === APP_TIME_ZONE, `All dates and times are shown in Dubai time (${APP_TIME_ZONE})`)
+    .optional(),
   defaultCountry: z
     .string()
     .trim()

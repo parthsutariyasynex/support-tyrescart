@@ -50,7 +50,7 @@ export function TemplatePicker({ disabled, highlight, onPick }: { disabled: bool
   const shown = (templates ?? []).filter((t) => !q || t.name.toLowerCase().includes(q) || t.body.toLowerCase().includes(q));
   return (
     <div ref={ref} className="relative">
-      <button
+      {/* <button
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
@@ -61,7 +61,7 @@ export function TemplatePicker({ disabled, highlight, onPick }: { disabled: bool
         }`}
       >
         Template
-      </button>
+      </button> */}
 
       {open && (
         <div

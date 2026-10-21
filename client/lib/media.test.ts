@@ -37,7 +37,7 @@ describe('files before sending', () => {
 });
 
 test('pasted screenshots get a readable name; copied files keep theirs', () => {
-  const at = new Date(2026, 9, 21, 14, 30, 5);
+  const at = new Date('2026-10-21T10:30:05Z'); // 14:30:05 in Dubai: the name uses Dubai time, not the device's
   assert.equal(pastedName(new File(['x'], 'image.png', { type: 'image/png' }), at).name, 'Screenshot 2026-10-21 at 14.30.05.png');
   assert.equal(pastedName(new File(['x'], '', { type: 'image/jpeg' }), at).name, 'Screenshot 2026-10-21 at 14.30.05.jpg');
   const kept = pastedName(new File(['x'], 'invoice.pdf', { type: 'application/pdf' }), at);
