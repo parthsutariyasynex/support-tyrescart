@@ -169,7 +169,7 @@ export const typeDefs = /* GraphQL */ `
 
   extend type Query {
     "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', 'me' (assigned to you or collaborating), or 'collaborating' (only chats you collaborate on). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
-    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime): ConversationConnection!
+    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime, leadStage: String): ConversationConnection!
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
     messageTemplates: [MessageTemplate!]!
@@ -212,7 +212,7 @@ export const typeDefs = /* GraphQL */ `
 `;
 
 type PageArgs = { first?: number | null; after?: string | null };
-type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null; sort?: string | null; labelIds?: string[] | null; assigneeIds?: string[] | null; from?: Date | null; to?: Date | null };
+type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null; sort?: string | null; labelIds?: string[] | null; assigneeIds?: string[] | null; from?: Date | null; to?: Date | null; leadStage?: string | null };
 const pageArgs = ({ first, after }: PageArgs) => ({ first: first ?? undefined, after: after ?? undefined });
 
 type AssigneeRefMember = { id: string; role: string; user: { id: string; name: string } };
@@ -232,11 +232,11 @@ type ConversationParent = {
 
 export const resolvers = {
   Query: {
-    conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
+    conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
         (await listConversations(
           workspaceId,
-          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined, sort: sort ?? undefined, labelIds: labelIds ?? undefined, assigneeIds: assigneeIds ?? undefined, from: from ?? undefined, to: to ?? undefined },
+          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined, sort: sort ?? undefined, labelIds: labelIds ?? undefined, assigneeIds: assigneeIds ?? undefined, from: from ?? undefined, to: to ?? undefined, leadStage: leadStage ?? undefined },
           userId,
         )) as Page<ConversationParent>,
       ),

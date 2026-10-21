@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
 import { API_URL, getToken, isNetworkError } from '@/lib/api';
@@ -51,10 +51,10 @@ import { pinText, showToast } from '@/lib/toasts';
 import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, ContactPanel } from './ContactPanel';
 import { EmojiPicker, FileSendDialog } from './composerExtras';
 import { VoiceRecorder } from './voice';
-import { StageMenu, StagePill } from './StageMenu';
+import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, checkFile, filePreview, sendFile } from '@/lib/media';
+import { ACCEPT, checkFile, filePreview, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
 import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, stagesChanged } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
@@ -105,7 +105,7 @@ export default function InboxPage() {
   return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
 }
 
-type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null; sort: SortOrder; status: 'open' | 'snoozed' | 'closed' | null } & ReturnType<typeof toServerFilter>;
+type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null; sort: SortOrder; status: 'open' | 'snoozed' | 'closed' | null; leadStage: string | null } & ReturnType<typeof toServerFilter>;
 const filterKey = (f: ConversationFilter) => JSON.stringify(f);
 type SortOrder = 'newest' | 'oldest';
 type StatusChange = Pick<Conversation, 'status' | 'closedAt' | 'closedById'> & { conversationId: string; snoozedUntil?: string | null };
@@ -350,8 +350,11 @@ function Inbox({ meName }: { meName: string }) {
     setFilterType(f);
   }, []);
 
+  // Left menu → Lifecycle stages: ?stage=<value> shows only the chats whose customer is at that stage
+  const searchParams = useSearchParams();
+  const stageFilter = searchParams.get('stage') || null;
   const menuFilterKey = JSON.stringify(menuFilters);
-  const currentFilter = (): ConversationFilter => ({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null, sort: sortOrder, status: statusFilter === 'all' ? null : statusFilter, ...toServerFilter(menuFilters) });
+  const currentFilter = (): ConversationFilter => ({ labelId: labelFilter, assignee: assigneeFilter, search: searchTerm || null, sort: sortOrder, status: statusFilter === 'all' ? null : statusFilter, leadStage: stageFilter, ...toServerFilter(menuFilters) });
   const filterRef = useRef<ConversationFilter>(currentFilter());
   filterRef.current = currentFilter();
   const lastActiveRef = useRef<Conversation | null>(null);
@@ -622,7 +625,7 @@ function Inbox({ meName }: { meName: string }) {
     loadedMoreRef.current = false;
     setConversationsCursor(null);
     loadConversations();
-  }, [labelFilter, assigneeFilter, searchTerm, sortOrder, menuFilterKey, statusFilter, loadConversations]);
+  }, [labelFilter, assigneeFilter, searchTerm, sortOrder, menuFilterKey, statusFilter, stageFilter, loadConversations]);
 
   // AppShell's top header leaves a slot for page controls. Look it up once this page is in the DOM (per path), and
   // if the header isn't rendered yet (first sign-in, before "me" loads) wait for it to appear.
@@ -1026,6 +1029,7 @@ function Inbox({ meName }: { meName: string }) {
   function listFilter(c: Conversation) {
     if (statusFilter !== 'all' && c.status !== statusFilter) return false;
     if (!matchesMenuFilters(c, menuFilters)) return false;
+    if (stageFilter && c.contact.leadStage !== stageFilter) return false; // a stage change moves the chat in or out at once
     // Instant, on what is loaded; the server applies the same rule across all messages and refreshes the list.
     // While the server result for this exact text is in, chats it returned stay listed even if only an older
     // message matched (the local rule only sees the last one).
@@ -1093,6 +1097,18 @@ function Inbox({ meName }: { meName: string }) {
         onOpenLabels={openPicker}
         pickerConversationId={picker?.conversationId}
         loading={loading}
+        stageBar={
+          stageFilter ? (
+            <StageFilterBar
+              value={stageFilter}
+              onClear={() => {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('stage');
+                router.replace(`${url.pathname}${url.search}`, { scroll: false });
+              }}
+            />
+          ) : null
+        }
       />
 
       {/* Right Chat Panel with WhatsApp Doodle Background */}
@@ -1242,7 +1258,9 @@ function ConversationList({
   typing,
   meId,
   unassignedCount,
+  stageBar,
 }: {
+  stageBar?: React.ReactNode; // the lifecycle stage being shown (left menu), with a way back to all chats
   conversations: Conversation[];
   totalCount: number;
   // Signed-in user: their unopened assignments show bold
@@ -1438,6 +1456,7 @@ function ConversationList({
       </div>
 
 
+      {stageBar}
       {/* Conversation List / Empty State */}
       <div ref={listContainerRef} onScroll={onListScroll} className="flex-1 min-h-0 overflow-y-auto" style={{ scrollbarGutter: 'stable' }}>
         {conversations.length === 0 && conversationsError ? (
@@ -2030,6 +2049,15 @@ function ChatPanel({
         if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
         const files = e.dataTransfer.files;
         pickFile(files[0], files.length > 1);
+      }}
+      // A pasted screenshot or copied file (⌘V / Ctrl+V in the message box or anywhere in the chat) opens the same
+      // preview as a chosen file; pasted text is left to the box as usual
+      onPaste={(e) => {
+        const files = [...e.clipboardData.items].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter((f): f is File => !!f);
+        if (!files.length) return;
+        e.preventDefault();
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        pickFile(pastedName(files[0]), files.length > 1);
       }}
     >
       {dragging && (

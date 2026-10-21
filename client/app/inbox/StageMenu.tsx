@@ -184,3 +184,29 @@ export function StagePill({ value }: { value: string | null | undefined }) {
     </span>
   );
 }
+
+// Above the chat list when a lifecycle stage is chosen in the left menu: which one, and ✕ to show all chats again
+export function StageFilterBar({ value, onClear }: { value: string; onClear: () => void }) {
+  const [stages, setStages] = useState<ContactOption[] | null>(stagesCache);
+  const load = (fresh: boolean) =>
+    fetchContactFieldOptions(fresh)
+      .then((o) => setStages(o.leadStages))
+      .catch(() => {});
+  useEffect(() => {
+    load(false);
+  }, []);
+  useStagesChanged(() => load(true));
+  const stage = stages?.find((s) => s.value === value);
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-surface-muted/60 px-4 py-2 text-xs text-body" role="status">
+      <span className="text-muted">Lifecycle stage:</span>
+      <span className="inline-flex min-w-0 items-center gap-1.5 font-semibold text-ink">
+        <Swatch color={stage?.color} />
+        <span className="truncate">{stage?.label ?? (stages ? 'Removed stage' : '…')}</span>
+      </span>
+      <button type="button" onClick={onClear} aria-label="Show all chats (clear the stage filter)" title="Show all chats" className="ml-auto rounded-md px-1.5 py-0.5 text-body-soft hover:bg-surface-strong hover:text-ink">
+        ✕
+      </button>
+    </div>
+  );
+}
