@@ -1,3 +1,9 @@
+import { env } from '../env.js';
+import { AppError } from '../services/errors.js';
+import { TEMPLATE_LANGUAGES } from '../services/templateModel.js';
+import { allTemplates, approvedTemplates, createMessageTemplate, deleteMessageTemplate, sendTemplateMessage, updateMessageTemplate } from '../services/templates.js';
+import { reactToMessage } from '../services/reactions.js';
+import { withSender } from '../services/senders.js';
 import { prisma } from '../prisma.js';
 import { toAssigneeRef } from '../services/assign.js';
 import { conversationLabels } from '../services/labels.js';
@@ -11,7 +17,6 @@ import { senderName } from '../services/senders.js';
 import {
   listConversations,
   listMessages,
-  listMessageTemplates,
   markConversationRead,
   requireConversation,
   sendMessage,
@@ -41,6 +46,14 @@ export const typeDefs = /* GraphQL */ `
     "text | template | button | interactive | image | ..."
     type: String!
     body: String!
+    "The customer's reaction (an emoji), as in WhatsApp; null = none"
+    customerReaction: String
+    "The business's reaction (one for the whole team); null = none"
+    teamReaction: String
+    "Who on the team reacted"
+    teamReactionById: ID
+    "Sent by Simple automations (e.g. auto_reply), not by a person; null otherwise"
+    automation: String
     "pending | sent | delivered | read | failed | received"
     status: String!
     error: String
@@ -130,18 +143,72 @@ export const typeDefs = /* GraphQL */ `
     name: String!
     "Language code exactly as approved, e.g. en_US. Omit to use the template's only approved language."
     language: String
+    "JSON: { header: { var: value }, body: { var: value }, buttons: { index: value } } (variables by name or number)"
+    values: String
   }
 
   "An approved WhatsApp template (one per name + language)"
   type MessageTemplate {
+    "Meta's id of this template (one per name + language)"
+    id: ID!
     name: String!
     "Language code as approved by Meta, e.g. en or en_US"
     language: String!
+    "MARKETING | UTILITY | AUTHENTICATION"
     category: String!
+    "APPROVED | PENDING | REJECTED | PAUSED | DISABLED | …"
+    status: String!
+    rejectedReason: String
+    "POSITIONAL ({{1}}) or NAMED ({{name}}) variables"
+    parameterFormat: String!
+    header: TemplateHeader
     "Body text, for preview"
     body: String!
-    "Has {{variables}} or a media header; can't be sent from the inbox yet"
+    "The body's variables, in order (e.g. 1, 2 or customer_name)"
+    bodyVariables: [String!]!
+    footer: String
+    buttons: [TemplateButton!]!
+    "Has values to fill in (variables, a media header, a coupon or code)"
     needsParameters: Boolean!
+    "Whether it can be sent from this app (carousels, catalogs and flows can't yet)"
+    sendable: Boolean!
+    unsupportedReason: String
+  }
+
+  type TemplateHeader {
+    "TEXT | IMAGE | VIDEO | DOCUMENT | LOCATION"
+    format: String!
+    text: String!
+    variables: [String!]!
+  }
+
+  type TemplateButton {
+    "QUICK_REPLY | URL | PHONE_NUMBER | COPY_CODE | OTP | …"
+    type: String!
+    text: String!
+    url: String
+    phoneNumber: String
+    "URL buttons: the variable part of the link"
+    variables: [String!]!
+  }
+
+  type CreatedTemplate {
+    id: ID!
+    "Usually PENDING (Meta reviews it)"
+    status: String!
+    category: String!
+  }
+
+  "Settings → Templates: what the editor offers"
+  type TemplateEditorInfo {
+    languages: [TemplateLanguage!]!
+    "Whether media-header templates can be created (needs META_APP_ID on the server)"
+    mediaHeaderAvailable: Boolean!
+  }
+
+  type TemplateLanguage {
+    value: String!
+    label: String!
   }
 
   input StartConversationInput {
@@ -173,6 +240,9 @@ export const typeDefs = /* GraphQL */ `
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
     messageTemplates: [MessageTemplate!]!
+    "Admins: every template of the number, any status (Settings → Templates)"
+    allMessageTemplates: [MessageTemplate!]!
+    templateEditorInfo: TemplateEditorInfo!
     conversation(id: ID!): Conversation!
     "Newest page first. first: 1-100 (default 50)"
     messages(conversationId: ID!, first: Int, after: String): MessageConnection!
@@ -184,6 +254,12 @@ export const typeDefs = /* GraphQL */ `
     sendTextMessage(input: SendTextInput!): Message!
     "Approved template; allowed any time"
     sendTemplateMessage(input: SendTemplateInput!): Message!
+    "Admins: submit a new template for Meta's review. spec: JSON (see services/templateModel templateSpecSchema). Media headers: POST /templates"
+    createMessageTemplate(spec: String!): CreatedTemplate!
+    "Admins: change a template (Meta reviews it again); name and language stay"
+    updateMessageTemplate(id: ID!, spec: String!): Boolean!
+    "Admins: delete a template (with id: that language only)"
+    deleteMessageTemplate(name: String!, id: ID): Boolean!
     startConversation(input: StartConversationInput!): Conversation!
     "Development only: fakes an incoming customer message"
     simulateIncomingMessage(input: SimulateIncomingInput): Boolean!
@@ -204,6 +280,8 @@ export const typeDefs = /* GraphQL */ `
     removeCollaborator(conversationId: ID!, userId: ID!): [WorkspaceMember!]!
     "Edit the text of your own sent message (owners/admins: any sent message). Doesn't change what the customer received."
     editMessage(input: EditMessageInput!): Message!
+    "React to a message with an emoji (sent to WhatsApp); empty or null removes the team's reaction"
+    reactToMessage(messageId: ID!, emoji: String): Message!
     "Delete for everyone in the app (own messages; owners/admins: any sent message). Pass version to guard against concurrent edits."
     deleteMessage(messageId: ID!, version: Int): Message!
     "Undo a delete for everyone: only whoever deleted it, shortly afterwards, and only if nothing changed since"
@@ -230,7 +308,21 @@ type ConversationParent = {
   assignedTo?: unknown;
 };
 
+// JSON arguments (template values and specs) are checked by the services' schemas after parsing
+function jsonInput(raw: string) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new AppError('Invalid JSON', 400, 'BAD_USER_INPUT');
+  }
+}
+
 export const resolvers = {
+  MessageTemplate: {
+    body: (t: { body: { text: string } | string }) => (typeof t.body === 'string' ? t.body : t.body.text),
+    bodyVariables: (t: { body: { variables: string[] } | string }) => (typeof t.body === 'string' ? [] : t.body.variables),
+    needsParameters: (t: { needsParameters?: boolean }) => !!t.needsParameters,
+  },
   Query: {
     conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
@@ -242,7 +334,9 @@ export const resolvers = {
       ),
     ),
     conversationCounts: authed((_args, { workspaceId }) => conversationCounts(workspaceId)),
-    messageTemplates: authed((_args, { workspaceId }) => listMessageTemplates(workspaceId)),
+    messageTemplates: authed((_args, auth) => approvedTemplates(auth)),
+    allMessageTemplates: authed((_args, auth) => allTemplates(auth)),
+    templateEditorInfo: authed(async () => ({ languages: TEMPLATE_LANGUAGES, mediaHeaderAvailable: !!env.metaAppId })),
     conversation: authed(({ id }: { id: string }, { workspaceId }) => requireConversation(workspaceId, id)),
     messages: authed(async ({ conversationId, ...args }: PageArgs & { conversationId: string }, { workspaceId, userId }) =>
       toConnection(
@@ -255,20 +349,24 @@ export const resolvers = {
     sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string } }, { workspaceId, userId }) =>
       sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body }, userId),
     ),
-    sendTemplateMessage: authed(
-      (
-        { input }: { input: { conversationId: string; name: string; language?: string | null } },
-        { workspaceId, userId },
-      ) =>
-        sendMessage(
-          workspaceId,
-          input.conversationId,
-          { type: 'template', name: input.name, language: input.language ?? undefined },
-          userId,
-        ),
+    sendTemplateMessage: authed(async ({ input }: { input: { conversationId: string; name: string; language?: string | null; values?: string | null } }, auth) =>
+      withSender(
+        await sendTemplateMessage(auth, {
+          conversationId: input.conversationId,
+          name: input.name,
+          language: input.language ?? undefined,
+          values: input.values ? jsonInput(input.values) : undefined,
+        }),
+      ),
     ),
+    createMessageTemplate: authed(async ({ spec }: { spec: string }, auth) => createMessageTemplate(auth, jsonInput(spec))),
+    updateMessageTemplate: authed(async ({ id, spec }: { id: string; spec: string }, auth) => updateMessageTemplate(auth, id, jsonInput(spec))),
+    deleteMessageTemplate: authed(async ({ name, id }: { name: string; id?: string | null }, auth) => deleteMessageTemplate(auth, name, id)),
     editMessage: authed(({ input }: { input: { messageId: string; body: string; version: number } }, auth) =>
       editMessage(auth, input.messageId, { body: input.body, version: input.version }),
+    ),
+    reactToMessage: authed(async ({ messageId, emoji }: { messageId: string; emoji?: string | null }, auth) =>
+      withSender(await reactToMessage(auth, messageId, emoji ?? null)),
     ),
     deleteMessage: authed(({ messageId, version }: { messageId: string; version?: number | null }, auth) =>
       deleteMessage(auth, messageId, version == null ? {} : { version }),

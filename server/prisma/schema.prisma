@@ -68,6 +68,7 @@ model Workspace {
   customProperties ContactCustomProperty[]
   leadStages     LeadStage[]
   settings       WorkspaceSettings?
+  automation     AutomationSettings?
   fieldChoices   ContactFieldChoice[]
 }
 
@@ -179,6 +180,8 @@ model Conversation {
   assignedAt       DateTime?
   // Last reminder sent for this chat (persisted, so restarts don't reset the 5-minute timer or send duplicates)
   reminderSentAt   DateTime?
+  // Simple automations: when this chat last got an automatic reply (not repeated within the cooldown)
+  lastAutoReplyAt  DateTime?
   lastMessageAt    DateTime                   @default(now())
   // Customer's last inbound message: free-form replies allowed for 24h after this
   lastInboundAt    DateTime?
@@ -244,6 +247,13 @@ model Message {
   deletedById    String?
   // Bumped on every edit/delete so concurrent edits and late socket events can't overwrite newer content
   version        Int               @default(0)
+  // Reactions, like WhatsApp: one from the customer and one from the business (the team shares the business
+  // number, so a teammate's reaction replaces another's). null = none.
+  customerReaction String?         @db.VarChar(32)
+  teamReaction     String?         @db.VarChar(32)
+  teamReactionById String?
+  // Sent by Simple automations (e.g. "auto_reply"), not by a person; null for everything else
+  automation       String?         @db.VarChar(20)
   // --- standard audit fields (sentById = createdBy, deletedById = deletedBy, status = delivery status) ---
   updatedAt      DateTime          @default(now()) @updatedAt
   updatedBy      String?
@@ -473,6 +483,37 @@ model ContactListMember {
 
 // Each person's layout of the profile panel's "Contact property" (per workspace). Default view = every property in
 // the standard order; personal view = this person's order and hidden properties. Keys are the panel's property keys.
+// Settings → Company settings → Simple automations (admins): automatic replies when a customer writes (one text
+// during working hours, another outside them; not repeated within cooldownHours for the same chat) and automatic
+// assignment of new chats to chosen members in turn. Nothing runs while `enabled` is false.
+model AutomationSettings {
+  workspaceId          String    @id
+  enabled              Boolean   @default(false)
+  // Working days as day numbers, 0 = Sunday … 6 = Saturday, e.g. "1,2,3,4,5,6"; times are HH:MM in the
+  // workspace's default time zone (Workspace preferences)
+  workingDays          String    @default("1,2,3,4,5") @db.VarChar(20)
+  workStart            String    @default("09:00") @db.VarChar(5)
+  workEnd              String    @default("18:00") @db.VarChar(5)
+  // Each working day's own hours, JSON like {"1":"09:00-18:00","6":"10:00-14:00"}; a day missing here uses
+  // workStart-workEnd. "23:59" as an end means until midnight.
+  dayHours             String?   @db.VarChar(300)
+  replyInHoursEnabled  Boolean   @default(false)
+  replyInHours         String?   @db.Text
+  replyOutHoursEnabled Boolean   @default(false)
+  replyOutHours        String?   @db.Text
+  cooldownHours        Int       @default(24)
+  routingEnabled       Boolean   @default(false)
+  // specific (everything to the first member listed) | round_robin (in turn) | unassigned (left in New Leads)
+  routingMode          String    @default("round_robin") @db.VarChar(20)
+  // JSON array of member ids, assigned in turn; routingLastMemberId = who got the last one
+  routingMemberIds     String?   @db.Text
+  routingOnlineOnly    Boolean   @default(false)
+  routingLastMemberId  String?
+  updatedAt            DateTime  @updatedAt
+  updatedBy            String?
+  workspace            Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
 // Settings → Company settings → Workspace preferences. null = the app's default (see services/workspaceSettings.ts)
 model WorkspaceSettings {
   workspaceId                 String    @id

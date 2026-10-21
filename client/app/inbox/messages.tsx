@@ -2,10 +2,11 @@
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { Message } from '@/lib/inbox';
+import { type Message, QUICK_REACTIONS } from '@/lib/inbox';
+import { linkSegments } from '@/lib/links';
 import { highlightSegments } from '@/lib/messageSearch';
 import { formatDateTime, formatTime } from '@/lib/time';
-import { ChatImage, ChatPlayer, DocumentCard } from './composerExtras';
+import { ChatImage, ChatPlayer, DocumentCard, EmojiPicker } from './composerExtras';
 import { VoicePlayer } from './voice';
 import { isMediaPlaceholder } from '@/lib/media';
 
@@ -58,11 +59,14 @@ export function MessageBubble({
   onOpenMenu,
   highlightTerm = '',
   currentMatch = false,
+  onReact,
 }: {
   message: Message;
   actions: MessageAction[];
   highlighted: boolean;
   onOpenMenu: (anchor: HTMLElement) => void;
+  // React with an emoji (null removes the team's reaction); absent when you can't react to this message
+  onReact?: (emoji: string | null) => void;
   // "Search in conversation": the text to mark inside the bubble, and whether this is the match being shown
   highlightTerm?: string;
   currentMatch?: boolean;
@@ -71,6 +75,7 @@ export function MessageBubble({
   const bubbleRef = useRef<HTMLDivElement>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasActions = actions.length > 0;
+  const reactions = [m.customerReaction, m.teamReaction].filter((r): r is string => !!r);
 
   const cancelPress = () => {
     if (pressTimer.current) clearTimeout(pressTimer.current);
@@ -78,7 +83,7 @@ export function MessageBubble({
   };
 
   return (
-    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`} data-message-id={m.id}>
+    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} ${reactions.length ? 'mb-3' : ''}`} data-message-id={m.id}>
       <div
         ref={bubbleRef}
         onContextMenu={(e) => {
@@ -112,6 +117,14 @@ export function MessageBubble({
           </button>
         )}
 
+        {onReact && !m.deletedAt && <ReactionPicker isOut={isOut} current={m.teamReaction ?? null} onReact={onReact} />}
+        {reactions.length > 0 && <ReactionBadge message={m} isOut={isOut} onRemove={onReact && m.teamReaction ? () => onReact(null) : undefined} />}
+
+        {m.automation && !m.senderName && (
+          <p className="mb-0.5 pr-4 text-[11px] font-semibold text-muted" title="Sent automatically (Settings → Simple automations)">
+            🤖 Auto-reply
+          </p>
+        )}
         {m.senderName && (
           <p
             className={`mb-0.5 truncate pr-4 text-[11px] font-semibold ${isOut ? '' : 'text-primary'}`}
@@ -149,17 +162,35 @@ export function MessageBubble({
           )}
           {(m.mediaMime ? m.body && !isMediaPlaceholder(m.body) : true) && (
           <p className="whitespace-pre-wrap break-words pr-3 text-[13px] leading-relaxed">
-            {highlightTerm
-              ? highlightSegments(m.body, highlightTerm).map((seg, i) =>
-                  seg.match ? (
-                    <mark key={i} className="rounded-sm bg-warning-soft px-0.5 text-ink">
-                      {seg.text}
-                    </mark>
-                  ) : (
-                    <Fragment key={i}>{seg.text}</Fragment>
-                  ),
-                )
-              : m.body}
+            {/* Web addresses are links that open in a new tab; "Search in conversation" marks matches inside them too */}
+            {linkSegments(m.body).map((part, p) => {
+              const inner = highlightTerm
+                ? highlightSegments(part.text, highlightTerm).map((seg, i) =>
+                    seg.match ? (
+                      <mark key={i} className="rounded-sm bg-warning-soft px-0.5 text-ink">
+                        {seg.text}
+                      </mark>
+                    ) : (
+                      <Fragment key={i}>{seg.text}</Fragment>
+                    ),
+                  )
+                : part.text;
+              return part.href ? (
+                <a
+                  key={p}
+                  href={part.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={part.href}
+                  onClick={(e) => e.stopPropagation()}
+                  className="break-all text-link underline decoration-1 underline-offset-2 hover:opacity-80"
+                >
+                  {inner}
+                </a>
+              ) : (
+                <Fragment key={p}>{inner}</Fragment>
+              );
+            })}
           </p>
           )}
           </>
@@ -183,6 +214,104 @@ export function MessageBubble({
         </div>
       </div>
     </div>
+  );
+}
+
+// 😊 beside the bubble on hover: a bar of quick reactions (and "+" for any emoji), like WhatsApp. Choosing the
+// reaction you already gave removes it.
+function ReactionPicker({ isOut, current, onReact }: { isOut: boolean; current: string | null; onReact: (emoji: string | null) => void }) {
+  const [open, setOpen] = useState<'quick' | 'all' | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(null);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(null);
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const choose = (emoji: string) => {
+    setOpen(null);
+    onReact(emoji === current ? null : emoji);
+  };
+  return (
+    <div ref={ref} className={`absolute top-1/2 z-20 -translate-y-1/2 ${isOut ? '-left-9' : '-right-9'}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => (o ? null : 'quick'))}
+        aria-label="React to message"
+        title="React"
+        aria-expanded={!!open}
+        className={`flex h-7 w-7 items-center justify-center rounded-full bg-surface text-body-soft shadow-xs transition hover:text-ink group-hover:opacity-100 [@media(hover:none)]:opacity-100 ${open ? 'opacity-100' : 'opacity-0'}`}
+      >
+        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8.5 14.5s1.3 1.5 3.5 1.5 3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01" />
+        </svg>
+      </button>
+      {open === 'quick' && (
+        <div
+          role="toolbar"
+          aria-label="Reactions"
+          className={`absolute bottom-full mb-2 flex items-center gap-0.5 rounded-full border border-line bg-surface px-1.5 py-1 shadow-xl ${isOut ? 'right-0' : 'left-0'}`}
+        >
+          {QUICK_REACTIONS.map((e) => (
+            <button
+              key={e}
+              type="button"
+              onClick={() => choose(e)}
+              aria-label={`React with ${e}`}
+              aria-pressed={current === e}
+              className={`flex h-9 w-9 items-center justify-center rounded-full text-[22px] leading-none transition hover:scale-125 ${current === e ? 'bg-surface-strong' : ''}`}
+            >
+              {e}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setOpen('all')}
+            aria-label="More reactions"
+            title="More"
+            className="ml-0.5 flex h-8 w-8 items-center justify-center rounded-full bg-surface-strong text-lg leading-none text-body-soft hover:text-ink"
+          >
+            +
+          </button>
+        </div>
+      )}
+      {open === 'all' && (
+        <div className={`absolute bottom-full mb-2 ${isOut ? 'right-0' : 'left-0'}`}>
+          <div className="relative">
+            <EmojiPicker onPick={choose} onClose={() => setOpen(null)} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Under the bubble's corner, as in WhatsApp: the reactions it has (the customer's and the business's); clicking
+// removes the team's reaction
+function ReactionBadge({ message: m, isOut, onRemove }: { message: Message; isOut: boolean; onRemove?: () => void }) {
+  const same = !!m.customerReaction && m.customerReaction === m.teamReaction;
+  const who = [m.customerReaction && `Customer ${m.customerReaction}`, m.teamReaction && `Team ${m.teamReaction}`].filter(Boolean).join(' · ');
+  const emojis = same ? [m.customerReaction!] : [m.customerReaction, m.teamReaction].filter((r): r is string => !!r);
+  return (
+    <button
+      type="button"
+      onClick={onRemove}
+      disabled={!onRemove}
+      aria-label={`Reactions: ${who}${onRemove ? '. Click to remove the team reaction' : ''}`}
+      title={`${who}${onRemove ? ' · click to remove the team reaction' : ''}`}
+      className={`absolute -bottom-3.5 z-10 flex items-center gap-0.5 rounded-full border border-line bg-surface px-1.5 py-0.5 text-[13px] leading-none shadow-xs disabled:cursor-default ${isOut ? 'right-2' : 'left-2'} ${onRemove ? 'hover:bg-surface-muted' : ''}`}
+    >
+      {emojis.map((e, i) => (
+        <span key={i}>{e}</span>
+      ))}
+      {same && <span className="pl-0.5 text-[10px] font-semibold text-muted">2</span>}
+    </button>
   );
 }
 

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { env } from '../env.js';
 import { applyStatus, parseWebhookMessage, saveIncoming } from '../messages.js';
+import { applyCustomerReaction } from '../services/reactions.js';
 import { prisma } from '../prisma.js';
 
 export const webhookRouter = Router();
@@ -71,6 +72,12 @@ webhookRouter.post('/', async (req, res) => {
         for (const msg of value.messages ?? []) {
           console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type });
           try {
+            // A reaction belongs to the message it's on (not a new message in the chat)
+            if (msg?.type === 'reaction') {
+              const applied = await applyCustomerReaction(account.workspaceId, msg.reaction);
+              if (!applied) console.warn('[Webhook] Reaction to a message not in this workspace, ignored:', { id: msg?.id });
+              continue;
+            }
             await saveIncoming(account.workspaceId, parseWebhookMessage(msg, value.contacts));
           } catch (err) {
             console.error('[Webhook] Failed to save incoming message, skipping it (rest of the batch continues):', { id: msg?.id, type: msg?.type }, err);

@@ -62,6 +62,20 @@ const nextConfig: NextConfig = {
         destination: `${API}/inbox/conversations/:id/voice`,
       },
       {
+        // A template with an image/video/document header (the file is the body)
+        source: '/inbox/conversations/:id/template',
+        destination: `${API}/inbox/conversations/:id/template`,
+      },
+      {
+        // Settings → Templates: creating/editing a template with a sample header file
+        source: '/templates',
+        destination: `${API}/templates`,
+      },
+      {
+        source: '/templates/:id',
+        destination: `${API}/templates/:id`,
+      },
+      {
         source: '/inbox/messages/:id/media',
         destination: `${API}/inbox/messages/:id/media`,
       },

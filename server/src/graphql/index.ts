@@ -4,6 +4,7 @@ import { verifyCurrentToken, type AuthPayload } from '../auth.js';
 import { env } from '../env.js';
 import * as activity from './activity.js';
 import * as assign from './assign.js';
+import * as automations from './automations.js';
 import * as auth from './auth.js';
 import * as contacts from './contacts.js';
 import * as inbox from './inbox.js';
@@ -19,7 +20,7 @@ import type { Context } from './shared.js';
 
 type ServerContext = { req: Request; res: Response };
 
-const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts];
+const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations];
 
 export const yoga = createYoga<ServerContext, Context>({
   schema: createSchema<ServerContext & Context>({

@@ -120,7 +120,8 @@ export async function assignConversation(
   // the chat is still unassigned, for every role. reason: the Assignment Reason typed in the Assign box; with
   // requireReason (the Assign box's mutation) assigning or reassigning without one is refused. Unassigning never
   // needs one.
-  options: { claim?: boolean; reason?: string | null; requireReason?: boolean } = {},
+  // actorLabel: who did it when it's not a person (e.g. "Simple automations"), for the timeline and alerts
+  options: { claim?: boolean; reason?: string | null; requireReason?: boolean; actorLabel?: string } = {},
 ) {
   const reason = normalizeReason(options.reason);
   if (options.requireReason && memberId && !reason)
@@ -161,6 +162,7 @@ export async function assignConversation(
       type: !member ? 'unassigned' : previous ? 'reassigned' : 'assigned',
       data: member
         ? {
+            ...(options.actorLabel && !actorId ? { by: options.actorLabel } : {}),
             assignee: member.user.name,
             color: roleColor(member.role),
             ...(previous ? { previous: previous.user.name } : {}),
@@ -177,7 +179,7 @@ export async function assignConversation(
       conversationId,
       assignee: payload,
       actorId,
-      actorName: actor?.name ?? null,
+      actorName: actor?.name ?? options.actorLabel ?? null,
       contactName: before.contact.name || `+${before.contact.waId}`,
       previous: previous?.user.name ?? null,
     };

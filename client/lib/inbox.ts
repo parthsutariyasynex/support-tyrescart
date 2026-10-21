@@ -26,6 +26,12 @@ export type Message = {
   mediaSize?: number | null;
   // Documents: the file name
   mediaName?: string | null;
+  // Reactions, as in WhatsApp: the customer's and the business's (one for the whole team), as emojis
+  customerReaction?: string | null;
+  teamReaction?: string | null;
+  teamReactionById?: string | null;
+  // Sent by Simple automations (e.g. 'auto_reply') rather than a person
+  automation?: string | null;
 };
 export type Conversation = {
   id: string;
@@ -55,7 +61,7 @@ export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endC
 
 export const PAGE_SIZE = 50;
 
-const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName';
+const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
 const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
@@ -169,6 +175,14 @@ export async function editMessage(messageId: string, body: string, version: numb
   const query = `mutation EditMessage($input: EditMessageInput!) { editMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
   return (await gql<{ editMessage: Message }>(query, { input: { messageId, body, version } })).editMessage;
 }
+
+// React to a message (sent to WhatsApp); null removes the team's reaction
+export async function reactToMessage(messageId: string, emoji: string | null) {
+  const query = `mutation React($id: ID!, $e: String) { reactToMessage(messageId: $id, emoji: $e) { ${MESSAGE_FIELDS} } }`;
+  return (await gql<{ reactToMessage: Message }>(query, { id: messageId, e: emoji })).reactToMessage;
+}
+// The quick choices in the reaction bar (any other emoji from "+"), as in WhatsApp
+export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 // Delete for everyone in the app (the customer's WhatsApp keeps what it received)
 export async function deleteMessage(messageId: string, version: number) {

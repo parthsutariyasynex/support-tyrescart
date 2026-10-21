@@ -14,7 +14,15 @@ export function settingsGroups(role: string | undefined): Group[] {
   const admin = isAdminRole(role);
   return [
     { key: 'you', title: 'Your preferences', items: [{ href: '/settings', label: 'General' }, { href: '/settings/whatsapp-qr', label: 'WhatsApp QR code' }] },
-    { key: 'inbox', title: 'Inbox settings', items: [{ href: '/settings/saved-replies', label: 'Saved replies' }] },
+    {
+      key: 'inbox',
+      title: 'Inbox settings',
+      items: [
+        { href: '/settings/saved-replies', label: 'Saved replies' },
+        // WhatsApp templates at Meta: managed by owners/admins
+        ...(admin ? [{ href: '/settings/templates', label: 'Message templates' }] : []),
+      ],
+    },
     ...(admin
       ? [
           {
@@ -26,6 +34,7 @@ export function settingsGroups(role: string | undefined): Group[] {
               // Inside Settings (the same pages as /teams and /reports), so the menu stays put
               { href: '/settings/users', label: 'User management' },
               { href: '/settings/roles', label: 'Roles and permissions' },
+              { href: '/settings/automations', label: 'Simple automations' },
               { href: '/settings/reports', label: 'Reports' },
             ],
           },

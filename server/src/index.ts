@@ -7,6 +7,7 @@ import { initRealtime } from './realtime.js';
 import { authRouter } from './routes/auth.js';
 import { inboxRouter } from './routes/inbox.js';
 import { meRouter } from './routes/me.js';
+import { templatesRouter } from './routes/templates.js';
 import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
@@ -27,6 +28,7 @@ app.use('/auth', authRouter);
 app.use('/webhook', webhookRouter);
 app.use('/inbox', inboxRouter);
 app.use('/me', meRouter);
+app.use('/templates', templatesRouter);
 app.use('/settings', settingsRouter);
 app.use('/reports', reportsRouter);
 
