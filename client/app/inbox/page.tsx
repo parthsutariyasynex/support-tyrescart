@@ -1963,8 +1963,20 @@ function ChatPanel({
   const prevScrollHeightRef = useRef<number | null>(null);
   const prevConvIdRef = useRef<string>(conversation.id);
   const prevLastIdRef = useRef<string | undefined>(lastId);
+  // Whether the reader is at the newest message, measured as they scroll (before anything new is drawn, so a tall
+  // new message or image can't make it look as if they had scrolled up)
+  const atBottomRef = useRef(true);
+  const [unseen, setUnseen] = useState(0); // new messages that arrived while scrolled up
+  const nearBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  const toBottom = (el: HTMLElement) => {
+    el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setUnseen(0);
+  };
 
   const onChatScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    atBottomRef.current = nearBottom(e.currentTarget);
+    if (atBottomRef.current) setUnseen(0);
     try {
       sessionStorage.setItem(chatScrollKey, String(e.currentTarget.scrollTop));
     } catch {
@@ -1980,14 +1992,16 @@ function ChatPanel({
     if (prevConvIdRef.current !== conversation.id) {
       prevConvIdRef.current = conversation.id;
       prevLastIdRef.current = lastId;
+      setUnseen(0);
       try {
         const saved = sessionStorage.getItem(chatScrollKey);
         if (saved !== null) {
           el.scrollTop = Number(saved);
+          atBottomRef.current = nearBottom(el);
           return;
         }
       } catch {}
-      el.scrollTop = el.scrollHeight;
+      toBottom(el);
       return;
     }
 
@@ -1999,16 +2013,18 @@ function ChatPanel({
       return;
     }
 
-    // 3. New message arrived at bottom
+    // 3. Something new at the bottom: follow it if the reader was at the bottom, or if it's their own message;
+    //    otherwise leave them where they are reading and count it on the "new messages" button
     if (prevLastIdRef.current !== lastId) {
       prevLastIdRef.current = lastId;
-      const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-      if (isNearBottom) {
-        el.scrollTop = el.scrollHeight;
+      const newest = stream.at(-1);
+      const mine = newest?.kind === 'message' && newest.m.direction === 'out' && !!meId && newest.m.sentById === meId;
+      if (atBottomRef.current || mine) {
+        toBottom(el);
         try {
           sessionStorage.setItem(chatScrollKey, String(el.scrollTop));
         } catch {}
-      }
+      } else if (newest?.kind === 'message') setUnseen((n) => n + 1);
       return;
     }
 
@@ -2017,11 +2033,27 @@ function ChatPanel({
       const saved = sessionStorage.getItem(chatScrollKey);
       if (saved !== null) {
         el.scrollTop = Number(saved);
+        atBottomRef.current = nearBottom(el);
         return;
       }
     } catch {}
-    el.scrollTop = el.scrollHeight;
+    toBottom(el);
   }, [conversation.id, lastId, chatScrollKey]);
+
+  // Images, videos and voice notes get their height when they finish loading: stay at the bottom if the reader is there
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const keep = () => {
+      if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+    };
+    el.addEventListener('load', keep, true); // load doesn't bubble: listen while it travels down
+    el.addEventListener('loadedmetadata', keep, true);
+    return () => {
+      el.removeEventListener('load', keep, true);
+      el.removeEventListener('loadedmetadata', keep, true);
+    };
+  }, []);
 
   const handleLoadOlder = () => {
     const el = messagesContainerRef.current;
@@ -2332,6 +2364,20 @@ function ChatPanel({
             </Fragment>
           );
         })}
+        {unseen > 0 && (
+          <div className="pointer-events-none sticky bottom-1 z-20 flex justify-center">
+            <button
+              type="button"
+              onClick={() => messagesContainerRef.current && toBottom(messagesContainerRef.current)}
+              className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-primary px-3.5 py-1.5 text-[12px] font-semibold text-on-primary shadow-lg hover:bg-primary-hover"
+            >
+              {unseen} new {unseen === 1 ? 'message' : 'messages'}
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12l7 7 7-7" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Bottom Message Composer */}

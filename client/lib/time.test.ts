@@ -2,7 +2,7 @@
 // Fixed instants below are test inputs only; the app always formats real timestamps from the API.
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
-import { APP_TIME_ZONE, dayKey, dayLabel, formatDateTime, formatShortDate, formatTime, listTimestamp } from './time';
+import { APP_TIME_ZONE, addDays, clockKey, currentTimeZone, dayKey, dayLabel, formatDateTime, formatShortDate, formatTime, listTimestamp, setTimeZone, zonedInstant } from './time';
 
 const L = 'en-GB'; // fixed locale so expected strings are exact (the app uses the viewer's locale)
 // The device timezones these must not depend on (UTC, India, US west coast, UTC+14)
@@ -44,6 +44,24 @@ describe('Dubai time helpers', () => {
       assert.equal(formatDateTime('2026-10-10T10:16:20.992Z', L), '10 Oct 2026, 14:16');
       assert.equal(dayKey('2026-10-10T10:16:20.992Z'), '2026-10-10');
     });
+  });
+
+  test('a saved time zone preference (a person\'s or the workspace\'s) does not change it: always Dubai', () => {
+    setTimeZone('Asia/Kolkata', 'Asia/Kolkata');
+    assert.equal(currentTimeZone(), 'Asia/Dubai');
+    assert.equal(formatTime('2026-10-10T10:16:20.992Z', L), '14:16');
+  });
+
+  test('a Dubai day and time to the exact instant (filters, reports), whatever the device timezone', () => {
+    inEveryMachineZone(() => {
+      assert.equal(zonedInstant('2026-10-21').toISOString(), '2026-10-20T20:00:00.000Z');
+      assert.equal(zonedInstant('2026-10-21', '23:59:59.999').toISOString(), '2026-10-21T19:59:59.999Z');
+      assert.equal(zonedInstant('2026-01-01', '03:30').toISOString(), '2025-12-31T23:30:00.000Z');
+      assert.equal(clockKey('2026-10-21T10:30:05Z'), '14:30:05');
+      assert.equal(clockKey('2026-10-21T20:00:00Z'), '00:00:00');
+    });
+    assert.equal(addDays('2026-03-01', -1), '2026-02-28');
+    assert.equal(addDays('2026-12-31', 1), '2027-01-01');
   });
 
   test('accepts ISO strings, Date objects and epoch milliseconds', () => {

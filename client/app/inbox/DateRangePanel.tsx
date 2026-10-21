@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { type Preset, PRESETS, inRange, matchPreset, monthGrid, parseYmd, pickDay, presetRange, ymd } from '@/lib/dateRange';
+import { type Preset, PRESETS, inRange, matchPreset, monthGrid, parseYmd, pickDay, presetRange, todayYmd } from '@/lib/dateRange';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
@@ -17,13 +17,14 @@ export function DateRangePanel({
   to: string;
   onApply: (range: { from: string; to: string }) => void;
 }) {
-  const today = ymd(new Date());
+  const today = todayYmd(); // in Dubai
   const [draft, setDraft] = useState({ from, to });
   const [preset, setPreset] = useState<Preset | null>(matchPreset(from, to));
   const start = parseYmd(draft.from || today);
-  const [view, setView] = useState({ year: start.getFullYear(), month: start.getMonth() });
-  const thisYear = new Date().getFullYear();
-  const atCurrentMonth = view.year === new Date().getFullYear() && view.month === new Date().getMonth();
+  const [view, setView] = useState({ year: start.getUTCFullYear(), month: start.getUTCMonth() });
+  const thisYear = Number(today.slice(0, 4));
+  const thisMonth = Number(today.slice(5, 7)) - 1;
+  const atCurrentMonth = view.year === thisYear && view.month === thisMonth;
   const ready = !!draft.from && !!draft.to;
 
   function choosePreset(p: Preset) {
@@ -32,14 +33,14 @@ export function DateRangePanel({
     if (r) {
       setDraft(r);
       const d = parseYmd(r.from);
-      setView({ year: d.getFullYear(), month: d.getMonth() });
+      setView({ year: d.getUTCFullYear(), month: d.getUTCMonth() });
     } else setDraft({ from: '', to: '' }); // custom: pick on the calendar
   }
 
   function shiftMonth(delta: number) {
     setView((v) => {
-      const d = new Date(v.year, v.month + delta, 1);
-      return { year: d.getFullYear(), month: d.getMonth() };
+      const d = new Date(Date.UTC(v.year, v.month + delta, 1));
+      return { year: d.getUTCFullYear(), month: d.getUTCMonth() };
     });
   }
 
@@ -76,7 +77,7 @@ export function DateRangePanel({
             <div className="flex items-center gap-3">
               <select aria-label="Month" value={view.month} onChange={(e) => setView((v) => ({ ...v, month: Number(e.target.value) }))} className={select}>
                 {MONTHS.map((m, i) => (
-                  <option key={m} value={i} disabled={view.year === thisYear && i > new Date().getMonth()}>
+                  <option key={m} value={i} disabled={view.year === thisYear && i > thisMonth}>
                     {m}
                   </option>
                 ))}

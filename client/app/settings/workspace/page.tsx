@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { ME_CHANGED_EVENT } from '@/lib/auth';
-import { filterCountries, phoneCountries, filterTimeZones, timeZoneLabel, timeZoneOptions } from '@/lib/profileOptions';
+import { filterCountries, phoneCountries, timeZoneLabel } from '@/lib/profileOptions';
 import { isAdminRole } from '@/lib/roles';
 import { showToast } from '@/lib/toasts';
 import { type WorkspaceSettings, fetchWorkspaceSettings, updateWorkspaceSettings } from '@/lib/workspaceSettings';
@@ -36,7 +36,6 @@ function Preferences({ me }: { me: Me }) {
   const [form, setForm] = useState<WorkspaceSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const zones = useMemo(() => timeZoneOptions(), []);
   const countries = useMemo(() => phoneCountries().map((c) => ({ value: c.code, label: `${c.flag} ${c.name} (+${c.dial})` })), []);
   useEffect(() => {
     if (!admin) {
@@ -90,8 +89,10 @@ function Preferences({ me }: { me: Me }) {
   return (
     <form onSubmit={save} className="max-w-3xl">
       <Section title="Regional defaults" text="Used for everyone in this workspace unless they choose otherwise.">
-        <Field label="Default time zone" htmlFor="ws-tz" hint="Dates and times are shown in this zone for people who haven't picked their own (Settings → General).">
-          <SearchSelect id="ws-tz" label="Default time zone" value={form.defaultTimeZone} options={zones} filter={filterTimeZones} onChange={(v) => set('defaultTimeZone', v)} placeholder="Search by city, country or UTC offset" />
+        <Field label="Time zone" htmlFor="ws-tz" hint="All dates and times (chats, reports, reminders, automation working hours) are shown in Dubai time.">
+          <p id="ws-tz" className="rounded-lg border border-line bg-surface-muted px-3 py-2 text-[13px] text-ink">
+            {timeZoneLabel(saved.defaultTimeZone)}
+          </p>
         </Field>
         <Field label="Default phone country" htmlFor="ws-country" hint="Preselected when someone enters a phone number.">
           <SearchSelect
@@ -140,7 +141,6 @@ function Preferences({ me }: { me: Me }) {
           {busy ? 'Saving…' : 'Save changes'}
         </button>
       </div>
-      <p className="mt-2 text-[11px] text-faint">Current default time zone: {timeZoneLabel(saved.defaultTimeZone)}</p>
     </form>
   );
 }

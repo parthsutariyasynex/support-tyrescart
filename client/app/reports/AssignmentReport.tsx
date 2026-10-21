@@ -13,7 +13,7 @@ import {
 import { revalidateOnReturn } from '@/lib/revalidate';
 import { isAdminRole } from '@/lib/roles';
 import { dayLabel, formatDateTime } from '@/lib/time';
-import { type Preset, PRESETS, presetRange, ymd } from '@/lib/dateRange';
+import { type Preset, PRESETS, presetRange } from '@/lib/dateRange';
 import { ContactAvatar } from '../inbox/avatar';
 import { AppShell, type Me } from '../AppShell';
 import { inputClass } from '../AuthShell';
@@ -38,10 +38,7 @@ function PartyPill({ party, fallback = 'Unassigned' }: { party: { name: string }
 
 // Assignment report: audit log of every assignment, transfer and unassignment with reasons and actors
 export function AssignmentReport() {
-  const initialRange = presetRange('last30') ?? {
-    from: ymd(new Date(Date.now() - 30 * 86400000)),
-    to: ymd(new Date()),
-  };
+  const initialRange = presetRange('last30')!; // the last 30 Dubai days
 
   const [preset, setPreset] = useState<Preset>('last30');
   const [from, setFrom] = useState(initialRange.from);

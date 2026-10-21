@@ -1,13 +1,27 @@
 // Run: npm test --workspace=client
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { EMPTY_MENU_FILTERS, activeFilterCount, matchesMenuFilters, toServerFilter, toggle } from './chatFilters';
+import { EMPTY_MENU_FILTERS, activeFilterCount, dayEnd, dayStart, matchesMenuFilters, toServerFilter, toggle } from './chatFilters';
+
+// Device time zones the result must not depend on (UTC, India, US west coast, UTC+14)
+function inEveryMachineZone(check: () => void) {
+  const original = process.env.TZ;
+  try {
+    for (const tz of ['UTC', 'Asia/Kolkata', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+      process.env.TZ = tz;
+      check();
+    }
+  } finally {
+    if (original === undefined) delete process.env.TZ;
+    else process.env.TZ = original;
+  }
+}
 
 describe('chat list "Filter by" menu', () => {
   const chat = {
     labels: [{ id: 'l-vip', name: 'VIP', color: '#000' }],
     assignee: { id: 'm-ana', name: 'Ana', color: '#000', userId: 'u-ana' },
-    lastMessageAt: new Date('2026-10-10T12:00:00').toISOString(),
+    lastMessageAt: '2026-10-10T08:00:00.000Z', // 12:00 on 10 Oct in Dubai
   };
   const f = (over: Partial<typeof EMPTY_MENU_FILTERS>) => ({ ...EMPTY_MENU_FILTERS, ...over });
 
@@ -27,7 +41,21 @@ describe('chat list "Filter by" menu', () => {
     assert.equal(matchesMenuFilters({ ...chat, assignee: null }, f({ assigneeIds: ['unassigned'] })), true);
     assert.equal(matchesMenuFilters({ ...chat, assignee: null }, f({ assigneeIds: ['m-ana'] })), false);
   });
-  test('date range on last activity, whole local days, open ends', () => {
+  test('a day in the filter is a whole Dubai day, whatever the device time zone', () => {
+    inEveryMachineZone(() => {
+      assert.equal(dayStart('2026-10-21'), '2026-10-20T20:00:00.000Z');
+      assert.equal(dayEnd('2026-10-21'), '2026-10-21T19:59:59.999Z');
+      assert.deepEqual(toServerFilter(f({ from: '2026-10-01', to: '2026-10-02' })), { labelIds: null, assigneeIds: null, from: '2026-09-30T20:00:00.000Z', to: '2026-10-02T19:59:59.999Z' });
+      // 00:30 on 11 Oct in Dubai (still the 10th in UTC, and already 02:00 on the 11th in India)
+      const late = { ...chat, lastMessageAt: '2026-10-10T20:30:00.000Z' };
+      assert.equal(matchesMenuFilters(late, f({ from: '2026-10-11', to: '2026-10-11' })), true);
+      assert.equal(matchesMenuFilters(late, f({ from: '2026-10-10', to: '2026-10-10' })), false);
+      // 23:45 on 10 Oct in Dubai (already 00:15 on the 11th in India): still the 10th
+      const evening = { ...chat, lastMessageAt: '2026-10-10T19:45:00.000Z' };
+      assert.equal(matchesMenuFilters(evening, f({ from: '2026-10-10', to: '2026-10-10' })), true);
+    });
+  });
+  test('date range on last activity, whole Dubai days, open ends', () => {
     assert.equal(matchesMenuFilters(chat, f({ from: '2026-10-10', to: '2026-10-10' })), true);
     assert.equal(matchesMenuFilters(chat, f({ from: '2026-10-11' })), false);
     assert.equal(matchesMenuFilters(chat, f({ to: '2026-10-09' })), false);

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../auth.js';
 import { AppError } from '../services/errors.js';
 import { assignmentReportCsv, listAssignmentReport } from '../services/assignmentReports.js';
+import { dubaiDay } from '../time.js';
 
 // Reports export. Owners and admins only (checked in the service), signed-in with the usual Bearer token.
 export const reportsRouter = Router();
@@ -22,7 +23,7 @@ reportsRouter.get('/assignments.csv', async (req, res) => {
     to: dateParam(req.query.to, 'to'),
     conversationId: typeof req.query.conversationId === 'string' && req.query.conversationId ? req.query.conversationId : null,
   });
-  const day = new Date().toISOString().slice(0, 10);
+  const day = dubaiDay(new Date()); // today in Dubai
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="assignment-report-${day}.csv"`);
   res.setHeader('Cache-Control', 'no-store');

@@ -27,13 +27,16 @@ test('workspace preferences: defaults, admins only, validated, in "me", applied'
   assert.equal(s0.deletedContactRetentionDays, 14);
   await assert.rejects(gql(SET, { i: { defaultCountry: 'IN' } }, a.token), /admins/i);
   await assert.rejects(gql(SET, { i: { defaultTimeZone: 'Mars/Base' } }, o.token), /time zone/i);
+  // every time is shown in Dubai time: another zone can't be chosen, and one saved earlier isn't used
+  await assert.rejects(gql(SET, { i: { defaultTimeZone: 'Asia/Kolkata' } }, o.token), /Dubai time/);
+  await prisma.workspaceSettings.upsert({ where: { workspaceId: o.workspace.id }, update: { defaultTimeZone: 'Asia/Kolkata' }, create: { workspaceId: o.workspace.id, defaultTimeZone: 'Asia/Kolkata' } });
   await assert.rejects(gql(SET, { i: { businessDayStartHour: 24 } }, o.token), /hour/i);
   await assert.rejects(gql(SET, { i: { deletedContactRetentionDays: 0 } }, o.token), /1 day/i);
-  const s1 = (await gql(SET, { i: { defaultTimeZone: 'Asia/Kolkata', defaultCountry: 'in', businessDayStartHour: 10, deletedContactRetentionDays: 30, reminderMinutes: 0 } }, o.token)).updateWorkspaceSettings;
-  assert.deepEqual([s1.defaultTimeZone, s1.defaultCountry, s1.businessDayStartHour, s1.deletedContactRetentionDays, s1.reminderMinutes], ['Asia/Kolkata', 'IN', 10, 30, 0]);
+  const s1 = (await gql(SET, { i: { defaultTimeZone: 'Asia/Dubai', defaultCountry: 'in', businessDayStartHour: 10, deletedContactRetentionDays: 30, reminderMinutes: 0 } }, o.token)).updateWorkspaceSettings;
+  assert.deepEqual([s1.defaultTimeZone, s1.defaultCountry, s1.businessDayStartHour, s1.deletedContactRetentionDays, s1.reminderMinutes], ['Asia/Dubai', 'IN', 10, 30, 0]);
   assert.equal(s1.awayMinutes, s0.awayMinutes); // untouched: still the default
   const me = (await gql(`{ me { workspace { settings { defaultTimeZone defaultCountry businessDayStartHour } } } }`, {}, a.token)).me;
-  assert.deepEqual(me.workspace.settings, { defaultTimeZone: 'Asia/Kolkata', defaultCountry: 'IN', businessDayStartHour: 10 });
+  assert.deepEqual(me.workspace.settings, { defaultTimeZone: 'Asia/Dubai', defaultCountry: 'IN', businessDayStartHour: 10 });
 
   // retention: a deleted contact is kept for the workspace's days
   await gql(`mutation($i: SimulateIncomingInput) { simulateIncomingMessage(input: $i) }`, { i: { waId: '971505557001', name: 'Ret', body: 'hi' } }, o.token);

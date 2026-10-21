@@ -64,8 +64,8 @@ describe('assignment report CSV', () => {
     const lines = csv.slice(1).split('\r\n');
     assert.deepEqual(lines, [
       CSV_COLUMNS.join(','),
-      `2026-10-14T07:30:00.000Z,conv-1,"Riya, Dubai",971500000001,Unassigned,Asha,Sam,"Speaks Hindi; ""VIP"""`,
-      '2026-10-14T07:30:00.000Z,conv-1,,971500000001,Asha,Unassigned,System,',
+      `2026-10-14T11:30:00+04:00,conv-1,"Riya, Dubai",971500000001,Unassigned,Asha,Sam,"Speaks Hindi; ""VIP"""`,
+      '2026-10-14T11:30:00+04:00,conv-1,,971500000001,Asha,Unassigned,System,',
       '',
     ]);
   });

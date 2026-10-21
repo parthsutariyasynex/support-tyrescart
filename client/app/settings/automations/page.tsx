@@ -653,7 +653,7 @@ function WorkingHoursEditor({ open, onOpen, value, timeZone, onChange }: { open:
       {open && (
         <>
           <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Quick hours">
-            {PRESETS.map((p) => (
+            {/* {PRESETS.map((p) => (
               <button
                 key={p.label}
                 type="button"
@@ -663,7 +663,7 @@ function WorkingHoursEditor({ open, onOpen, value, timeZone, onChange }: { open:
               >
                 {p.label}
               </button>
-            ))}
+            ))} */}
           </div>
           <ul className="mt-3" aria-label="Working days">
             {WEEK.map((day) => {
