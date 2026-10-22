@@ -39,7 +39,7 @@ import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 import { STAGE_COUNTS_EVENT } from '@/lib/contacts';
 import { FOLLOW_UP_TEMPLATE_EVENT } from '@/lib/automations';
-import { type MessageEvent, appInBackground, customerMessageNotice } from '@/lib/desktopNotifications';
+import { type MessageEvent, customerMessageNotice, shouldSuppressNotification } from '@/lib/desktopNotifications';
 
 // Customer messages already notified in this tab (the same message can arrive twice, e.g. after a reconnect)
 const seenMessages = new Set<string>();
@@ -155,6 +155,11 @@ export function AppShell({
     const socket = io(API_URL, { auth: { token: getToken() } });
     const unbind = bindPresence(socket);
     const open = (id: string) => openChatRef.current(id);
+    // TEMPORARY debug instrumentation for the real-message notification flow - remove once confirmed working
+    // end to end (matching logs in inbox/page.tsx and inbox/notifications.tsx).
+    socket.on('connect', () => console.debug('[notify-debug] AppShell socket connected', socket.id));
+    socket.on('connect_error', (err) => console.debug('[notify-debug] AppShell socket connect_error', err.message));
+    socket.on('disconnect', (reason) => console.debug('[notify-debug] AppShell socket disconnected', reason));
     // Toast only for new chats, reminders and collaborators. Assigned to you / removed from you keep the sound and
     // desktop pop-up they already had while the tab is in the background (unchanged)
     const alertHidden = (title: string, body: string, tag: string, conversationId: string) => {
@@ -162,11 +167,19 @@ export function AppShell({
       playPing();
       showDesktopNotification(title, body, tag, () => open(conversationId));
     };
-    // A customer wrote: desktop pop-up with their name and the message, on every page, while you aren't looking at
-    // the app (sound too); clicking it opens the chat. One per message; never for our own messages.
+    // A customer wrote: desktop pop-up with their name and the message (sound too), for any chat other than the
+    // one you're currently looking at - including while the app is the focused window, not just when backgrounded.
+    // Clicking it opens the chat. One per message; never for our own messages.
     socket.on('message:new', (e: MessageEvent) => {
+      console.debug('[notify-debug] message:new received', { messageId: e?.message?.id, conversationId: e?.message?.conversationId, direction: e?.message?.direction, deletedAt: e?.message?.deletedAt });
       const n = customerMessageNotice(e, seenMessages);
-      if (!n || !appInBackground()) return;
+      if (!n) {
+        console.debug('[notify-debug] customerMessageNotice returned null (not incoming, deleted, or already seen) - stopping here');
+        return;
+      }
+      const suppressed = shouldSuppressNotification(n.conversationId);
+      console.debug('[notify-debug] notice built, checking suppression', { conversationId: n.conversationId, suppressed });
+      if (suppressed) return;
       playPing();
       showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId), true); // each message alerts, like WhatsApp Web
     });

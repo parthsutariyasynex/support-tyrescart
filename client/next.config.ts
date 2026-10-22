@@ -19,6 +19,13 @@ const nextConfig: NextConfig = {
     proxyClientMaxBodySize: UPLOAD_MAX_BYTES + 1024 * 1024,
     proxyTimeout: UPLOAD_TIMEOUT_MS,
   },
+  // socket.io-client's browser transport requests '/socket.io/...' WITH a trailing slash. Next's own default
+  // trailing-slash redirect (trailingSlash: false) answered that with a 308 before the /socket.io/:path* rewrite
+  // below ever got to run - not fixable from rewrites or middleware, since this redirect happens earlier than both.
+  // A WebSocket upgrade can't follow an HTTP redirect, so every ws:// connection failed outright (visible in the
+  // browser console as repeated "WebSocket connection ... failed", a new sid each retry); polling still worked
+  // because XHR/fetch does follow redirects, so the app kept working in degraded, polling-only real-time mode.
+  skipTrailingSlashRedirect: true,
   async rewrites() {
     return [
       {

@@ -40,10 +40,19 @@ export function playPing() {
   }
 }
 
-// --- Desktop pop-up (only used while the tab is in the background). renotify: a newer pop-up with the same tag
-// (the same chat) alerts again instead of silently replacing the old one, as WhatsApp Web does for each message.
-export function showDesktopNotification(title: string, body: string, tag: string, onClick: () => void, renotify = false) {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+// --- Desktop pop-up. renotify: a newer pop-up with the same tag (the same chat) alerts again instead of silently
+// replacing the old one, as WhatsApp Web does for each message.
+// TEMPORARY: logs each attempt/outcome as "[notify-debug] ..." - to be removed once the real-message flow is
+// confirmed working end to end (see AppShell.tsx and inbox/page.tsx for the matching instrumentation).
+export function showDesktopNotification(title: string, body: string, tag: string, onClick: () => void, renotify = false): boolean {
+  if (typeof Notification === 'undefined') {
+    console.debug('[notify-debug] showDesktopNotification: Notification API unavailable in this browser');
+    return false;
+  }
+  if (Notification.permission !== 'granted') {
+    console.debug('[notify-debug] showDesktopNotification: permission is', Notification.permission, '- not granted, skipping');
+    return false;
+  }
   try {
     const n = new Notification(title, { body, tag, ...(renotify ? { renotify: true } : {}) } as NotificationOptions);
     n.onclick = () => {
@@ -51,8 +60,13 @@ export function showDesktopNotification(title: string, body: string, tag: string
       onClick();
       n.close();
     };
-  } catch {
-    // some browsers only allow notifications from a service worker; the sound and tab title still work
+    // tag is the per-chat key ("message-<conversationId>"), not customer content - title/body (name, message text)
+    // are deliberately left out of this log
+    console.debug('[notify-debug] showDesktopNotification: Notification() created successfully', { tag });
+    return true;
+  } catch (err) {
+    console.debug('[notify-debug] showDesktopNotification: Notification() threw', err);
+    return false;
   }
 }
 

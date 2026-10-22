@@ -76,6 +76,7 @@ import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, Sno
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
+import { setOpenConversationId } from '@/lib/desktopNotifications';
 import {
   type TypingEvent,
   type TypingState,
@@ -248,6 +249,21 @@ function Inbox({ meName }: { meName: string }) {
     }
     return cachedActiveIdByPath[pathname] ?? null;
   });
+  // Tell the app shell which chat is on screen, so a desktop notification is skipped only for this one (every
+  // other chat still alerts even while this page has focus); cleared when this page is left entirely.
+  // TEMPORARY: console.debug logging while verifying the real-message notification flow end to end - remove once
+  // confirmed working (matching logs in AppShell.tsx and inbox/notifications.tsx).
+  useEffect(() => {
+    setOpenConversationId(activeId);
+    console.debug('[notify-debug] openConversationId set to', activeId, 'on', pathname);
+  }, [activeId, pathname]);
+  useEffect(
+    () => () => {
+      console.debug('[notify-debug] inbox page unmounting, clearing openConversationId');
+      setOpenConversationId(null);
+    },
+    [],
+  );
 
   const [messages, setMessages] = useState<Message[]>(() => {
     const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;

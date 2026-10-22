@@ -1,8 +1,9 @@
 import { filePreview, isMediaPlaceholder } from './media';
 
-// Desktop notifications for new customer messages (shown by the app shell, on every page, while the app isn't the
-// window you're looking at). One per new incoming message: the customer's name and a one-line preview; clicking it
-// opens the chat. Our own messages, deleted ones and repeats (the same message arriving twice) get none.
+// Desktop notifications for new customer messages (shown by the app shell, on every page). One per new incoming
+// message: the customer's name and a one-line preview; clicking it opens the chat. Our own messages, deleted ones
+// and repeats (the same message arriving twice) get none. Suppressed only for the one chat you're currently
+// looking at - every other chat alerts even while the app is the focused window (see shouldSuppressNotification).
 
 export type MessageEvent = {
   conversation?: { contact?: { name?: string | null; waId?: string } | null } | null;
@@ -32,3 +33,15 @@ export function customerMessageNotice(e: MessageEvent, seen: Set<string>): Notic
 
 // Only while you aren't looking at the app: another tab, another window, or minimised
 export const appInBackground = () => typeof document !== 'undefined' && (document.hidden || !document.hasFocus());
+
+// The chat currently open and on screen (the inbox/my-chats/leads/collaborations pages keep this in sync with
+// their selected conversation; null when none is open, e.g. on Settings or with nothing selected).
+let openConversationId: string | null = null;
+export const setOpenConversationId = (id: string | null) => {
+  openConversationId = id;
+};
+
+// Whether a desktop pop-up for this conversation should be skipped: only when you're both looking at the app AND
+// already looking at this exact chat. Any other chat's messages alert even while the app has focus - the same way
+// WhatsApp Web and Slack notify for chats other than the one you're reading, not just when the window is backgrounded.
+export const shouldSuppressNotification = (conversationId: string) => !appInBackground() && openConversationId === conversationId;
