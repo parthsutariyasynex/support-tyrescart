@@ -23,12 +23,12 @@ module.exports = {
       name: "support-client",
       cwd: "./client",
       script: "../node_modules/next/dist/bin/next",
-      args: "start -p 4000",
+      args: "start -p 3000",
       exec_mode: "cluster",
       instances: 2,
       env: {
         NODE_ENV: "production",
-        PORT: 4000
+        PORT: 3000
       }
     }
   ]
