@@ -3,7 +3,7 @@ import { prisma } from '../prisma.js';
 import { emitToWorkspace } from '../realtime.js';
 import { recordActivity } from './activity.js';
 import { AppError } from './errors.js';
-import { requireConversation } from './inbox.js';
+import { NEW_LEAD_WHERE, requireConversation } from './inbox.js';
 
 // Close / snooze / reopen a chat (WhatsApp Business-style). Only the status changes: messages, labels, assignee
 // and customer details stay. Any member of the workspace can do it. A snoozed chat comes back to open at
@@ -93,12 +93,15 @@ export function startSnoozeWaker(intervalMs = 30_000) {
 
 // For the Open / Closed tabs, and the "closed chats have new messages" notice
 export async function conversationCounts(workspaceId: string) {
-  const [open, closed, closedWithUnread, unassigned, snoozed] = await Promise.all([
-    prisma.conversation.count({ where: { workspaceId, status: 'open' } }),
-    prisma.conversation.count({ where: { workspaceId, status: 'closed' } }),
-    prisma.conversation.count({ where: { workspaceId, status: 'closed', unread: { gt: 0 } } }),
-    prisma.conversation.count({ where: { workspaceId, assignedToId: null } }),
-    prisma.conversation.count({ where: { workspaceId, status: 'snoozed' } }),
+  // Same chats as the lists: deleted contacts' chats are left out
+  const base = { workspaceId, contact: { deletedAt: null } };
+  const [open, closed, closedWithUnread, unassigned, snoozed, newLeads] = await Promise.all([
+    prisma.conversation.count({ where: { ...base, status: 'open' } }),
+    prisma.conversation.count({ where: { ...base, status: 'closed' } }),
+    prisma.conversation.count({ where: { ...base, status: 'closed', unread: { gt: 0 } } }),
+    prisma.conversation.count({ where: { ...base, assignedToId: null } }),
+    prisma.conversation.count({ where: { ...base, status: 'snoozed' } }),
+    prisma.conversation.count({ where: { ...base, ...NEW_LEAD_WHERE } }),
   ]);
-  return { open, closed, closedWithUnread, unassigned, snoozed };
+  return { open, closed, closedWithUnread, unassigned, snoozed, newLeads };
 }

@@ -206,68 +206,7 @@ export function TemplateEditor({
               </section>
             ) : (
               <>
-                <section>
-                  <p className={fieldLabel}>Header (optional)</p>
-                  <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Header">
-                    {HEADER_OPTIONS.map((h) => {
-                      const media = h.value === 'IMAGE' || h.value === 'VIDEO' || h.value === 'DOCUMENT';
-                      const active = (spec.header?.format ?? '') === h.value;
-                      return (
-                        <button
-                          key={h.value || 'none'}
-                          type="button"
-                          role="radio"
-                          aria-checked={active}
-                          disabled={media && !mediaAvailable}
-                          title={media && !mediaAvailable ? 'Needs META_APP_ID in the server settings (to upload the sample file to Meta)' : undefined}
-                          onClick={() => {
-                            setFile(null);
-                            set('header', h.value ? { format: h.value, ...(h.value === 'TEXT' ? { text: '', example: '' } : {}) } : null);
-                          }}
-                          className={`rounded-lg border px-3 py-1.5 text-[13px] transition disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-primary bg-primary/5 font-semibold text-primary' : 'border-line text-body hover:bg-surface-muted'}`}
-                        >
-                          {h.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {!mediaAvailable && <p className={hint}>Image, video and document headers need the Meta app id (META_APP_ID) in the server settings.</p>}
-                  {spec.header?.format === 'TEXT' && (
-                    <div className="mt-3 space-y-2">
-                      <input
-                        value={spec.header.text ?? ''}
-                        onChange={(e) => set('header', { ...spec.header!, text: e.target.value })}
-                        maxLength={60}
-                        placeholder="e.g. Your order {{1}}"
-                        aria-label="Header text"
-                        className={inputClass}
-                      />
-                      {headerVars.length > 0 && (
-                        <input
-                          value={spec.header.example ?? ''}
-                          onChange={(e) => set('header', { ...spec.header!, example: e.target.value })}
-                          maxLength={60}
-                          placeholder={`Sample for {{${headerVars[0]}}}, e.g. TC-1042`}
-                          aria-label="Header sample value"
-                          className={inputClass}
-                        />
-                      )}
-                      <p className={hint}>Up to 60 characters and one variable.</p>
-                    </div>
-                  )}
-                  {spec.header && spec.header.format !== 'TEXT' && (
-                    <div className="mt-3">
-                      <input
-                        type="file"
-                        accept={ACCEPT[spec.header.format]}
-                        aria-label="Sample header file"
-                        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                        className="block w-full text-[12px] text-body file:mr-3 file:rounded-lg file:border-0 file:bg-primary-subtle file:px-3 file:py-1.5 file:text-[12px] file:font-semibold file:text-primary"
-                      />
-                      <p className={hint}>A sample for Meta's review. When sending, you choose the real {spec.header.format.toLowerCase()} each time.</p>
-                    </div>
-                  )}
-                </section>
+       
 
                 <section>
                   <div className="mb-1.5 flex items-center justify-between">
@@ -314,58 +253,6 @@ export function TemplateEditor({
                     </div>
                   )}
                 </section>
-
-                <section>
-                  <label htmlFor="tpl-footer" className={fieldLabel}>
-                    Footer (optional)
-                  </label>
-                  <input id="tpl-footer" value={spec.footer} onChange={(e) => set('footer', e.target.value)} maxLength={60} placeholder="e.g. TyresCart · Reply STOP to opt out" className={inputClass} />
-                </section>
-
-                <section>
-                  <p className={fieldLabel}>Buttons (optional)</p>
-                  <div className="space-y-2">
-                    {spec.buttons.map((b, i) => (
-                      <div key={i} className="flex flex-wrap items-center gap-2 rounded-xl border border-line p-3">
-                        <span className="w-32 shrink-0 text-[12px] font-semibold text-body-soft">{BUTTON_LABEL[b.type]}</span>
-                        {b.type !== 'COPY_CODE' && (
-                          <input value={b.text} onChange={(e) => updateButton(i, { text: e.target.value })} maxLength={25} placeholder="Button text" aria-label={`Button ${i + 1} text`} className={`${inputClass} !w-44 !py-2`} />
-                        )}
-                        {b.type === 'URL' && (
-                          <>
-                            <input value={b.url} onChange={(e) => updateButton(i, { url: e.target.value })} placeholder="https://tyrescart.ae/orders/{{1}}" aria-label={`Button ${i + 1} link`} className={`${inputClass} !py-2 min-w-48 flex-1`} />
-                            {variablesOf(b.url).length > 0 && (
-                              <input value={b.example ?? ''} onChange={(e) => updateButton(i, { example: e.target.value })} placeholder="Sample full link" aria-label={`Button ${i + 1} sample link`} className={`${inputClass} !py-2 min-w-48 flex-1`} />
-                            )}
-                          </>
-                        )}
-                        {b.type === 'PHONE_NUMBER' && (
-                          <input value={b.phoneNumber} onChange={(e) => updateButton(i, { phoneNumber: e.target.value })} placeholder="+97145550101" aria-label={`Button ${i + 1} phone`} className={`${inputClass} !py-2 flex-1`} />
-                        )}
-                        {b.type === 'COPY_CODE' && (
-                          <input value={b.example} onChange={(e) => updateButton(i, { example: e.target.value })} maxLength={15} placeholder="Sample code, e.g. TYRE15" aria-label="Sample coupon code" className={`${inputClass} !py-2 flex-1`} />
-                        )}
-                        <button type="button" onClick={() => set('buttons', spec.buttons.filter((_, j) => j !== i))} aria-label={`Remove button ${i + 1}`} className="ml-auto rounded-lg px-2 py-1 text-body-soft hover:text-danger">
-                          ✕
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {(Object.keys(BUTTON_LIMITS) as ButtonSpec['type'][]).map((type) => (
-                      <button
-                        key={type}
-                        type="button"
-                        disabled={count(type) >= BUTTON_LIMITS[type] || spec.buttons.length >= 10}
-                        onClick={() => addButton(type)}
-                        className="rounded-lg border border-dashed border-line px-3 py-1.5 text-[12px] text-body hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        + {BUTTON_LABEL[type]}
-                      </button>
-                    ))}
-                  </div>
-                  <p className={hint}>Up to 10 buttons: 2 website, 1 phone and 1 copy-code at most.</p>
-                </section>
               </>
             )}
             {error && <p className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
@@ -387,7 +274,6 @@ export function TemplateEditor({
           </aside>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-line px-6 py-3">
-          <p className="mr-auto text-[11px] text-faint">Meta reviews templates before they can be sent, usually within minutes.</p>
           <button type="button" onClick={onClose} disabled={busy} className="rounded-lg px-4 py-2 text-[13px] text-body-soft hover:bg-surface-muted">
             Cancel
           </button>

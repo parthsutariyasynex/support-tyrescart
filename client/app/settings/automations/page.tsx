@@ -4,9 +4,22 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { type Assignee, fetchAssignees } from '@/lib/assignees';
-import { type AutomationSettings, type WorkingDay, WEEK, allDay, fetchAutomationSettings, gmtOffset, updateAutomationSettings, workingHoursText } from '@/lib/automations';
+import {
+  type AutomationSettings,
+  type FollowUpTemplateStatus,
+  type WorkingDay,
+  WEEK,
+  allDay,
+  fetchAutomationSettings,
+  FOLLOW_UP_TEMPLATE_EVENT,
+  fetchFollowUpTemplate,
+  gmtOffset,
+  updateAutomationSettings,
+  workingHoursText,
+} from '@/lib/automations';
 import { timeAgo } from '@/lib/contacts';
 import { isAdminRole } from '@/lib/roles';
+import { formatDateTime } from '@/lib/time';
 import { showToast } from '@/lib/toasts';
 import { AppShell, type Me } from '../../AppShell';
 import { EmojiPicker } from '../../inbox/composerExtras';
@@ -27,7 +40,10 @@ export default function AutomationsPage() {
   );
 }
 
-type Editable = Omit<AutomationSettings, 'timeZone' | 'lastAutoReplyAt' | 'variables' | 'replyMaxLength' | 'workingDays' | 'workStart' | 'workEnd'>;
+type Editable = Omit<
+  AutomationSettings,
+  'timeZone' | 'lastAutoReplyAt' | 'variables' | 'replyMaxLength' | 'workingDays' | 'workStart' | 'workEnd' | 'followUpActiveSince' | 'lastFollowUpAt'
+>;
 const EDITABLE: (keyof Editable)[] = [
   'enabled',
   'workingHours',
@@ -40,6 +56,7 @@ const EDITABLE: (keyof Editable)[] = [
   'routingMode',
   'routingMemberIds',
   'routingOnlineOnly',
+  'followUpEnabled',
 ];
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const COOLDOWNS = [1, 4, 8, 12, 24, 48, 72, 168];
@@ -279,6 +296,15 @@ function Automations({ me }: { me: Me }) {
               </div>
             )}
           </section>
+
+          <FollowUpCard
+            enabled={form.followUpEnabled}
+            variables={saved.variables}
+            activeSince={saved.followUpActiveSince}
+            lastSentAt={saved.lastFollowUpAt}
+            automationsOn={form.enabled}
+            onChange={(v) => set('followUpEnabled', v)}
+          />
         </div>
 
         {error && <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
@@ -713,5 +739,102 @@ function WorkingHoursEditor({ open, onOpen, value, timeZone, onChange }: { open:
         ).
       </p>
     </div>
+  );
+}
+
+// Follow-up after 24 hours: on/off, and the template it sends: the approved template named follow_up_…, written in
+// Settings → Message templates and found by the server (nothing to choose here), or why there's none
+function FollowUpCard({
+  enabled,
+  variables,
+  activeSince,
+  lastSentAt,
+  automationsOn,
+  onChange,
+}: {
+  enabled: boolean;
+  variables: { key: string; label: string }[];
+  activeSince: string | null;
+  lastSentAt: string | null;
+  automationsOn: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  const [status, setStatus] = useState<FollowUpTemplateStatus | null>(null);
+  const [loadError, setLoadError] = useState('');
+  useEffect(() => {
+    if (!enabled) return;
+    const load = () =>
+      fetchFollowUpTemplate()
+        .then((r) => {
+          setStatus(r);
+          setLoadError('');
+        })
+        .catch((e) => setLoadError((e as Error).message));
+    load();
+    // Meta decided on the follow-up template (watched by the server): show the new status without a reload
+    window.addEventListener(FOLLOW_UP_TEMPLATE_EVENT, load);
+    return () => window.removeEventListener(FOLLOW_UP_TEMPLATE_EVENT, load);
+  }, [enabled]);
+  const t = status?.template;
+  const labelOf = (key: string) => variables.find((v) => v.key === key)?.label ?? key;
+
+  return (
+    <section className="mt-5 rounded-xl border border-line bg-surface p-6">
+      <div className="flex items-center justify-between gap-4">
+        <h3 className="flex items-center gap-2.5 text-[15px] font-bold text-ink">
+          <svg className="h-5 w-5 text-body-soft" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+          Follow-up after 24 hours
+        </h3>
+        <Switch checked={enabled} onChange={onChange} label="Follow-up after 24 hours" />
+      </div>
+      <p className="mt-1 text-[13px] text-body-soft">
+        When a customer&apos;s last message is 24 hours old and they haven&apos;t written again, send them your follow-up template once (after 24 hours,
+        WhatsApp only allows approved templates). Not to closed or snoozed chats, and only to chats whose 24 hours run out after it starts.
+      </p>
+      {enabled && (
+        <div className="mt-4 space-y-3">
+          <p className="text-[12px] text-body-soft">
+            Write the message in{' '}
+            <Link href="/settings/templates" className="font-semibold text-primary hover:underline">
+              Settings → Message templates
+            </Link>{' '}
+            with a name starting with <code className="rounded bg-surface-muted px-1 font-mono text-[12px] text-ink">follow_up</code> (e.g.{' '}
+            <code className="rounded bg-surface-muted px-1 font-mono text-[12px] text-ink">follow_up_inquiry</code>). Once Meta approves it, it&apos;s used here. In it,{' '}
+            {'{{1}}'} is the customer&apos;s first name and {'{{2}}'} their last name.
+          </p>
+          {loadError ? (
+            <p className="rounded-lg bg-danger-soft px-3 py-2 text-[12px] text-danger">{loadError}</p>
+          ) : !status ? (
+            <div className="h-16 animate-pulse rounded-lg bg-surface-strong" aria-busy="true" aria-label="Checking your templates" />
+          ) : t ? (
+            <div className="rounded-lg border border-line bg-surface-muted px-4 py-3" aria-label="Follow-up template">
+              <p className="text-[12px] font-semibold text-body">
+                Sends <span className="font-mono text-ink">{t.name}</span> · {t.language}
+                {t.others > 0 && <span className="font-normal text-faint"> ({t.others} other follow_up template{t.others === 1 ? '' : 's'} not used: the first by name is)</span>}
+              </p>
+              <p className="mt-1.5 whitespace-pre-wrap text-[13px] text-ink">{t.text}</p>
+              {t.variables.length > 0 && (
+                <p className="mt-1.5 text-[11px] text-faint">{t.variables.map((v) => `{{${v.name}}} = ${labelOf(v.key)}`).join(' · ')}</p>
+              )}
+            </div>
+          ) : (
+            <p className="rounded-lg bg-warning-soft px-3 py-2 text-[12px] text-warning" role="status">
+              Nothing is sent: {status.problem}
+            </p>
+          )}
+          <p className="flex items-center gap-1.5 text-[12px] text-body-soft">
+            <span className={`h-2 w-2 rounded-full ${activeSince && t ? 'bg-success' : 'bg-faint'}`} aria-hidden="true" />
+            {!automationsOn
+              ? 'Not sending: Simple automations is off'
+              : !activeSince
+                ? 'Starts when you save'
+                : `On since ${formatDateTime(activeSince)}${lastSentAt ? ` · last follow-up ${timeAgo(lastSentAt)}` : ''}`}
+          </p>
+        </div>
+      )}
+    </section>
   );
 }

@@ -13,7 +13,7 @@ import { markConversationUnread, pinConversation, pinnedIds, unpinConversation }
 import { addCollaborators, listCollaborators, removeCollaborator } from '../services/collaborators.js';
 import type { Context } from './shared.js';
 import { deleteMessage, editMessage, restoreMessage } from '../services/messageActions.js';
-import { senderName } from '../services/senders.js';
+import { type Quote, quoteOf, senderName } from '../services/senders.js';
 import {
   listConversations,
   listMessages,
@@ -62,6 +62,9 @@ export const typeDefs = /* GraphQL */ `
     sentById: ID
     "Who sent it, from the database: the agent's name, or the customer's name (or number). Null for older agent messages with no recorded sender."
     senderName: String
+    "A reply: the message in this chat it quotes (as WhatsApp shows it above the reply)"
+    replyToId: ID
+    replyTo: QuotedMessage
     "Set when the text was edited"
     editedAt: DateTime
     "Set when deleted for everyone; body is then empty"
@@ -107,8 +110,10 @@ export const typeDefs = /* GraphQL */ `
     pinned: Boolean!
     "Teammates added to this chat besides the assignee (they get its notifications)"
     collaborators: [WorkspaceMember!]!
-    "You are a collaborator on this chat (it shows in your My Chats)"
+    "You are a collaborator on this chat (it shows in your Collaborations)"
     isCollaborator: Boolean!
+    "Was ever assigned to someone (its assignment history): such a chat is no longer a New Lead, even if unassigned again"
+    wasAssigned: Boolean!
   }
 
   type ConversationCounts {
@@ -118,8 +123,10 @@ export const typeDefs = /* GraphQL */ `
     closedWithUnread: Int!
     "Snoozed chats (they wake up on their own)"
     snoozed: Int!
-    "Chats with no assignee (the Unassigned filter / New Leads)"
+    "Chats with no assignee (the Unassigned filter)"
     unassigned: Int!
+    "New Leads: open, unassigned chats that were never assigned"
+    newLeads: Int!
   }
 
   type ConversationConnection {
@@ -133,9 +140,24 @@ export const typeDefs = /* GraphQL */ `
     pageInfo: PageInfo!
   }
 
+  "The message a reply quotes"
+  type QuotedMessage {
+    id: ID!
+    direction: MessageDirection!
+    type: String!
+    "Empty once deleted"
+    body: String!
+    senderName: String
+    deleted: Boolean!
+    mediaMime: String
+    mediaName: String
+  }
+
   input SendTextInput {
     conversationId: ID!
     body: String!
+    "Reply to this message of the chat (quoted above the text, in the app and in WhatsApp)"
+    replyToId: ID
   }
 
   input SendTemplateInput {
@@ -235,7 +257,7 @@ export const typeDefs = /* GraphQL */ `
   }
 
   extend type Query {
-    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', 'me' (assigned to you or collaborating), or 'collaborating' (only chats you collaborate on). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
+    "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', 'me' (assigned to you), 'collaborating' (only chats you collaborate on), or 'new_leads' (open, unassigned, never assigned). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
     conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime, leadStage: String): ConversationConnection!
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
@@ -306,6 +328,7 @@ type ConversationParent = {
   messages?: unknown[];
   labels?: { label: { name: string } }[];
   assignedTo?: unknown;
+  _count?: { assignments?: number };
 };
 
 // JSON arguments (template values and specs) are checked by the services' schemas after parsing
@@ -346,8 +369,8 @@ export const resolvers = {
   },
   Mutation: {
     markConversationRead: authed(({ id }: { id: string }, { workspaceId, userId }) => markConversationRead(workspaceId, id, userId)),
-    sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string } }, { workspaceId, userId }) =>
-      sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body }, userId),
+    sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string; replyToId?: string | null } }, { workspaceId, userId }) =>
+      sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body, replyToId: input.replyToId }, userId),
     ),
     sendTemplateMessage: authed(async ({ input }: { input: { conversationId: string; name: string; language?: string | null; values?: string | null } }, auth) =>
       withSender(
@@ -396,6 +419,7 @@ export const resolvers = {
     body: (m: { body: string; deletedAt?: Date | null }) => (m.deletedAt ? '' : m.body),
     senderName: (m: { direction: string; sentById: string | null; conversationId: string; senderName?: string | null }) =>
       m.senderName !== undefined ? m.senderName : senderName(m),
+    replyTo: (m: { replyToId?: string | null; replyTo?: Quote | null }) => (m.replyTo !== undefined ? m.replyTo : quoteOf(m.replyToId)),
   },
   // Services already include these for list queries; fall back to a lookup otherwise
   Conversation: {
@@ -415,6 +439,11 @@ export const resolvers = {
       if (!ids) collabCache.set(ctx, (ids = prisma.conversationCollaborator.findMany({ where: { userId }, select: { conversationId: true } }).then((r) => r.map((x) => x.conversationId))));
       return (await ids).includes(c.id);
     },
+    // List queries count the chat's past assignments in the same request; otherwise look it up
+    wasAssigned: async (c: ConversationParent) =>
+      c._count?.assignments !== undefined
+        ? c._count.assignments > 0
+        : !!(await prisma.assignmentRecord.findFirst({ where: { conversationId: c.id }, select: { id: true } })),
     contact: (c: ConversationParent) => c.contact ?? prisma.contact.findUnique({ where: { id: c.contactId } }),
     // Hidden for someone who cleared the chat after it was sent
     lastMessage: async (c: ConversationParent, _args: unknown, ctx: Context) => {

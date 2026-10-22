@@ -71,8 +71,18 @@ function toPage<T extends { id: string }>(rows: T[], first: number): Page<T> {
   return { nodes, hasNextPage: rows.length > first, endCursor: nodes.at(-1)?.id ?? null };
 }
 
+// New Leads: open chats nobody holds right now, for someone to take. A chat that is unassigned (or whose assignee
+// was removed) comes back here at once. Closed and snoozed chats aren't leads; chats of deleted contacts are left
+// out like everywhere else.
+export const NEW_LEAD_WHERE = {
+  assignedToId: null,
+  status: 'open',
+} satisfies Prisma.ConversationWhereInput;
+
 const conversationInclude = {
   contact: true,
+  // Whether the chat was ever assigned (anything in its assignment history): New Leads leaves it out for good
+  _count: { select: { assignments: true } },
   messages: { orderBy: { createdAt: 'desc' as const }, take: 1 },
   labels: { include: { label: true } },
   // The holding member, with the person's name for the assignee shape
@@ -80,8 +90,8 @@ const conversationInclude = {
 };
 
 // Newest first. Omit `page` to get every conversation (REST behaviour).
-// `labelId` keeps only conversations that have that label; `assignee` is a member id, 'unassigned', or 'me'
-// (assigned to `viewerId`'s membership); `status` is 'open' or 'closed' (omit for both).
+// `labelId` keeps only conversations that have that label; `assignee` is a member id, 'unassigned', 'me'
+// (assigned to `viewerId`'s membership) or 'new_leads' (NEW_LEAD_WHERE); `status` is 'open' or 'closed' (omit for both).
 export async function listConversations(workspaceId: string, page?: unknown, viewerId?: string) {
   // Chats of deleted contacts (Settings → Recently deleted contacts) are left out everywhere
   const query = {
@@ -116,11 +126,13 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
         ? // Collaborations: chats I've been added to as a collaborator
           { collaborators: { some: { userId: viewerId } } }
         : assignee === 'me'
-        ? // My Chats: assigned to me, or I'm a collaborator on it
-          { OR: [{ assignedTo: { userId: viewerId } }, { collaborators: { some: { userId: viewerId } } }] }
-        : assignee
-          ? { assignedToId: assignee === 'unassigned' ? null : assignee }
-          : {}),
+        ? // My Chats: assigned to me (chats I only collaborate on are in Collaborations)
+          { assignedTo: { userId: viewerId } }
+        : assignee === 'new_leads'
+          ? NEW_LEAD_WHERE
+          : assignee
+            ? { assignedToId: assignee === 'unassigned' ? null : assignee }
+            : {}),
       ...(status ? { status } : {}),
       ...(search ? conversationSearchWhere(search) : {}),
       ...(menuFilters.length ? { AND: menuFilters } : {}),
@@ -198,10 +210,21 @@ export async function openConversation(workspaceId: string, id: string, viewerId
 }
 
 export const sendSchema = z.union([
-  z.object({ type: z.literal('text'), body: z.string().min(1).max(4096) }),
+  z.object({ type: z.literal('text'), body: z.string().min(1).max(4096), replyToId: z.string().min(1).nullish() }),
   // language: omit to use the one the template is approved in
   z.object({ type: z.literal('template'), name: z.string().min(1), language: z.string().min(1).optional() }),
 ]);
+
+// The message a reply quotes: it must be in the same chat and not deleted. WhatsApp quotes it too when it has a
+// WhatsApp id (a message that failed to send has none: the reply is still sent, quoted only in the app).
+export async function replyTarget(conversationId: string, replyToId: unknown) {
+  if (replyToId === undefined || replyToId === null || replyToId === '') return null;
+  if (typeof replyToId !== 'string') throw new AppError('Choose the message to reply to', 400, 'BAD_USER_INPUT');
+  const target = await prisma.message.findFirst({ where: { id: replyToId, conversationId }, select: { id: true, waMessageId: true, deletedAt: true } });
+  if (!target) throw new AppError("The message you're replying to isn't in this chat", 400, 'BAD_USER_INPUT');
+  if (target.deletedAt) throw new AppError("You can't reply to a deleted message", 400, 'BAD_USER_INPUT');
+  return target;
+}
 
 async function requireAccount(workspaceId: string) {
   const account = await prisma.whatsAppAccount.findUnique({ where: { workspaceId } });
@@ -338,6 +361,7 @@ export async function sendMediaMessage(
   rawCaption: unknown,
   rawName: unknown,
   sentById?: string,
+  replyToId?: unknown,
 ) {
   // Voice notes are checked (and WebM repackaged to OGG/Opus) by prepareVoice; images and documents by checkFile
   const voice = kind === 'voice' ? prepareVoice(bytes, mime) : null;
@@ -347,9 +371,10 @@ export async function sendMediaMessage(
   if (caption.length > CAPTION_MAX) throw new AppError(`Caption is too long (max ${CAPTION_MAX} characters)`, 400, 'BAD_USER_INPUT');
   const fileName = kind === 'document' ? cleanFileName(rawName, file.ext) : null;
   const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, true);
+  const quoted = await replyTarget(conversationId, replyToId);
 
   const message = await prisma.message.create({
-    data: { conversationId, direction: 'out', type: kind, body: caption, status: 'pending', sentById, mediaMime: file.mime, mediaSize: data.length, mediaName: fileName },
+    data: { conversationId, direction: 'out', type: kind, body: caption, status: 'pending', sentById, mediaMime: file.mime, mediaSize: data.length, mediaName: fileName, replyToId: quoted?.id ?? null },
   });
   const relative = path.join(workspaceId, `${message.id}.${file.ext}`);
   await mkdir(path.join(env.uploadsDir, workspaceId), { recursive: true });
@@ -361,10 +386,10 @@ export async function sendMediaMessage(
     const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
     const wamid =
       kind === 'image'
-        ? await sendImage(account, conversation.contact.waId, mediaId, caption || undefined)
+        ? await sendImage(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
         : kind === 'voice'
-          ? await sendAudio(account, conversation.contact.waId, mediaId)
-          : await sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined);
+          ? await sendAudio(account, conversation.contact.waId, mediaId, quoted?.waMessageId)
+          : await sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined, quoted?.waMessageId);
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
@@ -419,17 +444,18 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, input.type !== 'template');
 
   const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
+  const quoted = input.type === 'text' ? await replyTarget(conversationId, input.replyToId) : null;
 
   const body = input.type === 'text' ? input.body : `[template] ${input.name}`;
   const message = await prisma.message.create({
-    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById },
+    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById, replyToId: quoted?.id ?? null },
   });
 
   let saved;
   try {
     const wamid =
       input.type === 'text'
-        ? await sendText(account, conversation.contact.waId, input.body)
+        ? await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId)
         : await sendTemplate(account, conversation.contact.waId, input.name, language);
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {

@@ -10,7 +10,6 @@ import {
   listConversations,
   openConversation,
   readMessageMedia,
-  sendImageMessage,
   sendMediaMessage,
   sendMessage,
   simulateIncoming,
@@ -35,24 +34,24 @@ inboxRouter.post('/conversations/:id/messages', async (req, res) => {
 });
 
 // Send an image: the body is the image itself (Content-Type image/jpeg or image/png, up to 5 MB); the optional
-// caption is the `caption` query parameter
+// caption is the `caption` query parameter (and `replyTo`, a message id, to send it as a reply)
 inboxRouter.post(
   '/conversations/:id/images',
   express.raw({ type: () => true, limit: '5mb' }),
   async (req, res) => {
     const body = Buffer.isBuffer(req.body) ? req.body : undefined;
-    res.json(await sendImageMessage(req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], req.query.caption, req.auth!.userId));
+    res.json(await sendMediaMessage('image', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], req.query.caption, null, req.auth!.userId, req.query.replyTo));
   },
 );
 
 // Send a document (PDF, Word, Excel, PowerPoint or text, up to 100 MB): the body is the file itself; `name` (its
-// file name) and `caption` are query parameters
+// file name), `caption` and `replyTo` (a message id, to send it as a reply) are query parameters
 inboxRouter.post(
   '/conversations/:id/documents',
   express.raw({ type: () => true, limit: '100mb' }),
   async (req, res) => {
     const body = Buffer.isBuffer(req.body) ? req.body : undefined;
-    res.json(await sendMediaMessage('document', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], req.query.caption, req.query.name, req.auth!.userId));
+    res.json(await sendMediaMessage('document', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], req.query.caption, req.query.name, req.auth!.userId, req.query.replyTo));
   },
 );
 
@@ -63,7 +62,7 @@ inboxRouter.post(
   express.raw({ type: () => true, limit: '16mb' }),
   async (req, res) => {
     const body = Buffer.isBuffer(req.body) ? req.body : undefined;
-    res.json(await sendMediaMessage('voice', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], null, null, req.auth!.userId));
+    res.json(await sendMediaMessage('voice', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], null, null, req.auth!.userId, req.query.replyTo));
   },
 );
 

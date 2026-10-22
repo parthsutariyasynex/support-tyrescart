@@ -76,6 +76,19 @@ describe('automation rules', () => {
     assert.equal(auto.withinWorkingHours(own, 'Asia/Dubai', new Date('2026-10-25T19:59:30Z')), true); // Sunday 23:59
     assert.equal(auto.withinWorkingHours(own, 'Asia/Dubai', new Date('2026-10-21T08:00:00Z')), false); // Wednesday: closed
   });
+  test('first and last name: entered on the contact first, else from the WhatsApp profile name', () => {
+    const n = vars.nameParts;
+    assert.deepEqual(n({ name: 'Alice Patel' }), { first: 'Alice', last: 'Patel' });
+    assert.deepEqual(n({ name: '  Maria   de la  Cruz ' }), { first: 'Maria', last: 'de la Cruz' }); // the rest, spaces tidied
+    assert.deepEqual(n({ name: 'Alice' }), { first: 'Alice', last: '' }); // one word: no last name (the follow-up fallback applies)
+    assert.deepEqual(n({ name: '   ' }), { first: 'there', last: '' });
+    assert.deepEqual(n({ name: null }), { first: 'there', last: '' });
+    // entered names always win, each on its own
+    assert.deepEqual(n({ firstName: 'Ali', lastName: 'Khan', name: 'Alice Patel' }), { first: 'Ali', last: 'Khan' });
+    assert.deepEqual(n({ firstName: 'Ali', lastName: null, name: 'Alice Patel' }), { first: 'Ali', last: 'Patel' });
+    assert.deepEqual(n({ firstName: '', lastName: 'Khan', name: 'Alice Patel' }), { first: 'Alice', last: 'Khan' });
+    assert.deepEqual(n({ firstName: '  ', lastName: '  ', name: 'Alice Patel' }), { first: 'Alice', last: 'Patel' }); // blank counts as empty
+  });
   test('filling variables: full keys, short forms (when unique), unknown ones left out', () => {
     const values = { 'contact.first_name': 'Amir', 'contact.name': 'Amir Khan', 'company.name': 'TyresCart', 'contact.tyre_size': '17' };
     assert.equal(vars.fillVariables('Hi {{contact.first_name}}, thanks for messaging {{company.name}}!', values), 'Hi Amir, thanks for messaging TyresCart!');

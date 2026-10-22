@@ -16,6 +16,7 @@ import {
   fetchConversationCounts,
   fetchConversations,
   isAssignedTo,
+  isNewLead,
   fetchMessages,
   markConversationRead,
   matchesSearch,
@@ -73,7 +74,7 @@ import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
-import { NotificationBell, playPing, showDesktopNotification, unlockSound } from './notifications';
+import { NotificationBell, unlockSound } from './notifications';
 import {
   type TypingEvent,
   type TypingState,
@@ -90,9 +91,11 @@ import {
   MessageBubble,
   MessageMenu,
   type MessageAction,
+  QuoteBlock,
   UndoToast,
   messageActions,
 } from './messages';
+import { ForwardDialog } from './ForwardDialog';
 
 const byLatest = (a: Conversation, b: Conversation) =>
   b.lastMessageAt.localeCompare(a.lastMessageAt) || b.id.localeCompare(a.id);
@@ -220,7 +223,7 @@ function Inbox({ meName }: { meName: string }) {
     }
     if (cachedConversationsByPath['/inbox']?.length) {
       if (pathname === '/leads') {
-        return cachedConversationsByPath['/inbox'].filter((c) => !c.assignee);
+        return cachedConversationsByPath['/inbox'].filter(isNewLead);
       }
       const me = cachedPermissions; // a local so TypeScript keeps the null check inside the filter
       if (pathname === '/my-chats' && me) {
@@ -316,7 +319,7 @@ function Inbox({ meName }: { meName: string }) {
   conversationsRef.current = conversations;
 
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = mine ? 'me' : leads ? 'unassigned' : collab ? 'collaborating' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : leads ? 'new_leads' : collab ? 'collaborating' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   // The search box: applied to the loaded chats at once; the server search (every message, label, name…) runs a
   // moment after you stop typing
   const [searchTerm, setSearchTerm] = useState('');
@@ -497,7 +500,10 @@ function Inbox({ meName }: { meName: string }) {
       if (known && (known.assignee?.id ?? null) === (ref?.id ?? null)) return;
       // A new assignment is unopened (bold for the assignee) unless they are looking at the chat right now
       const openedNow = !!ref && ref.userId === permissionsRef.current?.userId && conversationId === activeIdRef.current;
-      patchConversations((c) => (c.id === conversationId ? { ...c, assignee: ref, assigneeOpenedAt: openedNow ? new Date().toISOString() : null } : c));
+      // (wasAssigned follows the server's flag: the chat's assignment history)
+      patchConversations((c) =>
+        c.id === conversationId ? { ...c, assignee: ref, assigneeOpenedAt: openedNow ? new Date().toISOString() : null, wasAssigned: c.wasAssigned || !!ref } : c,
+      );
       loadAssignees(); // counts changed
       if (filterRef.current.assignee) loadConversations(); // may have joined the filtered list
     },
@@ -818,14 +824,7 @@ function Inbox({ meName }: { meName: string }) {
       loadConversations();
       loadUnreadTotal();
       loadUnassignedCount(); // a brand-new chat arrives unassigned
-      // Customer wrote while this tab is in the background: sound + desktop pop-up
-      if (message.direction === 'in' && document.hidden) {
-        playPing();
-        const name = conversation?.contact ? conversation.contact.name || `+${conversation.contact.waId}` : 'New message';
-        showDesktopNotification(name, message.body || 'New message', message.conversationId, () =>
-          openConversation(message.conversationId),
-        );
-      }
+      // (the sound and desktop pop-up for a customer's message come from the app shell, on every page)
     });
     // Timeline of the open chat: every event in the workspace
     socket.on('activity:new', (a: Activity) => {
@@ -840,7 +839,8 @@ function Inbox({ meName }: { meName: string }) {
     socket.on('conversation:status', (change: StatusChange) => {
       onStatusChanged(change);
       loadUnassignedCount(); // Open / Closed counts
-      if (filterRef.current.status) loadConversations(); // may have joined the Open / Closed list
+      // may have joined the Open / Closed list, or New Leads (a never-assigned chat waking up from snooze or reopened)
+      if (filterRef.current.status || filterRef.current.assignee === 'new_leads') loadConversations();
     });
     socket.on('conversation:cleared', ({ conversationId, userId }: { conversationId: string; userId: string }) => {
       if (userId === permissionsRef.current?.userId) onCleared(conversationId);
@@ -898,12 +898,12 @@ function Inbox({ meName }: { meName: string }) {
       patchConversations((c) => (c.id === conversationId ? { ...c, unread: Math.max(c.unread, unread) } : c));
       loadUnreadTotal();
     });
-    // Collaborators changed on a chat: am I one now? (My Chats follows)
+    // Collaborators changed on a chat: am I one now? (Collaborations follows)
     socket.on('conversation:collaborators', ({ conversationId, collaborators }: { conversationId: string; collaborators: { id: string }[] }) => {
       const me = permissionsRef.current?.userId;
       const isCollaborator = !!me && collaborators.some((c) => c.id === me);
       patchConversations((c) => (c.id === conversationId ? { ...c, isCollaborator } : c));
-      if (filterRef.current.assignee === 'me' || filterRef.current.assignee === 'collaborating') loadConversations(); // may have joined My Chats / Collaborations
+      if (filterRef.current.assignee === 'collaborating') loadConversations(); // may have joined Collaborations
     });
     socket.on('assignee:saved', onAssigneeSaved);
     socket.on('assignee:deleted', ({ id }: { id: string }) => onAssigneeDeleted(id));
@@ -1029,17 +1029,18 @@ function Inbox({ meName }: { meName: string }) {
     const matched = serverSearched || matchesSearch(c, searchQuery);
     // A chat reassigned away from you leaves My Chats at once (the socket update patches it before any refetch)
     // (Until your permissions load, the server's "me" filter alone decides, so My Chats doesn't flash empty)
-    if (mine && permissions && !isAssignedTo(c, permissions.userId) && !c.isCollaborator) return false; // My Chats: assigned to me or collaborating
+    if (mine && permissions && !isAssignedTo(c, permissions.userId)) return false; // My Chats: assigned to me (collaborations are in Collaborations)
     if (collab && !c.isCollaborator) return false; // Collaborations: removed as a collaborator leaves at once
-    if (leads && c.assignee) return false; // taken by someone: no longer a lead
+    if (leads && !isNewLead(c)) return false; // taken by someone, closed or snoozed: not a new lead
     // Unread = what shows bold: unread customer messages, or assigned to you and not opened yet (WhatsApp-style)
     if (filterType === 'unread') return matched && needsAttention(c, permissions?.userId);
     // Unreplied: the customer's message is the latest one (nobody has answered yet)
     if (filterType === 'unreplied') return matched && c.lastMessage?.direction === 'in' && !c.lastMessage.deletedAt;
     if (labelFilter) return matched && c.labels.some((l) => l.id === labelFilter);
-    if (assigneeFilter === 'me') return matched && (isAssignedTo(c, permissions?.userId) || c.isCollaborator);
+    if (assigneeFilter === 'me') return matched && isAssignedTo(c, permissions?.userId);
     if (assigneeFilter === 'collaborating') return matched && c.isCollaborator;
     if (assigneeFilter === 'unassigned') return matched && !c.assignee;
+    if (assigneeFilter === 'new_leads') return matched; // New Leads: checked above
     if (assigneeFilter) return matched && c.assignee?.id === assigneeFilter;
     return matched;
   }
@@ -1152,6 +1153,7 @@ function Inbox({ meName }: { meName: string }) {
           onTyping={(isTyping) => sendTyping(active.id, isTyping)}
           profileOpen={profileOpen}
           onToggleProfile={() => setProfileOpen(!profileOpen)}
+          onOpenProfile={() => setProfileOpen(true)}
         />
       ) : (
         <EmptyChatState />
@@ -1620,6 +1622,7 @@ function ChatPanel({
   meId,
   profileOpen,
   onToggleProfile,
+  onOpenProfile,
 }: {
   conversation: Conversation;
   meName: string; // you: the "My name" quick fill when sending a template
@@ -1651,6 +1654,8 @@ function ChatPanel({
   // Contact profile side panel (the (i) button)
   profileOpen: boolean;
   onToggleProfile: () => void;
+  // The customer's name (or picture) in the header: opens that panel
+  onOpenProfile: () => void;
 }) {
   const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
@@ -1691,6 +1696,12 @@ function ChatPanel({
     setMatchPos((p) => (p + dir + matches.length) % matches.length);
   };
   const [editing, setEditing] = useState<Message | null>(null);
+  // Replying to this message (WhatsApp style): quoted above the message box and above the sent reply
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  // Forwarding this message to other chats (the Forward dialog)
+  const [forwarding, setForwarding] = useState<Message | null>(null);
+  // A reply's quote was clicked: the original is scrolled to and briefly marked
+  const [flashId, setFlashId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Message | null>(null);
   // Just deleted by this agent: offered for undo for a few seconds
   const [undo, setUndo] = useState<Message | null>(null);
@@ -1701,6 +1712,7 @@ function ChatPanel({
     setError('');
     setMenu(null);
     setEditing(null);
+    setReplyTo(null);
     setConfirmDelete(null);
     setUndo(null);
   }, [conversation.id]);
@@ -1789,15 +1801,17 @@ function ChatPanel({
 
   async function sendImageWithCaption(caption: string) {
     if (!imageFile) return;
-    const m = await sendFile(conversation.id, imageFile, caption);
+    const m = await sendFile(conversation.id, imageFile, caption, replyTo?.id);
     onSent(m);
     setImageFile(null);
+    setReplyTo(null);
   }
 
   async function sendVoiceNote(recording: Blob) {
-    const m = await sendVoice(conversation.id, recording);
+    const m = await sendVoice(conversation.id, recording, replyTo?.id);
     onSent(m);
     setVoiceMode(false);
+    setReplyTo(null);
   }
 
   // A chosen or dropped file: checked first (type, size), then the preview window
@@ -1853,6 +1867,24 @@ function ChatPanel({
     }
   }
 
+  // The message being replied to was deleted meanwhile: stop replying to it
+  const replyLive = replyTo && messages.find((m) => m.id === replyTo.id);
+  useEffect(() => {
+    if (replyTo && replyLive?.deletedAt) {
+      setReplyTo(null);
+      setError('The message you were replying to was deleted.');
+    }
+  }, [replyTo, replyLive?.deletedAt]);
+
+  // Go to the message a reply quotes (if it's loaded) and mark it for a moment
+  function jumpTo(id: string) {
+    const el = messagesContainerRef.current?.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return setError('The original message is further up: load earlier messages to see it.');
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setFlashId(id);
+    setTimeout(() => setFlashId((f) => (f === id ? null : f)), 1600);
+  }
+
   // Someone else deleted the message being edited: stop editing it
   const editingLive = editing && messages.find((m) => m.id === editing.id);
   useEffect(() => {
@@ -1867,9 +1899,16 @@ function ChatPanel({
     const m = messages.find((x) => x.id === snapshot.id) ?? snapshot; // latest copy
     setMenu(null);
     setError('');
-    if (action === 'copy') {
+    if (action === 'forward') {
+      setForwarding(m);
+    } else if (action === 'reply') {
+      if (editing) cancelEdit();
+      setReplyTo(m);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } else if (action === 'copy') {
       navigator.clipboard?.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
     } else if (action === 'edit') {
+      setReplyTo(null);
       setEditing(m);
       setText(m.body);
       requestAnimationFrame(() => inputRef.current?.focus());
@@ -2036,8 +2075,10 @@ function ChatPanel({
 
   async function send(body: string) {
     setError('');
+    const quoted = replyTo;
     try {
-      onSent(await sendTextMessage(conversation.id, body));
+      onSent(await sendTextMessage(conversation.id, body, quoted?.id));
+      setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
     } catch (err) {
       setError((err as Error).message);
     }
@@ -2111,12 +2152,21 @@ function ChatPanel({
             onSaved={(c) => window.dispatchEvent(new CustomEvent(CONTACT_UPDATED_EVENT, { detail: c }))}
           />
           <span className="h-6 w-px shrink-0 bg-line" aria-hidden="true" />
-          <ContactAvatar contact={conversation.contact} size="h-9 w-9 text-xs" />
+          {/* The customer's picture and name open their profile panel (the (i) button does too) */}
+          <button type="button" onClick={onOpenProfile} tabIndex={-1} aria-hidden="true" className="shrink-0 cursor-pointer rounded-full">
+            <ContactAvatar contact={conversation.contact} size="h-9 w-9 text-xs" />
+          </button>
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <p title={contactName} className="min-w-0 truncate text-xs font-bold text-ink">
+              <button
+                type="button"
+                onClick={onOpenProfile}
+                title={`${contactName}: open contact profile`}
+                aria-label={`${contactName}: open contact profile`}
+                className="min-w-0 cursor-pointer truncate rounded text-left text-xs font-bold text-ink"
+              >
                 {contactName}
-              </p>
+              </button>
               {/* {isClosed && (
                 <span className="shrink-0 rounded-full border border-line bg-surface-strong px-2 py-px text-[10px] font-semibold text-muted">
                   Closed
@@ -2321,15 +2371,16 @@ function ChatPanel({
               </Fragment>
             );
           const m = item.m;
-          const actions = messageActions(m, viewer);
+          const actions = messageActions(m, viewer, canReact);
           return (
             <Fragment key={m.id}>
               {separator}
               <MessageBubble
                 message={m}
                 actions={actions}
-                highlighted={menu?.message.id === m.id || editing?.id === m.id}
+                highlighted={menu?.message.id === m.id || editing?.id === m.id || replyTo?.id === m.id || flashId === m.id}
                 onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
+                onJumpTo={jumpTo}
                 highlightTerm={searchOpen ? searchText : ''}
                 currentMatch={searchOpen && m.id === currentMatchId}
                 onReact={canReact && !m.deletedAt && m.status !== 'failed' && m.status !== 'pending' ? (emoji) => react(m, emoji) : undefined}
@@ -2360,6 +2411,26 @@ function ChatPanel({
         )}
 
         {undo && <UndoToast key={undo.id} busy={busy} onUndo={doUndo} onDone={clearUndo} />}
+
+        {replyTo && !editing && !isClosed && (
+          <div className="mb-2 flex items-start gap-2 rounded-lg bg-surface-muted p-1.5" aria-label="Replying to">
+            <QuoteBlock
+              quote={{
+                id: replyTo.id,
+                direction: replyTo.direction,
+                type: replyTo.type,
+                body: replyTo.body,
+                senderName: replyTo.senderName ?? (replyTo.automation ? 'Auto-reply' : null),
+                deleted: false,
+                mediaMime: replyTo.mediaMime,
+                mediaName: replyTo.mediaName,
+              }}
+            />
+            <button type="button" onClick={() => setReplyTo(null)} title="Cancel reply" aria-label="Cancel reply" className="px-1.5 py-1 text-faint hover:text-body-soft">
+              ✕
+            </button>
+          </div>
+        )}
 
         {editing && (
           <div className="mb-2 flex items-start gap-2 rounded-lg border-l-4 border-primary bg-primary-subtle px-3 py-1.5 text-xs">
@@ -2512,6 +2583,7 @@ function ChatPanel({
                 }
               }
               if (e.key === 'Escape' && editing) cancelEdit();
+              else if (e.key === 'Escape' && replyTo) setReplyTo(null);
               // Same form submit as before (send, or save an edit); Shift+Enter keeps its default new line
               if (enterAction({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing }) === 'send') {
                 e.preventDefault();
@@ -2570,11 +2642,12 @@ function ChatPanel({
       {menu && (
         <MessageMenu
           anchor={menu.anchor}
-          actions={messageActions(menu.message, viewer)}
+          actions={messageActions(menu.message, viewer, canReact)}
           onAction={(action) => onAction(menu.message, action)}
           onClose={closeMenu}
         />
       )}
+      {forwarding && <ForwardDialog message={forwarding} onClose={() => setForwarding(null)} />}
       {confirmDelete && (
         <ConfirmDeleteDialog busy={busy} onConfirm={doDelete} onCancel={() => setConfirmDelete(null)} />
       )}

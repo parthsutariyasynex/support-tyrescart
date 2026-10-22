@@ -511,10 +511,16 @@ export function nextStage<S extends { value: string; closed?: boolean | null }>(
   return progressing[progressing.indexOf(stage) + 1] ?? null;
 }
 
-// Settings → Customer lifecycle: contacts per lead stage (stage null = no stage set)
-export async function fetchLeadStageCounts() {
-  return (await gql<{ leadStageCounts: { stage: string | null; count: number }[] }>(`{ leadStageCounts { stage count } }`)).leadStageCounts;
+// Settings → Customer lifecycle: contacts per lead stage (stage null = no stage set). chats: the left menu's
+// counts instead, the chats each stage link lists (contacts with a chat, not deleted)
+export async function fetchLeadStageCounts(chats = false) {
+  return (
+    await gql<{ leadStageCounts: { stage: string | null; count: number }[] }>(`query StageCounts($c: Boolean) { leadStageCounts(chats: $c) { stage count } }`, { c: chats })
+  ).leadStageCounts;
 }
+
+// Something that changes the stage counts happened (a new chat, a stage changed, a contact deleted or restored)
+export const STAGE_COUNTS_EVENT = 'app:stage-counts';
 
 // --- Deleting contacts (admins): kept for a while in Settings → Recently deleted contacts, then removed for good
 export type DeletedContact = {

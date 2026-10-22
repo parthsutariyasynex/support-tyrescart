@@ -3522,7 +3522,8 @@ describe('assignment reasons and the admin assignment report', () => {
     assert.match(res.headers.get('content-disposition') ?? '', /attachment; filename="assignment-report-\d{4}-\d{2}-\d{2}\.csv"/);
     const text = await res.text();
     const lines = text.replace(/^\uFEFF/, '').trimEnd().split('\r\n');
-    assert.equal(lines[0], 'Assigned at (UTC),Chat ID,Customer,Customer number,Previous assignee,New assignee,Assigned by,Reason');
+    assert.equal(lines[0], 'Assigned at (Dubai time),Chat ID,Customer,Customer number,Previous assignee,New assignee,Assigned by,Reason');
+    assert.match(lines[1], /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+04:00,/); // times in Dubai time, with the offset
     assert.equal(lines.length, 1 + 5); // header + 5 rows (REASON_2's newline stays inside its quoted cell: LF, while rows end with CRLF)
     assert.ok(text.includes(`"${REASON_1.replace(/"/g, '""')}"`)); // quotes doubled, cell quoted
     assert.ok(text.includes(`"${REASON_2}"`)); // newline kept inside the quoted cell
@@ -4989,7 +4990,7 @@ describe('collaborators on a chat', () => {
   });
 });
 
-describe('My Chats includes chats you collaborate on', () => {
+describe('My Chats is chats assigned to you; chats you only collaborate on are in Collaborations', () => {
   const MINE = `{ conversations(assignee: "me") { nodes { contact { name } isCollaborator } } }`;
   let ws: { token: string; workspaceId: string };
   let agent: { id: string; token: string };
@@ -5003,17 +5004,28 @@ describe('My Chats includes chats you collaborate on', () => {
     await ok(SIMULATE, { i: { waId: '917894000001', name: 'Shared Chat', body: 'hi' } }, ws.token);
     conv = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes[0].id;
   });
-  test('added as a collaborator: in My Chats with isCollaborator; removed: gone', async () => {
+  test('only a collaborator: in Collaborations, not My Chats; assigned: in My Chats; removed as collaborator: still mine', async () => {
+    const COLLAB = `{ conversations(assignee: "collaborating") { nodes { contact { name } isCollaborator } } }`;
     assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, []);
     await ok(`mutation($c: ID!, $u: [ID!]!) { addCollaborators(conversationId: $c, userIds: $u) { id } }`, { c: conv, u: [agent.id] }, ws.token);
-    assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' }, isCollaborator: true }]);
-    assert.deepEqual((await ok(MINE, undefined, ws.token)).conversations.nodes, []); // the owner isn't on it
-    // Collaborations page: only chats you collaborate on (not ones merely assigned to you)
-    const COLLAB = `{ conversations(assignee: "collaborating") { nodes { contact { name } } } }`;
-    assert.deepEqual((await ok(COLLAB, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' } }]);
-    assert.deepEqual((await ok(COLLAB, undefined, ws.token)).conversations.nodes, []);
-    assert.equal(await errorCode(COLLAB), 'UNAUTHENTICATED');
-    await ok(`mutation($c: ID!, $u: ID!) { removeCollaborator(conversationId: $c, userId: $u) { id } }`, { c: conv, u: agent.id }, ws.token);
+    // only a collaborator: Collaborations, not My Chats
     assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, []);
+    assert.deepEqual((await ok(COLLAB, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' }, isCollaborator: true }]);
+    assert.deepEqual((await ok(COLLAB, undefined, ws.token)).conversations.nodes, []); // the owner isn't on it
+    assert.equal(await errorCode(COLLAB), 'UNAUTHENTICATED');
+    // the Inbox still lists it for both
+    assert.ok((await ok(CONVERSATIONS, {}, agent.token)).conversations.nodes.some((c: { id: string }) => c.id === conv));
+
+    // assigned to the agent too: now in My Chats (and still in Collaborations while a collaborator)
+    const mia = await prisma.member.findFirstOrThrow({ where: { userId: agent.id, workspaceId: ws.workspaceId } });
+    await ok(`mutation($c: ID!, $m: ID) { assignConversation(conversationId: $c, assigneeId: $m, reason: "Handles this customer") { id } }`, { c: conv, m: mia.id }, ws.token);
+    assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' }, isCollaborator: true }]);
+    assert.equal((await ok(COLLAB, undefined, agent.token)).conversations.nodes.length, 1);
+    assert.deepEqual((await ok(MINE, undefined, ws.token)).conversations.nodes, []); // not the owner's
+
+    // no longer a collaborator: out of Collaborations, still in My Chats (it's assigned to them)
+    await ok(`mutation($c: ID!, $u: ID!) { removeCollaborator(conversationId: $c, userId: $u) { id } }`, { c: conv, u: agent.id }, ws.token);
+    assert.deepEqual((await ok(COLLAB, undefined, agent.token)).conversations.nodes, []);
+    assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' }, isCollaborator: false }]);
   });
 });

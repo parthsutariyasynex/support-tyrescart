@@ -90,6 +90,9 @@ const DEFAULTS = {
   routingMode: 'round_robin' as RoutingMode,
   routingMemberIds: [] as string[],
   routingOnlineOnly: false,
+  // Follow-up after 24 hours: the template is found by name (follow_up_…), not chosen here (see followUpRules.ts)
+  followUpEnabled: true,
+  followUpActiveSince: null as Date | null,
 };
 type Row = Awaited<ReturnType<typeof prisma.automationSettings.findUnique>>;
 const readIds = (json: string | null | undefined) => {
@@ -102,18 +105,27 @@ const readIds = (json: string | null | undefined) => {
 };
 const toSettings = (row: Row) =>
   row
-    ? { ...DEFAULTS, ...row, replyInHours: row.replyInHours ?? '', replyOutHours: row.replyOutHours ?? '', routingMemberIds: readIds(row.routingMemberIds) }
+    ? {
+        ...DEFAULTS,
+        ...row,
+        replyInHours: row.replyInHours ?? '',
+        replyOutHours: row.replyOutHours ?? '',
+        routingMemberIds: readIds(row.routingMemberIds),
+      }
     : { ...DEFAULTS };
 
 export async function getAutomationSettings(auth: AuthPayload) {
   await requireAdmin(auth);
-  const [row, last, ws, variables] = await Promise.all([
+  const lastOf = (automation: string) =>
+    prisma.message.findFirst({ where: { automation, conversation: { workspaceId: auth.workspaceId } }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+  const [row, last, lastFollowUp, ws, variables] = await Promise.all([
     prisma.automationSettings.findUnique({ where: { workspaceId: auth.workspaceId } }),
-    prisma.message.findFirst({ where: { automation: { not: null }, conversation: { workspaceId: auth.workspaceId } }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+    lastOf('auto_reply'),
+    lastOf('follow_up'),
     settingsOf(auth.workspaceId),
     listVariables(auth.workspaceId),
   ]);
-  return { ...toSettings(row), timeZone: ws.defaultTimeZone, lastAutoReplyAt: last?.createdAt ?? null, variables };
+  return { ...toSettings(row), timeZone: ws.defaultTimeZone, lastAutoReplyAt: last?.createdAt ?? null, lastFollowUpAt: lastFollowUp?.createdAt ?? null, variables };
 }
 
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 09:00');
@@ -142,6 +154,7 @@ const updateSchema = z
     routingMode: z.enum(ROUTING_MODES, { message: 'Choose how new chats are routed' }).optional(),
     routingMemberIds: z.array(z.string().min(1)).max(200).optional(),
     routingOnlineOnly: z.boolean().optional(),
+    followUpEnabled: z.boolean().optional(),
   })
   .superRefine((s, ctx) => {
     if (s.workStart && s.workEnd && toMinutes(s.workEnd) <= toMinutes(s.workStart)) ctx.addIssue({ code: 'custom', message: 'Working hours must end after they start' });
@@ -181,6 +194,10 @@ export async function updateAutomationSettings(auth: AuthPayload, rawInput: unkn
     throw new AppError('Choose the teammate who gets every new chat', 400, 'BAD_USER_INPUT');
   if (next.routingEnabled && next.routingMode === 'round_robin' && !next.routingMemberIds.length)
     throw new AppError('Choose the teammates new chats are shared between', 400, 'BAD_USER_INPUT');
+  // Follow-up active = Simple automations on and the follow-up on (its template is found by name when sending).
+  // Becoming active starts the clock: only chats whose 24 hours run out from now on get one (never old chats in bulk)
+  const isActive = (x: typeof next) => x.enabled && x.followUpEnabled;
+  const followUpActiveSince = isActive(next) ? (isActive(current) && current.followUpActiveSince ? current.followUpActiveSince : new Date()) : null;
   const data = {
     enabled: next.enabled,
     workingDays: next.workingDays,
@@ -196,6 +213,8 @@ export async function updateAutomationSettings(auth: AuthPayload, rawInput: unkn
     routingMode: next.routingMode,
     routingMemberIds: JSON.stringify([...new Set(next.routingMemberIds)]),
     routingOnlineOnly: next.routingOnlineOnly,
+    followUpEnabled: next.followUpEnabled,
+    followUpActiveSince,
     updatedBy: auth.userId,
   };
   await prisma.automationSettings.upsert({ where: { workspaceId: auth.workspaceId }, update: data, create: { workspaceId: auth.workspaceId, ...data } });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
-import { collaboratorRemovedByYouText, pinText, removedAsCollaboratorText, labelToastText, addedAsCollaboratorText, assignedToYouText, assignmentChangedText, clearToast, currentToast, isDuplicateToast, newChatText, reminderText, removedFromYouText, resetToasts, showToast } from './toasts';
+import { collaboratorRemovedByYouText, pinText, removedAsCollaboratorText, labelToastText, addedAsCollaboratorText, assignedToYouText, assignmentChangedText, clearToast, currentToast, isDuplicateToast, newChatText, reminderText, removedFromYouText, resetToasts, showToast, templateStatusText } from './toasts';
 
 const base = { conversationId: 'c1', actorId: 'u-parth', actorName: 'Parth', contactName: 'Riya', previous: null };
 
@@ -64,4 +64,16 @@ describe('toast texts', () => {
     assert.equal(both.message, 'Reminder: 1 chat assigned to you still needs attention; 1 new chat is still unassigned and unread.');
     assert.equal(both.detail, 'A, B');
   });
+});
+
+test('follow-up template decided at Meta: approved, rejected (with the reason), anything else', () => {
+  const e = { name: 'follow_up_inquiry', language: 'en', category: 'UTILITY', rejectedReason: null };
+  assert.deepEqual(templateStatusText({ ...e, status: 'APPROVED' }), {
+    key: 'tpl:follow_up_inquiry:en:APPROVED',
+    message: 'Your follow-up template was approved by Meta. Follow-ups after 24 hours use it now.',
+    detail: 'follow_up_inquiry (en)',
+  });
+  assert.equal(templateStatusText({ ...e, status: 'REJECTED', rejectedReason: 'INVALID_FORMAT' }).message, 'Meta rejected your follow-up template: invalid format. Edit it in Message templates.');
+  assert.equal(templateStatusText({ ...e, status: 'REJECTED' }).message, 'Meta rejected your follow-up template. Edit it in Message templates.');
+  assert.equal(templateStatusText({ ...e, status: 'PAUSED' }).message, 'Meta set your follow-up template to paused.');
 });

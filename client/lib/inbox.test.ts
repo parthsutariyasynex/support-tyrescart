@@ -1,7 +1,7 @@
 // Run: npm test --workspace=client
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isAssignedTo, matchesSearch, needsAttention } from './inbox';
+import { isAssignedTo, isNewLead, matchesSearch, needsAttention } from './inbox';
 
 describe('My Chats: is this chat assigned to me?', () => {
   const linked = (userId: string | null) => ({ assignee: { id: 'a1', name: 'Ana', color: '#047857', userId } });
@@ -79,5 +79,17 @@ describe('search box: name, number, message, label, assignee, status', () => {
     assert.equal(matchesSearch(chat, 'assigned'), true);
     assert.equal(matchesSearch(chat, 'unassigned'), false);
     assert.equal(matchesSearch({ ...chat, assignee: null }, 'unassigned'), true);
+  });
+});
+
+describe('New Leads: open chats nobody holds', () => {
+  const ana = { id: 'a1', name: 'Ana', color: '#047857', userId: 'u1' };
+  test('open and unassigned (also a chat unassigned again)', () => {
+    assert.equal(isNewLead({ assignee: null, status: 'open' }), true);
+  });
+  test('not while someone holds it; not closed or snoozed', () => {
+    assert.equal(isNewLead({ assignee: ana, status: 'open' }), false);
+    assert.equal(isNewLead({ assignee: null, status: 'closed' }), false);
+    assert.equal(isNewLead({ assignee: null, status: 'snoozed' }), false);
   });
 });

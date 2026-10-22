@@ -17,10 +17,12 @@ import {
 } from '../whatsapp.js';
 import { recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
+import { isFollowUpName } from './followUpRules.js';
 import { checkCanSend, checkFile, cleanFileName } from './inbox.js';
 import { getPermissions, requireAdmin } from './permissions.js';
 import { withSender } from './senders.js';
 import { type TemplateInfo, type TemplateSpec, buildCreateComponents, buildSendComponents, renderTemplate, sendValuesSchema, templateSpecSchema } from './templateModel.js';
+import { watchFollowUpTemplates } from './templateWatch.js';
 import { parse } from './validate.js';
 
 // WhatsApp templates: sending one with its values from a chat (any member who may write there), and managing the
@@ -173,6 +175,8 @@ export async function createMessageTemplate(auth: AuthPayload, rawSpec: unknown,
   try {
     const created = await createTemplate(account, { name: spec.name, language: spec.language, category: spec.category, components });
     emitToWorkspace(auth.workspaceId, 'templates:changed', {});
+    // The follow-up template: watch Meta's review, so the workspace hears when it's decided
+    if (isFollowUpName(spec.name)) watchFollowUpTemplates(auth.workspaceId, { [`${spec.name}|${spec.language}`]: created.status });
     return created;
   } catch (err) {
     throw metaError("WhatsApp didn't accept the template", err);
@@ -193,6 +197,8 @@ export async function updateMessageTemplate(auth: AuthPayload, templateId: strin
   } catch (err) {
     throw metaError("WhatsApp didn't accept the change", err);
   }
+  // An edited follow-up template goes back to review: watch it (its status is read at the first check)
+  if (isFollowUpName(spec.name)) watchFollowUpTemplates(auth.workspaceId);
   emitToWorkspace(auth.workspaceId, 'templates:changed', {});
   return true;
 }

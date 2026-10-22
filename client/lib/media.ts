@@ -61,12 +61,13 @@ export function documentLabel(mime: string | null | undefined, name?: string | n
   return (DOCUMENT_TYPES[mime ?? ''] ?? name?.split('.').pop() ?? 'file').toUpperCase();
 }
 
-export async function sendFile(conversationId: string, file: File, caption: string): Promise<Message> {
+export async function sendFile(conversationId: string, file: File, caption: string, replyToId?: string | null): Promise<Message> {
   const r = checkFile(file);
   if ('problem' in r) throw new Error(r.problem);
   const q = new URLSearchParams();
   if (caption.trim()) q.set('caption', caption.trim());
   if (r.kind === 'document') q.set('name', file.name);
+  if (replyToId) q.set('replyTo', replyToId);
   const route = r.kind === 'image' ? 'images' : 'documents';
   const res = await fetch(`${API_URL}/inbox/conversations/${encodeURIComponent(conversationId)}/${route}${q.size ? `?${q}` : ''}`, {
     method: 'POST',
@@ -128,6 +129,12 @@ export function filePreview(m: { type: string; body: string; mediaName?: string 
     default:
       return null;
   }
+}
+
+// The one line a quoted message shows (in a reply, and above the composer while replying)
+export function quotePreview(q: { type: string; body: string; deleted?: boolean; mediaName?: string | null }) {
+  if (q.deleted) return 'This message was deleted';
+  return filePreview(q) ?? q.body;
 }
 
 // A pasted screenshot comes as "image.png" (or with no name): give it a readable one, like the system's own
