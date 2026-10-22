@@ -39,6 +39,7 @@ import {
   fetchConversationActivity,
   fetchNotifications,
   fetchUnreadTotal,
+  inBell,
   markNotificationsSeen,
 } from '@/lib/activity';
 import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
@@ -845,6 +846,7 @@ function Inbox({ meName }: { meName: string }) {
     });
     // Bell: only what the server decided this person may see (admins everything, others their own chats)
     socket.on('notification:new', (a: Activity) => {
+      if (!inBell(a)) return; // customer messages: desktop notifications, not the bell
       if (a.actorId === null || a.actorId !== permissionsRef.current?.userId)
         setFeed((f) => (f && !f.items.some((x) => x.id === a.id) ? { unseen: f.unseen + 1, items: [a, ...f.items].slice(0, 30) } : f));
     });

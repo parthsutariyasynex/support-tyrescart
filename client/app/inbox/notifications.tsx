@@ -40,11 +40,12 @@ export function playPing() {
   }
 }
 
-// --- Desktop pop-up (only used while the tab is in the background)
-export function showDesktopNotification(title: string, body: string, tag: string, onClick: () => void) {
+// --- Desktop pop-up (only used while the tab is in the background). renotify: a newer pop-up with the same tag
+// (the same chat) alerts again instead of silently replacing the old one, as WhatsApp Web does for each message.
+export function showDesktopNotification(title: string, body: string, tag: string, onClick: () => void, renotify = false) {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   try {
-    const n = new Notification(title, { body, tag });
+    const n = new Notification(title, { body, tag, ...(renotify ? { renotify: true } : {}) } as NotificationOptions);
     n.onclick = () => {
       window.focus();
       onClick();
@@ -59,7 +60,8 @@ type Permission = NotificationPermission | 'unsupported';
 const currentPermission = (): Permission =>
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
 
-// Header bell: recent activity by others + customer messages, with an unseen badge
+// Header bell: recent activity by others in your chats (customer messages come as desktop notifications), with an
+// unseen badge
 export function NotificationBell({
   feed,
   meId,
