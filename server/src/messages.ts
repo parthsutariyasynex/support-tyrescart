@@ -17,6 +17,8 @@ type Incoming = {
   username?: string;
   // Photos, videos, voice notes, audio, documents, stickers: WhatsApp's media id (downloaded after saving)
   media?: { id: string; mime?: string; filename?: string };
+  // The customer replied to (quoted) this message: its WhatsApp id
+  replyToWaId?: string;
 };
 
 // Optional chaining throughout: Meta's webhook normally matches `msg.type` exactly, but a malformed or
@@ -60,7 +62,17 @@ export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
   // Business-scoped user ID and WhatsApp username: kept when Meta includes them (they're optional in the payload)
   const bsuid = typeof contact?.user_id === 'string' ? contact.user_id : undefined;
   const username = typeof contact?.profile?.username === 'string' ? contact.profile.username : undefined;
-  return { waId: msg.from, name: contact?.profile?.name, waMessageId: msg.id, ...describe(msg), ...(bsuid ? { bsuid } : {}), ...(username ? { username } : {}) };
+  // A reply quotes a message by its WhatsApp id (context.id); a forwarded message has a context without one
+  const replyToWaId = typeof msg?.context?.id === 'string' ? msg.context.id : undefined;
+  return {
+    waId: msg.from,
+    name: contact?.profile?.name,
+    waMessageId: msg.id,
+    ...describe(msg),
+    ...(bsuid ? { bsuid } : {}),
+    ...(username ? { username } : {}),
+    ...(replyToWaId ? { replyToWaId } : {}),
+  };
 }
 
 export async function saveIncoming(workspaceId: string, m: Incoming) {
@@ -82,10 +94,13 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     create: { workspaceId, contactId: contact.id, lastMessageAt: now, lastInboundAt: now, unread: 1 },
     include: { contact: true },
   });
+  // A reply to a message of this chat is shown quoted (a message from before this app, or another chat, isn't)
+  const quoted = m.replyToWaId ? await prisma.message.findFirst({ where: { waMessageId: m.replyToWaId, conversationId: conversation.id }, select: { id: true } }) : null;
   const message = await prisma.message.create({
     data: {
       conversationId: conversation.id,
       waMessageId: m.waMessageId,
+      replyToId: quoted?.id ?? null,
       direction: 'in',
       type: m.type,
       body: m.body,

@@ -6,10 +6,18 @@ import { listLeadStages } from './leadStages.js';
 // Variables in automatic replies ({{contact.first_name}}, {{contact.tyre_size}}, {{company.name}} …), built from
 // the workspace's own data model: the standard contact properties (with the names the workspace gave them), its
 // custom properties, and the company's details. Values come from the customer's record, so nothing is made up:
-// an empty field is left empty (except first name, which falls back to the WhatsApp name, then "there").
+// an empty field is left empty (except first and last name, which fall back to the WhatsApp name: see nameParts).
 // A short form ({{first_name}}) works when exactly one variable ends with that name.
 
 export type Variable = { key: string; label: string };
+
+// First and last name: what's entered on the contact; when empty, taken from the WhatsApp profile name ("Alice
+// Patel" → Alice, Patel). A one-word profile name has no last name (''), so a follow-up's fallback still applies;
+// first name ends with "there" when nothing is known.
+export function nameParts(c: { firstName?: string | null; lastName?: string | null; name?: string | null }) {
+  const words = c.name?.trim().split(/\s+/).filter(Boolean) ?? [];
+  return { first: c.firstName?.trim() || words[0] || 'there', last: c.lastName?.trim() || words.slice(1).join(' ') };
+}
 
 // Standard properties that describe the customer (chat details such as "last channel" aren't variables). Read
 // when needed, not at load time: contacts.ts and this module import each other indirectly.
@@ -57,10 +65,10 @@ export async function variableValues(workspaceId: string, conversationId: string
     prisma.contactCustomValue.findMany({ where: { contactId: c.id }, select: { propertyId: true, value: true } }),
   ]);
   const labelOf = (list: { value: string; label: string }[], v: string | null) => (v ? (list.find((o) => o.value === v)?.label ?? v) : '');
-  const first = c.firstName?.trim() || c.name?.trim().split(/\s+/)[0] || 'there';
+  const { first, last } = nameParts(c);
   const values: Record<string, string> = {
     'contact.first_name': first,
-    'contact.last_name': c.lastName?.trim() ?? '',
+    'contact.last_name': last,
     'contact.name': [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || c.name?.trim() || first,
     'contact.email': c.email ?? '',
     'contact.phone': `+${c.waId}`,

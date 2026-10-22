@@ -32,8 +32,8 @@ export function micErrorMessage(err: unknown) {
   return "Couldn't start recording. Check your microphone and try again.";
 }
 
-export async function sendVoice(conversationId: string, recording: Blob): Promise<Message> {
-  const res = await fetch(`${API_URL}/inbox/conversations/${encodeURIComponent(conversationId)}/voice`, {
+export async function sendVoice(conversationId: string, recording: Blob, replyToId?: string | null): Promise<Message> {
+  const res = await fetch(`${API_URL}/inbox/conversations/${encodeURIComponent(conversationId)}/voice${replyToId ? `?replyTo=${encodeURIComponent(replyToId)}` : ''}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${getToken() ?? ''}`, 'Content-Type': recording.type || 'audio/webm' },
     body: recording,

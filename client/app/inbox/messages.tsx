@@ -2,13 +2,14 @@
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { type Message, QUICK_REACTIONS } from '@/lib/inbox';
+import { type Message, type QuotedMessage, QUICK_REACTIONS } from '@/lib/inbox';
+import { forwardKind } from '@/lib/forward';
 import { linkSegments } from '@/lib/links';
 import { highlightSegments } from '@/lib/messageSearch';
 import { formatDateTime, formatTime } from '@/lib/time';
 import { ChatImage, ChatPlayer, DocumentCard, EmojiPicker } from './composerExtras';
 import { VoicePlayer } from './voice';
-import { isMediaPlaceholder } from '@/lib/media';
+import { isMediaPlaceholder, quotePreview } from '@/lib/media';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
 const LONG_PRESS_MS = 450;
@@ -21,12 +22,16 @@ function agentColor(id: string) {
   return AGENT_NAME_COLORS[h % AGENT_NAME_COLORS.length];
 }
 
-export type MessageAction = 'copy' | 'edit' | 'delete';
+export type MessageAction = 'reply' | 'forward' | 'copy' | 'edit' | 'delete';
 
 // Which actions the viewer gets on a message. The API enforces the same rules; this only hides what would be refused.
-export function messageActions(m: Message, viewer: { userId: string; isAdmin: boolean } | null): MessageAction[] {
+// canReply: whether the viewer may write in this chat (replying sends a message)
+export function messageActions(m: Message, viewer: { userId: string; isAdmin: boolean } | null, canReply = false): MessageAction[] {
   if (m.deletedAt) return [];
-  const actions: MessageAction[] = m.body ? ['copy'] : [];
+  const actions: MessageAction[] = canReply && m.status !== 'pending' ? ['reply'] : [];
+  // Forward to other chats: what this app can send (text, photos, documents, voice notes); their own rules apply there
+  if (m.status !== 'pending' && forwardKind(m)) actions.push('forward');
+  if (m.body) actions.push('copy');
   const mine = m.direction === 'out' && !!viewer && (viewer.isAdmin || m.sentById === viewer.userId);
   if (mine && m.type === 'text') actions.push('edit');
   if (mine) actions.push('delete');
@@ -39,6 +44,26 @@ function BanIcon() {
       <circle cx="12" cy="12" r="9" />
       <path d="m5.6 5.6 12.8 12.8" />
     </svg>
+  );
+}
+
+// A quoted message, WhatsApp style: a coloured bar, who wrote it and one line of it. In a reply it jumps to the
+// original when clicked; above the composer it shows what you're replying to.
+export function QuoteBlock({ quote, onClick, className = '' }: { quote: QuotedMessage; onClick?: () => void; className?: string }) {
+  const name = quote.senderName ?? (quote.direction === 'in' ? 'Customer' : 'Team');
+  const inner = (
+    <>
+      <span className={`block truncate text-[11px] font-semibold ${quote.direction === 'in' ? 'text-primary' : 'text-[#5e5ce6]'}`}>{name}</span>
+      <span className={`line-clamp-2 break-words text-[12px] ${quote.deleted ? 'italic text-faint' : 'text-body-soft'}`}>{quotePreview(quote)}</span>
+    </>
+  );
+  const cls = `block w-full min-w-0 rounded-md border-l-4 bg-ink/5 px-2.5 py-1.5 text-left ${quote.direction === 'in' ? 'border-primary' : 'border-[#5e5ce6]'} ${className}`;
+  return onClick ? (
+    <button type="button" onClick={onClick} title="Go to the original message" className={`${cls} transition hover:bg-ink/10`}>
+      {inner}
+    </button>
+  ) : (
+    <div className={cls}>{inner}</div>
   );
 }
 
@@ -60,9 +85,12 @@ export function MessageBubble({
   highlightTerm = '',
   currentMatch = false,
   onReact,
+  onJumpTo,
 }: {
   message: Message;
   actions: MessageAction[];
+  // A reply: go to the message it quotes
+  onJumpTo?: (messageId: string) => void;
   highlighted: boolean;
   onOpenMenu: (anchor: HTMLElement) => void;
   // React with an emoji (null removes the team's reaction); absent when you can't react to this message
@@ -122,7 +150,7 @@ export function MessageBubble({
 
         {m.automation && !m.senderName && (
           <p className="mb-0.5 pr-4 text-[11px] font-semibold text-muted" title="Sent automatically (Settings → Simple automations)">
-            🤖 Auto-reply
+            {m.automation === 'follow_up' ? '🤖 Follow-up' : '🤖 Auto-reply'}
           </p>
         )}
         {m.senderName && (
@@ -133,6 +161,7 @@ export function MessageBubble({
             {m.senderName}
           </p>
         )}
+        {m.replyTo && !m.deletedAt && <QuoteBlock quote={m.replyTo} onClick={onJumpTo ? () => onJumpTo(m.replyTo!.id) : undefined} className="mb-1 mt-0.5" />}
         {m.deletedAt ? (
           <p className="pr-2 text-[13px] leading-relaxed">
             <DeletedText />
@@ -224,7 +253,8 @@ function ReactionPicker({ isOut, current, onReact }: { isOut: boolean; current: 
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    const onPointer = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(null);
+    // The full picker is drawn on top of the page (outside this element): a click in it isn't a click outside
+    const onPointer = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && !(e.target as HTMLElement).closest?.('[data-emoji-picker]') && setOpen(null);
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(null);
     document.addEventListener('mousedown', onPointer);
     document.addEventListener('keydown', onKey);
@@ -315,7 +345,8 @@ function ReactionBadge({ message: m, isOut, onRemove }: { message: Message; isOu
   );
 }
 
-const MENU_WIDTH = 200;
+// The menu is at least this wide and grows to fit its longest label ("Delete for everyone"), never cutting it
+const MENU_WIDTH = 100;
 
 // Popover next to the bubble on desktop; a bottom sheet on narrow screens
 export function MessageMenu({
@@ -337,7 +368,8 @@ export function MessageMenu({
     if (window.innerWidth < 640) return setSheet(true);
     const a = anchor.getBoundingClientRect();
     const h = ref.current?.offsetHeight ?? 140;
-    const left = Math.min(Math.max(8, a.right - MENU_WIDTH), window.innerWidth - MENU_WIDTH - 8);
+    const w = ref.current?.offsetWidth ?? MENU_WIDTH; // its real width, labels included
+    const left = Math.min(Math.max(8, a.right - w), window.innerWidth - w - 8);
     const top = a.top + 24 + h <= window.innerHeight - 8 ? a.top + 24 : Math.max(8, a.top - h - 4);
     setPos({ top, left });
   }, [anchor]);
@@ -368,6 +400,26 @@ export function MessageMenu({
   }, [anchor, onClose]);
 
   const items: { action: MessageAction; label: string; danger?: boolean; icon: React.ReactNode }[] = [
+    {
+      action: 'reply',
+      label: 'Reply',
+      icon: (
+        <>
+          <path d="m9 14-5-5 5-5" />
+          <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+        </>
+      ),
+    },
+    {
+      action: 'forward',
+      label: 'Forward',
+      icon: (
+        <>
+          <path d="m15 14 5-5-5-5" />
+          <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13" />
+        </>
+      ),
+    },
     {
       action: 'copy',
       label: 'Copy',
@@ -412,7 +464,18 @@ export function MessageMenu({
           ? 'fixed inset-x-0 bottom-0 z-50 rounded-t-2xl border-t border-line bg-surface p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] text-sm shadow-xl'
           : 'fixed z-50 rounded-xl border border-line bg-surface p-1 text-xs shadow-lg'
       }
-      style={sheet ? undefined : { width: MENU_WIDTH, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+      style={
+        sheet
+          ? undefined
+          : {
+              width: 'max-content',
+              minWidth: MENU_WIDTH,
+              maxWidth: 'calc(100vw - 16px)',
+              top: pos?.top ?? 0,
+              left: pos?.left ?? 0,
+              visibility: pos ? 'visible' : 'hidden',
+            }
+      }
     >
       {sheet && <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-line-strong" />}
       {items
@@ -422,7 +485,7 @@ export function MessageMenu({
             key={i.action}
             role="menuitem"
             onClick={() => onAction(i.action)}
-            className={`flex w-full items-center gap-2.5 rounded-lg text-left font-medium transition ${sheet ? 'px-3 py-3' : 'px-2.5 py-2'} ${
+            className={`flex w-full items-center gap-2.5 whitespace-nowrap rounded-lg text-left font-medium transition ${sheet ? 'px-3 py-3' : 'px-2.5 py-2'} ${
               i.danger ? 'text-danger hover:bg-danger-soft' : 'text-body hover:bg-surface-muted'
             }`}
           >
@@ -435,13 +498,18 @@ export function MessageMenu({
     </div>
   );
 
-  return sheet ? (
-    <>
-      <div className="fixed inset-0 z-40 bg-shadow/30" onClick={onClose} />
-      {menu}
-    </>
-  ) : (
-    menu
+  // Portal to <body>, like the other popovers: nothing in the chat panel (its scrolling, stacking or clipping) can
+  // hide or cut the menu
+  return createPortal(
+    sheet ? (
+      <>
+        <div className="fixed inset-0 z-40 bg-shadow/30" onClick={onClose} />
+        {menu}
+      </>
+    ) : (
+      menu
+    ),
+    document.body,
   );
 }
 

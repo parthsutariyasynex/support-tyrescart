@@ -26,6 +26,11 @@ test('workspace preferences: defaults, admins only, validated, in "me", applied'
   assert.equal(s0.businessDayStartHour, 9);
   assert.equal(s0.deletedContactRetentionDays, 14);
   await assert.rejects(gql(SET, { i: { defaultCountry: 'IN' } }, a.token), /admins/i);
+  // Company details: the company (workspace) name; admins only, never empty
+  await assert.rejects(gql(`mutation { renameWorkspace(name: "Agent Co") }`, {}, a.token), /admins/i);
+  await assert.rejects(gql(`mutation { renameWorkspace(name: "   ") }`, {}, o.token), /required/i);
+  assert.equal((await gql(`mutation($n: String!) { renameWorkspace(name: $n) }`, { n: `  ws-${run} renamed ` }, o.token)).renameWorkspace, `ws-${run} renamed`);
+  assert.equal((await gql(`{ me { workspace { name } } }`, {}, a.token)).me.workspace.name, `ws-${run} renamed`);
   await assert.rejects(gql(SET, { i: { defaultTimeZone: 'Mars/Base' } }, o.token), /time zone/i);
   // every time is shown in Dubai time: another zone can't be chosen, and one saved earlier isn't used
   await assert.rejects(gql(SET, { i: { defaultTimeZone: 'Asia/Kolkata' } }, o.token), /Dubai time/);

@@ -298,7 +298,10 @@ export const typeDefs = /* GraphQL */ `
     contactRemarks(contactId: ID!): [ContactRemark!]!
     contactFieldOptions: ContactFieldOptions!
     "Settings → Customer lifecycle: how many of this workspace's contacts are at each lead stage (stage null = none)"
-    leadStageCounts: [LeadStageCount!]!
+    leadStageCounts(
+      "true: count chats (contacts with a chat, not deleted), as the left menu's stage links list them"
+      chats: Boolean
+    ): [LeadStageCount!]!
     "Admins only: deleted contacts, newest first (kept for deletedContactsRetentionDays)"
     deletedContacts: [DeletedContact!]!
     "Admins: contacts per Lead source / Priority choice (field = leadSource or priority)"
@@ -386,7 +389,7 @@ export const resolvers = {
     customPropertyTypes: authed(async () => CUSTOM_TYPES),
     deletedContacts: authed(async (_args: unknown, auth) => listDeletedContacts(auth)),
     deletedContactsRetentionDays: authed(async (_args: unknown, auth) => (await settingsOf(auth.workspaceId)).deletedContactRetentionDays),
-    leadStageCounts: authed(async (_args: unknown, auth) => leadStageCounts(auth)),
+    leadStageCounts: authed(async ({ chats }: { chats?: boolean | null }, auth) => leadStageCounts(auth, !!chats)),
     contactFieldOptions: authed(async (_args: unknown, auth) => ({
       leadStages: await getLeadStages(auth),
       leadSources: await choicesOf(auth.workspaceId, 'leadSource'),

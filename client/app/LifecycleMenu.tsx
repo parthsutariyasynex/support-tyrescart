@@ -3,12 +3,14 @@
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { type ContactOption, fetchContactFieldOptions } from '@/lib/contacts';
+import { type ContactOption, STAGE_COUNTS_EVENT, fetchContactFieldOptions, fetchLeadStageCounts } from '@/lib/contacts';
+import { revalidateOnReturn } from '@/lib/revalidate';
 import { useStagesChanged } from './inbox/StageMenu';
 
-// Left menu → LIFECYCLE STAGES: the workspace's stages (Settings → Customer lifecycle) with their colours; one click
-// shows the Inbox with only the chats at that stage. Follows renames, colours and new stages live. The section
-// folds, and that is remembered on this device.
+// Left menu → LIFECYCLE STAGES: the workspace's stages (Settings → Customer lifecycle) with their colours and how
+// many chats are at each, e.g. "New (3)"; one click shows the Inbox with only the chats at that stage. Follows
+// renames, colours, new stages and the counts live. The section folds, and that is remembered on this device.
+let cachedCounts: Record<string, number> | null = null;
 const KEY = 'support:lifecycleMenuOpen';
 let rememberedOpen: boolean | null = null;
 let cachedStages: ContactOption[] | null = null;
@@ -17,6 +19,7 @@ export function LifecycleMenu({ matches }: { matches: (label: string) => boolean
   const pathname = usePathname();
   const current = useSearchParams().get('stage');
   const [stages, setStages] = useState<ContactOption[] | null>(cachedStages);
+  const [counts, setCounts] = useState<Record<string, number> | null>(cachedCounts);
   const [open, setOpen] = useState(() => {
     if (rememberedOpen === null) {
       try {
@@ -37,7 +40,34 @@ export function LifecycleMenu({ matches }: { matches: (label: string) => boolean
   useEffect(() => {
     load(false);
   }, []);
-  useStagesChanged(() => load(true));
+  useStagesChanged(() => {
+    load(true);
+    loadCounts(); // a deleted stage moves its chats to another
+  });
+
+  // Chats per stage: on load, after anything that changes them (a quick burst counts once), and back on this tab
+  const loadCounts = () =>
+    fetchLeadStageCounts(true)
+      .then((rows) => {
+        cachedCounts = Object.fromEntries(rows.filter((r) => r.stage).map((r) => [r.stage!, r.count]));
+        setCounts(cachedCounts);
+      })
+      .catch(() => {});
+  useEffect(() => {
+    loadCounts();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const soon = () => {
+      clearTimeout(timer);
+      timer = setTimeout(loadCounts, 400);
+    };
+    window.addEventListener(STAGE_COUNTS_EVENT, soon);
+    const stop = revalidateOnReturn(loadCounts);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener(STAGE_COUNTS_EVENT, soon);
+      stop();
+    };
+  }, []);
 
   const shown = (stages ?? []).filter((s) => matches(s.label));
   if (stages && !shown.length) return null; // the menu search hides the section when no stage matches
@@ -79,6 +109,11 @@ export function LifecycleMenu({ matches }: { matches: (label: string) => boolean
               >
                 <span className="h-3.5 w-3.5 shrink-0 rounded-[4px]" style={{ backgroundColor: s.color ?? 'var(--color-line)' }} aria-hidden="true" />
                 <span className="truncate">{s.label}</span>
+                {counts && (
+                  <span className={`shrink-0 tabular-nums ${active ? 'text-on-primary/80' : 'text-faint'}`} aria-label={`${counts[s.value] ?? 0} chats`}>
+                    ({counts[s.value] ?? 0})
+                  </span>
+                )}
               </Link>
             );
           })}

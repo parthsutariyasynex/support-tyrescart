@@ -21,9 +21,15 @@ import { parse } from './validate.js';
 // The choices for the dropdown fields. The API serves them (contactFieldOptions), so the app has one source.
 // Lead stages in order: the open ones, then the closed ones (won/lost). The colour marks the stage in the chat
 // header's stage menu.
-// Settings → Customer lifecycle: contacts per lead stage in your workspace (any role may see the totals)
-export async function leadStageCounts(auth: AuthPayload) {
-  const rows = await prisma.contact.groupBy({ by: ['leadStage'], where: { workspaceId: auth.workspaceId }, _count: { _all: true } });
+// Settings → Customer lifecycle: contacts per lead stage in your workspace (any role may see the totals).
+// chats: only contacts with a chat, not deleted: the left menu's count of what a stage link lists in the Inbox
+// (one chat per contact).
+export async function leadStageCounts(auth: AuthPayload, chats = false) {
+  const rows = await prisma.contact.groupBy({
+    by: ['leadStage'],
+    where: { workspaceId: auth.workspaceId, ...(chats ? { deletedAt: null, conversations: { some: {} } } : {}) },
+    _count: { _all: true },
+  });
   return rows.map((r) => ({ stage: r.leadStage, count: r._count._all }));
 }
 
@@ -215,10 +221,10 @@ export async function listChatFiles(auth: AuthPayload, conversationId: string) {
     where: { conversationId, type: { in: [...FILE_TYPES] }, deletedAt: null, ...(hideBefore ? { createdAt: { gt: hideBefore } } : {}) },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: 200,
-    // select: { id: true, type: true, direction: true, createdAt: true, mediaMime: true, mediaName: true, mediaSize: true, mediaPath: true, waMediaId: true },
+    select: { id: true, type: true, direction: true, createdAt: true, mediaMime: true, mediaName: true, mediaSize: true, mediaPath: true, waMediaId: true },
   });
   // available: the file can be opened (stored, or a customer's file WhatsApp can still give us)
-  // return rows.map(({ mediaPath, waMediaId, ...r }) => ({ ...r, available: !!mediaPath || !!waMediaId }));
+  return rows.map(({ mediaPath, waMediaId, ...r }) => ({ ...r, available: !!mediaPath || !!waMediaId }));
 }
 
 // --- Read-only details shown in the panel

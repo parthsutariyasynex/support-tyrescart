@@ -32,6 +32,19 @@ export type Message = {
   teamReactionById?: string | null;
   // Sent by Simple automations (e.g. 'auto_reply') rather than a person
   automation?: string | null;
+  // A reply, as in WhatsApp: the message it quotes
+  replyToId?: string | null;
+  replyTo?: QuotedMessage | null;
+};
+export type QuotedMessage = {
+  id: string;
+  direction: 'in' | 'out';
+  type: string;
+  body: string; // empty once deleted
+  senderName: string | null;
+  deleted: boolean;
+  mediaMime?: string | null;
+  mediaName?: string | null;
 };
 export type Conversation = {
   id: string;
@@ -52,17 +65,25 @@ export type Conversation = {
   snoozedUntil: string | null;
   // Pinned to the top of your own list
   pinned: boolean;
-  // You are a collaborator on it (shows in My Chats)
+  // You are a collaborator on it (shows in Collaborations)
   isCollaborator: boolean;
+  // Was ever assigned to someone: then it's no longer a New Lead, even if unassigned again
+  wasAssigned?: boolean;
 };
+
+// New Leads: open chats nobody holds right now (the server applies the same rule with assignee 'new_leads'). An
+// unassigned chat comes back here at once; closed and snoozed chats stay in the Inbox only.
+export const isNewLead = (c: Pick<Conversation, 'assignee' | 'status'>) => !c.assignee && c.status === 'open';
 export type ConversationStatus = 'open' | 'snoozed' | 'closed';
-export type ConversationCounts = { open: number; closed: number; closedWithUnread: number; unassigned: number; snoozed: number };
+export type ConversationCounts = { open: number; closed: number; closedWithUnread: number; unassigned: number; snoozed: number; newLeads: number };
 export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 
 export const PAGE_SIZE = 50;
 
-const MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage } lastMessage { ${MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator`;
+const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
+// Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
+const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
 // every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last
@@ -134,9 +155,10 @@ export async function markConversationRead(id: string) {
   return (await gql<{ markConversationRead: { id: string; unread: number } }>(query, { id })).markConversationRead;
 }
 
-export async function sendTextMessage(conversationId: string, body: string) {
+// replyToId: send it as a reply to that message of the chat (quoted above it, in the app and in WhatsApp)
+export async function sendTextMessage(conversationId: string, body: string, replyToId?: string | null) {
   const query = `mutation SendText($input: SendTextInput!) { sendTextMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
-  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body } })).sendTextMessage;
+  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } })).sendTextMessage;
 }
 
 export async function sendTemplateMessage(conversationId: string, name: string, language?: string) {
@@ -205,7 +227,7 @@ export function newerMessage(current: Message, incoming: Message) {
 }
 
 export async function fetchConversationCounts() {
-  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread unassigned snoozed } }`))
+  return (await gql<{ conversationCounts: ConversationCounts }>(`query Counts { conversationCounts { open closed closedWithUnread unassigned snoozed newLeads } }`))
     .conversationCounts;
 }
 

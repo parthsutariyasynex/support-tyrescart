@@ -1,31 +1,66 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import type { EmojiStyle, SkinTonePickerLocation, SuggestionMode, Theme } from 'emoji-picker-react';
+import dynamic from 'next/dynamic';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { EMOJI_GROUPS, pushRecent, searchEmojis } from '@/lib/emojis';
 import { CAPTION_MAX, checkFile, documentLabel, downloadFile, formatSize, mediaUrl } from '@/lib/media';
 
-const RECENT_KEY = 'support:recentEmojis';
-const readRecent = (): string[] => {
-  try {
-    const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
-    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-};
+// The full Unicode emoji set (emoji-picker-react): search, categories, skin tones and recently used (kept in this
+// browser by the picker). Its data ships with the package, so nothing is fetched from another site; and it's only
+// loaded the first time a picker opens, not with the page.
+const Picker = dynamic(() => import('emoji-picker-react'), {
+  ssr: false,
+  loading: () => <div className="h-[400px] w-[340px] max-w-[calc(100vw-2rem)] animate-pulse rounded-xl bg-surface-strong" aria-busy="true" aria-label="Loading emojis" />,
+});
 
-// Composer emoji picker: Recent (this browser), categories, search. Opens above the message box.
+// The picker in the app's own colours (its CSS variables, set on the picker itself so they win over its defaults)
+const PICKER_THEME = {
+  '--epr-bg-color': 'var(--color-surface)',
+  '--epr-text-color': 'var(--color-ink)',
+  '--epr-picker-border-color': 'var(--color-line)',
+  '--epr-highlight-color': 'var(--color-primary)',
+  '--epr-category-icon-active-color': 'var(--color-primary)',
+  '--epr-hover-bg-color': 'var(--color-surface-strong)',
+  '--epr-focus-bg-color': 'var(--color-surface-strong)',
+  '--epr-search-input-bg-color': 'var(--color-surface-muted)',
+  '--epr-search-input-bg-color-active': 'var(--color-surface)',
+  '--epr-search-border-color': 'var(--color-primary)',
+  '--epr-category-label-bg-color': 'var(--color-surface)',
+  '--epr-picker-border-radius': '12px',
+} as React.CSSProperties;
+
+const PICKER_WIDTH = 340;
+const PICKER_HEIGHT = 400;
+
+// Emoji picker (message box, reactions, automation replies). Drawn on top of the page (a portal), so no scrolling
+// panel or header can cut it: above where it's opened when there's room, otherwise below, always on screen.
+// Esc or a click outside closes it.
 export function EmojiPicker({ onPick, onClose }: { onPick: (emoji: string) => void; onClose: () => void }) {
-  const [query, setQuery] = useState('');
-  const [recent, setRecent] = useState<string[]>([]);
-  const [group, setGroup] = useState(EMOJI_GROUPS[0].key);
   const ref = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const anchorRef = useRef<HTMLSpanElement>(null); // where it opens from: the spot the picker used to take
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const place = () => {
+      const box = anchorRef.current?.parentElement?.getBoundingClientRect();
+      if (!box) return;
+      const w = Math.min(PICKER_WIDTH, window.innerWidth - 32);
+      const room = box.top - 8;
+      const top = room >= PICKER_HEIGHT || box.top > window.innerHeight - box.bottom ? Math.max(8, box.top - PICKER_HEIGHT - 8) : Math.min(box.bottom + 8, window.innerHeight - PICKER_HEIGHT - 8);
+      const left = Math.min(Math.max(8, box.left), window.innerWidth - w - 8);
+      setPos({ top, left });
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true); // follow what it opened from
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, []);
 
   useEffect(() => {
-    setRecent(readRecent());
-    searchRef.current?.focus();
     const onPointer = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
       if (!ref.current?.contains(t) && !t.closest('[data-emoji-toggle]')) onClose();
@@ -39,83 +74,36 @@ export function EmojiPicker({ onPick, onClose }: { onPick: (emoji: string) => vo
     };
   }, [onClose]);
 
-  function pick(e: string) {
-    const next = pushRecent(recent, e);
-    setRecent(next);
-    try {
-      localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-    } catch {
-      // private mode: recent just isn't kept
-    }
-    onPick(e);
-  }
-
-  const found = searchEmojis(query);
-  const current = EMOJI_GROUPS.find((g) => g.key === group) ?? EMOJI_GROUPS[0];
-  const grid = (list: { e: string; n: string }[]) => (
-    <div className="grid grid-cols-8 gap-0.5">
-      {list.map((em) => (
-        <button
-          key={em.e}
-          type="button"
-          title={em.n}
-          aria-label={em.n.split(' ')[0]}
-          onClick={() => pick(em.e)}
-          className="flex h-8 w-8 items-center justify-center rounded-md text-xl hover:bg-surface-strong"
-        >
-          {em.e}
-        </button>
-      ))}
-    </div>
-  );
-
   return (
-    <div ref={ref} role="dialog" aria-label="Emojis" className="absolute bottom-full left-0 z-40 mb-2 flex w-[312px] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-xl">
-      <div className="p-2.5 pb-2">
-        <input
-          ref={searchRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search emoji"
-          aria-label="Search emoji"
-          className="w-full rounded-lg border border-line bg-surface-muted/60 px-3 py-1.5 text-xs text-ink outline-hidden placeholder:text-faint focus:border-primary focus:bg-surface"
-        />
-      </div>
-      <div className="h-56 overflow-y-auto px-2 pb-2">
-        {query.trim() ? (
-          found.length ? grid(found) : <p className="px-1 py-6 text-center text-xs text-muted">No emoji matches “{query.trim()}”</p>
-        ) : (
-          <>
-            {recent.length > 0 && (
-              <>
-                <p className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-faint">Recent</p>
-                {grid(recent.map((e) => ({ e, n: EMOJI_GROUPS.flatMap((g) => g.emojis).find((x) => x.e === e)?.n ?? e })))}
-              </>
-            )}
-            <p className="px-1 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-faint">{current.label}</p>
-            {grid(current.emojis)}
-          </>
-        )}
-      </div>
-      {!query.trim() && (
-        <div role="tablist" aria-label="Emoji categories" className="flex justify-between border-t border-line-soft px-2 py-1.5">
-          {EMOJI_GROUPS.map((g) => (
-            <button
-              key={g.key}
-              type="button"
-              role="tab"
-              aria-selected={g.key === group}
-              title={g.label}
-              aria-label={g.label}
-              onClick={() => setGroup(g.key)}
-              className={`flex h-8 w-9 items-center justify-center rounded-md text-lg transition ${g.key === group ? 'bg-primary-subtle' : 'opacity-70 hover:bg-surface-strong hover:opacity-100'}`}
-            >
-              {g.icon}
-            </button>
-          ))}
-        </div>
+    <>
+      <span ref={anchorRef} className="hidden" aria-hidden="true" />
+      {createPortal(
+        <div
+          ref={ref}
+          role="dialog"
+          aria-label="Emojis"
+          data-emoji-picker
+          className="fixed z-[70] rounded-xl shadow-xl"
+          style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+        >
+          <Picker
+            onEmojiClick={(e) => onPick(e.emoji)}
+            emojiStyle={'native' as EmojiStyle}
+            theme={'light' as Theme}
+            suggestedEmojisMode={'recent' as SuggestionMode}
+            skinTonePickerLocation={'SEARCH' as SkinTonePickerLocation}
+            searchPlaceholder="Search emoji"
+            autoFocusSearch
+            lazyLoadEmojis
+            previewConfig={{ showPreview: false }}
+            width={`min(${PICKER_WIDTH}px, calc(100vw - 2rem))`}
+            height={PICKER_HEIGHT}
+            style={PICKER_THEME}
+          />
+        </div>,
+        document.body,
       )}
-    </div>
+    </>
   );
 }
 

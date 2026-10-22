@@ -15,6 +15,7 @@ import { setTimeZone } from '@/lib/time';
 import {
   type AssignmentEvent,
   type ReminderEvent,
+  type TemplateStatusEvent,
   addedAsCollaboratorText,
   assignedToYouText,
   assignmentChangedText,
@@ -24,6 +25,7 @@ import {
   reminderText,
   removedFromYouText,
   showToast,
+  templateStatusText,
   useToast,
 } from '@/lib/toasts';
 import { AssignedToast } from './inbox/messages';
@@ -35,6 +37,12 @@ import { PresenceDot } from './PresenceDot';
 import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
+import { STAGE_COUNTS_EVENT } from '@/lib/contacts';
+import { FOLLOW_UP_TEMPLATE_EVENT } from '@/lib/automations';
+import { type MessageEvent, appInBackground, customerMessageNotice } from '@/lib/desktopNotifications';
+
+// Customer messages already notified in this tab (the same message can arrive twice, e.g. after a reconnect)
+const seenMessages = new Set<string>();
 
 // Menu items for features that aren't built yet (Automation bots, SLA policies, Logs, Billing). They only showed a
 // placeholder alert, so they stay hidden; set to true to show them again once they have real pages and data.
@@ -135,6 +143,8 @@ export function AppShell({
   const toast = useToast();
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
+  const roleRef = useRef(me?.role);
+  roleRef.current = me?.role;
   const openChatRef = useRef<(id: string) => void>(() => {});
   openChatRef.current = (id: string) => {
     if (CHAT_PAGES.includes(pathnameRef.current)) window.dispatchEvent(new CustomEvent(OPEN_CHAT_EVENT, { detail: id }));
@@ -152,6 +162,14 @@ export function AppShell({
       playPing();
       showDesktopNotification(title, body, tag, () => open(conversationId));
     };
+    // A customer wrote: desktop pop-up with their name and the message, on every page, while you aren't looking at
+    // the app (sound too); clicking it opens the chat. One per message; never for our own messages.
+    socket.on('message:new', (e: MessageEvent) => {
+      const n = customerMessageNotice(e, seenMessages);
+      if (!n || !appInBackground()) return;
+      playPing();
+      showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId));
+    });
     socket.on('assignment:you', (e: AssignmentEvent) => {
       const t = assignedToYouText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
@@ -183,6 +201,16 @@ export function AppShell({
       const t = newChatText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
     });
+    // Meta decided on the follow-up template: admins are told; the Simple automations page refreshes its status
+    socket.on('templates:status', (e: TemplateStatusEvent) => {
+      window.dispatchEvent(new Event(FOLLOW_UP_TEMPLATE_EVENT));
+      if (!isAdminRole(roleRef.current ?? '')) return;
+      const t = templateStatusText(e);
+      showToast(t.key, '', t.message, t.detail);
+    });
+    // Left menu → Lifecycle stages: its chat counts follow new chats, stage changes and deleted/restored contacts
+    const stageCountsChanged = () => window.dispatchEvent(new Event(STAGE_COUNTS_EVENT));
+    for (const ev of ['chat:new', 'contact:updated', 'contact:deleted', 'contact:restored']) socket.on(ev, stageCountsChanged);
     socket.on('assignment:reminder', (e: ReminderEvent) => {
       if (!e?.chats?.length) return;
       const t = reminderText(e);

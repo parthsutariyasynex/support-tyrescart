@@ -64,6 +64,7 @@ function General({ me }: { me: Me }) {
       ) : (
         <div className="mt-8">
           <h3 className="text-lg font-bold text-ink">Notifications</h3>
+          <p className="mt-1 text-[13px] text-body-soft">How this browser lets you know about new messages and chats.</p>
           <NotificationSettings />
         </div>
       )}

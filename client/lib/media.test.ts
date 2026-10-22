@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { checkFile, documentLabel, filePreview, fileType, formatSize, imageProblem, isMediaPlaceholder, pastedName } from './media';
+import { checkFile, documentLabel, filePreview, fileType, formatSize, imageProblem, isMediaPlaceholder, pastedName, quotePreview } from './media';
 
 const MB = 1024 * 1024;
 describe('files before sending', () => {
@@ -43,4 +43,13 @@ test('pasted screenshots get a readable name; copied files keep theirs', () => {
   const kept = pastedName(new File(['x'], 'invoice.pdf', { type: 'application/pdf' }), at);
   assert.equal(kept.name, 'invoice.pdf');
   assert.equal(pastedName(new File(['x'], 'image.png', { type: 'image/png' }), at).type, 'image/png');
+});
+
+test('a quoted message shows one line: its text, a file label, or that it was deleted', () => {
+  assert.equal(quotePreview({ type: 'text', body: 'Do you have 17 inch tyres?' }), 'Do you have 17 inch tyres?');
+  assert.equal(quotePreview({ type: 'image', body: '[image]' }), '📷 Photo');
+  assert.equal(quotePreview({ type: 'image', body: 'This one' }), '📷 This one');
+  assert.equal(quotePreview({ type: 'document', body: '', mediaName: 'invoice.pdf' }), '📄 invoice.pdf');
+  assert.equal(quotePreview({ type: 'voice', body: '' }), '🎤 Voice message');
+  assert.equal(quotePreview({ type: 'text', body: '', deleted: true }), 'This message was deleted');
 });

@@ -132,6 +132,16 @@ export const newChatText = (e: { conversationId: string; contactName: string }) 
   detail: e.contactName,
 });
 
+// templates:status (admins): Meta decided on the follow-up template (follow_up_…) submitted in Message templates
+export type TemplateStatusEvent = { name: string; language: string; status: string; category: string; rejectedReason: string | null };
+export function templateStatusText(e: TemplateStatusEvent) {
+  const what = `${e.name} (${e.language})`;
+  if (e.status === 'APPROVED') return { key: `tpl:${e.name}:${e.language}:${e.status}`, message: 'Your follow-up template was approved by Meta. Follow-ups after 24 hours use it now.', detail: what };
+  if (e.status === 'REJECTED')
+    return { key: `tpl:${e.name}:${e.language}:${e.status}`, message: `Meta rejected your follow-up template${e.rejectedReason ? `: ${e.rejectedReason.toLowerCase().replace(/_/g, ' ')}` : ''}. Edit it in Message templates.`, detail: what };
+  return { key: `tpl:${e.name}:${e.language}:${e.status}`, message: `Meta set your follow-up template to ${e.status.toLowerCase().replace(/_/g, ' ')}.`, detail: what };
+}
+
 export type ReminderEvent = { at: string; chats: { conversationId: string; contactName: string; kind?: 'assigned' | 'unassigned' }[] };
 
 // assignment:reminder (per person): chats assigned to you not opened/answered, and new chats nobody has taken

@@ -21,8 +21,11 @@ async function graphPost(account: Account, payload: object) {
 }
 
 // Free-form text: only allowed within 24h of the customer's last message
-export function sendText(account: Account, to: string, body: string) {
-  return graphPost(account, { to, type: 'text', text: { body } });
+// replyTo: the wamid of the message this one replies to (WhatsApp shows it quoted above the text)
+const context = (replyTo?: string | null) => (replyTo ? { context: { message_id: replyTo } } : {});
+
+export function sendText(account: Account, to: string, body: string, replyTo?: string | null) {
+  return graphPost(account, { to, type: 'text', text: { body }, ...context(replyTo) });
 }
 
 // A reaction to one of the chat's messages (its wamid); an empty emoji removes the business's reaction
@@ -47,13 +50,13 @@ export async function uploadMedia(account: Account, bytes: Buffer, mime: string,
 }
 
 // Image with an optional caption: free-form, so only within 24h of the customer's last message (like text)
-export function sendImage(account: Account, to: string, mediaId: string, caption?: string) {
-  return graphPost(account, { to, type: 'image', image: { id: mediaId, ...(caption ? { caption } : {}) } });
+export function sendImage(account: Account, to: string, mediaId: string, caption?: string, replyTo?: string | null) {
+  return graphPost(account, { to, type: 'image', image: { id: mediaId, ...(caption ? { caption } : {}) }, ...context(replyTo) });
 }
 
 // Document (PDF, Office, text) with its file name and an optional caption: free-form, so within 24 hours
-export function sendDocument(account: Account, to: string, mediaId: string, filename: string, caption?: string) {
-  return graphPost(account, { to, type: 'document', document: { id: mediaId, filename, ...(caption ? { caption } : {}) } });
+export function sendDocument(account: Account, to: string, mediaId: string, filename: string, caption?: string, replyTo?: string | null) {
+  return graphPost(account, { to, type: 'document', document: { id: mediaId, filename, ...(caption ? { caption } : {}) }, ...context(replyTo) });
 }
 
 // Downloads media a customer sent: WhatsApp gives a short-lived URL for the media id, then the file itself (both need
@@ -72,8 +75,8 @@ export async function downloadMedia(account: Account, mediaId: string, maxBytes:
 }
 
 // Audio: an OGG/Opus file shows on the customer's phone as a voice note; free-form, so within 24 hours
-export function sendAudio(account: Account, to: string, mediaId: string) {
-  return graphPost(account, { to, type: 'audio', audio: { id: mediaId } });
+export function sendAudio(account: Account, to: string, mediaId: string, replyTo?: string | null) {
+  return graphPost(account, { to, type: 'audio', audio: { id: mediaId }, ...context(replyTo) });
 }
 
 // Approved template: allowed any time (this is what broadcasts use)

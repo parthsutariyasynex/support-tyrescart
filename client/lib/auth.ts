@@ -77,6 +77,13 @@ export async function updateMyName(name: string) {
   return r;
 }
 
+// Settings → Company details: rename this workspace (owners/admins); the app shell reloads to show it
+export async function renameWorkspace(name: string) {
+  const r = (await gql<{ renameWorkspace: string }>(`mutation RenameWorkspace($n: String!) { renameWorkspace(name: $n) }`, { n: name })).renameWorkspace;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(ME_CHANGED_EVENT));
+  return r;
+}
+
 // "First name" / "Last name" from a full name (the first word, then the rest) and back
 export function splitName(full: string) {
   const parts = full.trim().split(/\s+/).filter(Boolean);
