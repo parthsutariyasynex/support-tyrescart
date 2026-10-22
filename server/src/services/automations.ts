@@ -217,7 +217,7 @@ export async function updateAutomationSettings(auth: AuthPayload, rawInput: unkn
     followUpActiveSince,
     updatedBy: auth.userId,
   };
-  await prisma.automationSettings.upsert({ where: { workspaceId: auth.workspaceId }, update: data, create: { workspaceId: auth.workspaceId, ...data } });
+  await prisma.automationSettings.upsert({ where: { workspaceId: auth.workspaceId }, update: data, create: { workspaceId: auth.workspaceId, ...data, createdBy: auth.userId } });
   return getAutomationSettings(auth);
 }
 
