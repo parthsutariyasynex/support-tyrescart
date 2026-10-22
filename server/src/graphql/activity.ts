@@ -33,7 +33,8 @@ export const typeDefs = /* GraphQL */ `
     conversationActivity(conversationId: ID!): [Activity!]!
     "Contact details page: everything for this customer's chat, newest first (customer messages, profile changes and remarks included)"
     contactActivity(contactId: ID!): [Activity!]!
-    notifications: NotificationFeed!
+    "first: how many (default 30, at most 100)"
+    notifications(first: Int): NotificationFeed!
     "Unread customer messages across the workspace"
     unreadTotal: Int!
   }
@@ -53,7 +54,7 @@ export const resolvers = {
     conversationActivity: authed(async ({ conversationId }: { conversationId: string }, { workspaceId, userId }) =>
       listConversationActivity(workspaceId, conversationId, undefined, await clearedAt(userId, conversationId)),
     ),
-    notifications: authed((_args, auth) => listNotifications(auth)),
+    notifications: authed(({ first }: { first?: number | null }, auth) => listNotifications(auth, first ?? undefined)),
     unreadTotal: authed((_args, { workspaceId }) => unreadTotal(workspaceId)),
   },
   Mutation: {

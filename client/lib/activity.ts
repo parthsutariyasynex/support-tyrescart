@@ -20,9 +20,21 @@ export async function fetchConversationActivity(conversationId: string) {
   return (await gql<{ conversationActivity: Activity[] }>(query, { c: conversationId })).conversationActivity;
 }
 
+// The bell lists what happened in your chats (assignments, labels, closed/reopened, edits…). Customer messages
+// aren't listed there: they arrive as desktop notifications (like WhatsApp Web) and as the chat list's unread counts.
+export const inBell = (a: Pick<Activity, 'type'>) => a.type !== 'message_received';
+export const BELL_SIZE = 30;
+// The bell from the server's feed: without customer messages; unseen = what's listed and newer than your last look
+export function bellFeed(f: { items: Activity[]; seenAt: string | null }): NotificationFeed {
+  const items = f.items.filter(inBell).slice(0, BELL_SIZE);
+  const seenAt = f.seenAt ? Date.parse(f.seenAt) : null;
+  return { items, unseen: items.filter((a) => seenAt === null || Date.parse(a.createdAt) > seenAt).length };
+}
+
 export async function fetchNotifications() {
-  return (await gql<{ notifications: NotificationFeed }>(`query Notifications { notifications { unseen items { ${FIELDS} } } }`))
-    .notifications;
+  // more than the bell shows, so it's still full once customer messages are left out
+  const query = `query Notifications { notifications(first: 100) { seenAt items { ${FIELDS} } } }`;
+  return bellFeed((await gql<{ notifications: { items: Activity[]; seenAt: string | null } }>(query)).notifications);
 }
 
 export async function markNotificationsSeen() {

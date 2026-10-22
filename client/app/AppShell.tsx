@@ -168,7 +168,7 @@ export function AppShell({
       const n = customerMessageNotice(e, seenMessages);
       if (!n || !appInBackground()) return;
       playPing();
-      showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId));
+      showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId), true); // each message alerts, like WhatsApp Web
     });
     socket.on('assignment:you', (e: AssignmentEvent) => {
       const t = assignedToYouText(e);
