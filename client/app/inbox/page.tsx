@@ -80,7 +80,7 @@ import { dismissChatPopups } from '@/lib/messagePopups';
 import { lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
 import { CountryCodeMenu } from './CountryCodeMenu';
-// import { NewChatDialog } from './NewChatDialog';
+import { NewChatDialog } from './NewChatDialog';
 import { WHATSAPP_TEXT_MAX, overLimit, tooLongText } from '@/lib/textLimits';
 import {
   type TypingEvent,
@@ -1389,7 +1389,7 @@ function ConversationList({
 
   return (
     <section className="relative z-30 flex h-full min-h-0 w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
-      {/* {newChatOpen && <NewChatDialog defaultCountry={defaultCountry} onDone={onNewChat} onClose={() => setNewChatOpen(false)} />} */}
+      {newChatOpen && <NewChatDialog defaultCountry={defaultCountry} onDone={onNewChat} onClose={() => setNewChatOpen(false)} />}
       {/* Top Header Metrics + Refresh Button */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
         <StatusMenu value={statusFilter} onChange={onStatusFilterChange} counts={statusCounts} />
@@ -1410,7 +1410,7 @@ function ConversationList({
               </svg>
               {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
             </button>
-            {/* <button
+            <button
               type="button"
               title="New chat"
               aria-label="New chat"
@@ -1420,7 +1420,7 @@ function ConversationList({
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 5v14M5 12h14" />
               </svg>
-            </button> */}
+            </button>
             {/* Search: hidden until the icon is clicked (stays open while a search is active) */}
             <button
               type="button"
