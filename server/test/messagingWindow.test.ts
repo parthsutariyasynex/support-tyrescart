@@ -17,6 +17,9 @@ const mock = createServer((req, res) => {
   req.on('end', () => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     if (req.url?.endsWith('/media')) return res.end(JSON.stringify({ id: `media-${Date.now()}` }));
+    // Approved templates of the (mock) number: one plain template
+    if (req.url?.includes('/message_templates'))
+      return res.end(JSON.stringify({ data: [{ id: 't-open', name: 'shop_open', language: 'en_US', category: 'UTILITY', status: 'APPROVED', components: [{ type: 'BODY', text: 'We are open: reply to this message any time.' }] }] }));
     if (req.url?.endsWith('/messages')) {
       sent.push(JSON.parse(body || '{}'));
       return res.end(JSON.stringify({ messages: [{ id: `wamid.out-${Date.now()}-${Math.random().toString(36).slice(2)}` }] }));
@@ -197,5 +200,83 @@ describe('sending inside and outside the window', () => {
       a.socket.close();
       b.socket.close();
     }
+  });
+});
+
+describe('fixes: auto-reply, Meta notices, templates after 24 hours', () => {
+  let ws = '';
+  let owner = { id: '', token: '' };
+  const phoneNumberId = `pn-fix-${run}`;
+  before(async () => {
+    const r = (await gql(`mutation($i: RegisterInput!) { register(input: $i) { token user { id } workspace { id } } }`, { i: { name: 'Fix Owner', email: `e2e-winfix-${run}@example.com`, password: 'password123', workspaceName: `Window Fix ${run}` } })).data.register;
+    ws = r.workspace.id;
+    owner = { id: r.user.id, token: r.token };
+    created.workspaces.push(ws);
+    created.users.push(owner.id);
+    await prisma.whatsAppAccount.create({ data: { workspaceId: ws, wabaId: `waba-fix-${run}`, phoneNumberId, accessToken: 'mock-token' } });
+    // Auto-reply on, all day every day
+    await prisma.automationSettings.create({ data: { workspaceId: ws, enabled: true, replyInHoursEnabled: true, replyInHours: 'Thanks, we reply soon', replyOutHoursEnabled: true, replyOutHours: 'Thanks, we reply soon', workingDays: '0,1,2,3,4,5,6', workStart: '00:00', workEnd: '23:59', createdBy: owner.id } });
+  });
+  after(async () => {
+    await prisma.automationSettings.deleteMany({ where: { workspaceId: ws } });
+  });
+  const autoReplies = (waId: string) => prisma.message.count({ where: { automation: 'auto_reply', conversation: { workspaceId: ws, contact: { waId } } } });
+  const settle = () => new Promise((r) => setTimeout(r, 700));
+
+  test('auto-reply only inside the window: a message Meta delivers 30 hours late gets none; a fresh one does', async () => {
+    const lateWa = `97155${String(run).slice(-7)}`;
+    const before = sent.length;
+    await messages.saveIncoming(ws, messages.parseWebhookMessage({ from: lateWa, id: `wamid.fix-late-${run}`, timestamp: String(Math.floor((Date.now() - 30 * HOUR) / 1000)), type: 'text', text: { body: 'old' } }));
+    await settle();
+    assert.equal(await autoReplies(lateWa), 0);
+    assert.equal(sent.length, before, 'nothing sent to WhatsApp');
+    const freshWa = `97156${String(run).slice(-7)}`;
+    await messages.saveIncoming(ws, messages.parseWebhookMessage({ from: freshWa, id: `wamid.fix-fresh-${run}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'hi' } }));
+    await settle();
+    assert.equal(await autoReplies(freshWa), 1);
+  });
+
+  test("Meta's own notices (system, request_welcome) aren't customer messages: no chat, no window, no auto-reply", async () => {
+    assert.equal(messages.isCustomerMessage({ type: 'system' }), false);
+    assert.equal(messages.isCustomerMessage({ type: 'request_welcome' }), false);
+    for (const type of ['text', 'image', 'unsupported', 'button', 'interactive']) assert.equal(messages.isCustomerMessage({ type }), true, type);
+    // through the real webhook (the API server): a notice and a real message in one delivery
+    const noticeWa = `97157${String(run).slice(-7)}`;
+    const realWa = `97158${String(run).slice(-7)}`;
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await fetch(`${API}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        object: 'whatsapp_business_account',
+        entry: [{ id: 'waba', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', metadata: { phone_number_id: phoneNumberId }, messages: [
+          { from: noticeWa, id: `wamid.fix-sys-${run}`, timestamp: ts, type: 'system', system: { body: 'User changed number', type: 'customer_changed_number' } },
+          { from: noticeWa, id: `wamid.fix-welcome-${run}`, timestamp: ts, type: 'request_welcome' },
+          { from: realWa, id: `wamid.fix-real-${run}`, timestamp: ts, type: 'text', text: { body: 'Do you fit tyres today?' } },
+        ] } }] }],
+      }),
+    });
+    assert.equal(res.status, 200);
+    for (let i = 0; i < 20 && !(await prisma.message.count({ where: { waMessageId: `wamid.fix-real-${run}` } })); i++) await new Promise((r) => setTimeout(r, 150));
+    assert.equal(await prisma.message.count({ where: { waMessageId: `wamid.fix-real-${run}` } }), 1, 'the real message is saved');
+    assert.equal(await prisma.message.count({ where: { waMessageId: { in: [`wamid.fix-sys-${run}`, `wamid.fix-welcome-${run}`] } } }), 0, 'notices are not chat messages');
+    assert.equal(await prisma.conversation.count({ where: { workspaceId: ws, contact: { waId: noticeWa } } }), 0, 'no chat, no window, no unread');
+  });
+
+  test('after 24 hours an approved template is sent for real (WhatsApp gets it), and it does not reopen the window', async () => {
+    const waId = `97150${String(run).slice(-7)}`;
+    await messages.saveIncoming(ws, messages.parseWebhookMessage({ from: waId, id: `wamid.fix-t-${run}`, timestamp: String(Math.floor((Date.now() - 26 * HOUR) / 1000)), type: 'text', text: { body: 'hello' } }));
+    const conv = await prisma.conversation.findFirstOrThrow({ where: { workspaceId: ws, contact: { waId } } });
+    const codeOf = (p: Promise<unknown>) => p.then(() => 'OK', (e) => (e as { code?: string }).code ?? (e as Error).message);
+    assert.equal(await codeOf(inbox.sendMessage(ws, conv.id, { type: 'text', body: 'hi' }, owner.id)), 'WINDOW_CLOSED');
+    const templates = await import('../src/services/templates.js');
+    const before = sent.length;
+    const m = await templates.sendTemplateMessage({ userId: owner.id, workspaceId: ws }, { conversationId: conv.id, name: 'shop_open', confirmed: true, requestId: `fix-tpl-${run}` });
+    assert.equal(m.status, 'sent');
+    assert.equal(sent.length, before + 1);
+    assert.deepEqual([sent.at(-1).type, sent.at(-1).template.name], ['template', 'shop_open']);
+    const after = await prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
+    assert.equal(windowOpen(after.lastInboundAt), false, 'only the customer writing reopens it');
+    assert.equal(await codeOf(inbox.sendMessage(ws, conv.id, { type: 'text', body: 'still closed' }, owner.id)), 'WINDOW_CLOSED');
   });
 });

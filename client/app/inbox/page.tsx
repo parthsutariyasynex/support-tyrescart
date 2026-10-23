@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
-import { API_URL, getToken, isNetworkError } from '@/lib/api';
+import { API_URL, errorCode, getToken, isNetworkError } from '@/lib/api';
 import {
   type Conversation,
   type ConversationStatus,
@@ -77,7 +77,7 @@ import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
 import { setOpenConversationId } from '@/lib/desktopNotifications';
 import { dismissChatPopups } from '@/lib/messagePopups';
-import { lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
+import { isWindowClosedError, lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
 import { CountryCodeMenu } from './CountryCodeMenu';
 import { NewChatDialog } from './NewChatDialog';
@@ -859,6 +859,9 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       loadUnassignedCount();
     });
     socket.on('message:new', ({ conversation, message }: { conversation: Conversation; message: Message }) => {
+      // The 24-hour window follows the server's lastInboundAt (Meta's time of the customer's message) at once
+      if (conversation?.id && conversation.lastInboundAt !== undefined)
+        patchConversations((c) => (c.id === conversation.id && c.lastInboundAt !== conversation.lastInboundAt ? { ...c, lastInboundAt: conversation.lastInboundAt } : c));
       if (message.conversationId === activeIdRef.current)
         setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
       loadConversations();
@@ -1778,7 +1781,7 @@ function ChatPanel({
   // WhatsApp's 24-hour window: over 24 hours since the customer last wrote (or they never did), only approved
   // templates can be sent, so the message box gives way to "Send template". A customer message arriving live opens
   // it again at once; a timer closes it at the exact moment it runs out. The server refuses the rest (WINDOW_CLOSED).
-  const lastCustomerAt = useMemo(() => lastCustomerMessageAt(conversation.lastInboundAt, messages), [conversation.lastInboundAt, messages]);
+  const lastCustomerAt = lastCustomerMessageAt(conversation.lastInboundAt);
   const [, setWindowTick] = useState(0);
   useEffect(() => {
     const ms = msUntilClose(lastCustomerAt);
@@ -1786,7 +1789,12 @@ function ChatPanel({
     const t = setTimeout(() => setWindowTick((n) => n + 1), Math.min(ms + 250, 2_147_483_647));
     return () => clearTimeout(t);
   }, [lastCustomerAt]);
-  const windowClosed = !windowOpen(lastCustomerAt);
+  // The server refused a send for the closed window (its clock decides): the box switches to "Send template" at once,
+  // until the customer writes again (a new lastInboundAt)
+  const [refusedAt, setRefusedAt] = useState<number | null | undefined>(undefined);
+  useEffect(() => setRefusedAt(undefined), [conversation.id]); // per chat
+  const windowClosed = !windowOpen(lastCustomerAt) || refusedAt === lastCustomerAt;
+  const noteRefusal = (err: unknown) => isWindowClosedError(err, errorCode(err)) && setRefusedAt(lastCustomerAt);
   // Replying to this message (WhatsApp style): quoted above the message box and above the sent reply
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Forwarding this message to other chats (the Forward dialog)
@@ -1927,14 +1935,20 @@ function ChatPanel({
 
   async function sendImageWithCaption(caption: string) {
     if (!imageFile) return;
-    const m = await sendFile(conversation.id, imageFile, caption, replyTo?.id);
+    const m = await sendFile(conversation.id, imageFile, caption, replyTo?.id).catch((err) => {
+      noteRefusal(err);
+      throw err;
+    });
     onSent(m);
     setImageFile(null);
     setReplyTo(null);
   }
 
   async function sendVoiceNote(recording: Blob) {
-    const m = await sendVoice(conversation.id, recording, replyTo?.id);
+    const m = await sendVoice(conversation.id, recording, replyTo?.id).catch((err) => {
+      noteRefusal(err);
+      throw err;
+    });
     onSent(m);
     setVoiceMode(false);
     setReplyTo(null);
@@ -2226,6 +2240,7 @@ function ChatPanel({
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
     } catch (err) {
       setError((err as Error).message);
+      noteRefusal(err);
       setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
     }
   }

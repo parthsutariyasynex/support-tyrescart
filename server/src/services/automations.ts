@@ -11,6 +11,7 @@ import { withSender } from './senders.js';
 import { parse } from './validate.js';
 import { fillVariables, listVariables, resolveKey, variableValues, variablesIn } from './variables.js';
 import { settingsOf } from './workspaceSettings.js';
+import { windowOpen } from './messagingWindow.js';
 
 // Settings → Company settings → Simple automations. When a customer writes:
 //  1. routing: a chat nobody holds is assigned to the next of the chosen members, in turn (optionally only to
@@ -249,7 +250,8 @@ export async function runAutomations(workspaceId: string, conversationId: string
     const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, include: { contact: true } });
     const recently = conv?.lastAutoReplyAt && now.getTime() - conv.lastAutoReplyAt.getTime() < s.cooldownHours * 3_600_000;
     const account = text && conv && !recently ? await prisma.whatsAppAccount.findUnique({ where: { workspaceId } }) : null;
-    if (text && conv && !recently && account && conv.status !== 'closed') {
+    // Only inside WhatsApp's 24-hour window (a webhook Meta delivers late can be from a customer who wrote over a day ago)
+    if (text && conv && !recently && account && conv.status !== 'closed' && windowOpen(conv.lastInboundAt, now.getTime())) {
       const body = fillVariables(text, await variableValues(workspaceId, conversationId));
       // Claimed first (compare-and-set on lastAutoReplyAt), so two messages arriving together send one reply
       const { count } = await prisma.conversation.updateMany({ where: { id: conversationId, lastAutoReplyAt: conv.lastAutoReplyAt }, data: { lastAutoReplyAt: now } });

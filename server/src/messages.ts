@@ -60,6 +60,12 @@ export function describe(msg: any): { type: string; body: string; media?: Incomi
   }
 }
 
+// Webhook "messages" that aren't something the customer wrote: Meta's own notices (system, e.g. the customer changed
+// their number) and the "user opened the chat" signal (request_welcome). They don't open the 24-hour window, don't
+// count as unread, don't trigger the auto-reply and don't show as chat bubbles.
+const NOT_FROM_CUSTOMER = new Set(['system', 'request_welcome']);
+export const isCustomerMessage = (msg: any) => !NOT_FROM_CUSTOMER.has(String(msg?.type ?? ''));
+
 export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
   const contact = contacts.find((c) => c.wa_id === msg.from);
   // Business-scoped user ID and WhatsApp username: kept when Meta includes them (they're optional in the payload)
