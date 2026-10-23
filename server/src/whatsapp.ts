@@ -112,9 +112,14 @@ export async function listTemplates(account: Waba, approvedOnly = false): Promis
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
 }
 
-// The account's APPROVED templates, one entry per name + language (each language is approved separately)
+// Meta's sample template, added to every WhatsApp Business account by Meta itself (not one of ours)
+export const META_SAMPLE_TEMPLATES: readonly string[] = ['hello_world'];
+
+// The account's APPROVED templates that agents may send, one entry per name + language (each language is approved
+// separately). Pending, rejected, paused and disabled ones never come back (Meta is asked for APPROVED, and the
+// status is checked again), and neither does Meta's sample. Sending checks against this same list.
 export async function listApprovedTemplates(account: Waba): Promise<ApprovedTemplate[]> {
-  return (await listTemplates(account, true)).map((t) => ({
+  return (await listTemplates(account, true)).filter((t) => t.status === 'APPROVED' && !META_SAMPLE_TEMPLATES.includes(t.name)).map((t) => ({
     ...t,
     needsParameters:
       !!t.header?.variables.length ||

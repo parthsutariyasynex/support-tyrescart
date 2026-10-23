@@ -7,12 +7,14 @@ import type { Label } from '@/lib/labels';
 import { CollaboratorPanel } from './CollaboratorPanel';
 import { DateRangePanel } from './DateRangePanel';
 import { LabelsPanel } from './LabelsPanel';
+import { StagePanel } from './StagePanel';
 
-type Section = 'channel' | 'labels' | 'collaborator' | 'date';
+type Section = 'channel' | 'labels' | 'stage' | 'collaborator' | 'date';
 
 const SECTIONS: { key: Section; label: string; icon: React.ReactNode }[] = [
   { key: 'channel', label: 'Channel', icon: <path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M19.1 4.9a10 10 0 0 1 0 14.2M12 12h.01" /> },
   { key: 'labels', label: 'Labels', icon: <path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4zM7.5 7.5h.01" /> },
+  { key: 'stage', label: 'Stage', icon: <path d="M3 3v18h18M7 16l4-4 4 4 5-6" /> },
   { key: 'collaborator', label: 'Collaborator', icon: <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /> },
   { key: 'date', label: 'Date range', icon: <path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /> },
 ];
@@ -23,7 +25,7 @@ const Icon = ({ children }: { children: React.ReactNode }) => (
   </svg>
 );
 
-// "Filter" button + "Filter by" menu (Channel, Labels, Collaborator, Date range) with Clear all
+// "Filter" button + "Filter by" menu (Channel, Labels, Stage, Collaborator, Date range) with Clear all
 export function FilterMenu({
   value,
   onChange,
@@ -53,7 +55,7 @@ export function FilterMenu({
   }, [open]);
 
   const selectedIn = (s: Section) =>
-    s === 'labels' ? value.labelIds.length : s === 'collaborator' ? value.assigneeIds.length : s === 'date' ? (value.from || value.to ? 1 : 0) : 0;
+    s === 'labels' ? value.labelIds.length : s === 'stage' ? value.leadStages.length : s === 'collaborator' ? value.assigneeIds.length : s === 'date' ? (value.from || value.to ? 1 : 0) : 0;
 
   const check = (checked: boolean, onClick: () => void, children: React.ReactNode, key: string) => (
     <li key={key}>
@@ -128,6 +130,7 @@ export function FilterMenu({
             <CollaboratorPanel assignees={assignees} selected={value.assigneeIds} onChange={(ids) => onChange({ ...value, assigneeIds: ids })} />
           )}
           {section === 'labels' && <LabelsPanel labels={labels} selected={value.labelIds} onChange={(ids) => onChange({ ...value, labelIds: ids })} />}
+          {section === 'stage' && <StagePanel selected={value.leadStages} onChange={(v) => onChange({ ...value, leadStages: v })} />}
           {section === 'channel' && (
             <div className="ml-1 max-h-80 w-56 overflow-y-auto rounded-2xl border border-line bg-surface p-2 shadow-xl">
               <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-bold uppercase tracking-wider text-faint">{SECTIONS.find((s) => s.key === section)?.label}</p>

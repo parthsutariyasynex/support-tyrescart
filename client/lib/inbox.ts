@@ -2,7 +2,7 @@ import { gql } from './api';
 import type { Assignee } from './assignees';
 import type { Label } from './labels';
 
-export type Contact = { id: string; waId: string; name: string | null; leadStage?: string | null };
+export type Contact = { id: string; waId: string; name: string | null; leadStage?: string | null; country?: string | null };
 export type Message = {
   id: string;
   conversationId: string;
@@ -83,7 +83,7 @@ export const PAGE_SIZE = 50;
 const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
 // Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
 const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
 // every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last
@@ -128,10 +128,11 @@ export async function fetchConversations(
     from?: string | null;
     to?: string | null;
     leadStage?: string | null; // a lifecycle stage's value (left menu)
+    leadStages?: string[] | null; // any of these stage values ("Filter by" → Stage)
   } = {},
 ) {
-  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime, $leadStage: String) {
-    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to, leadStage: $leadStage) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
+  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime, $leadStage: String, $leadStages: [String!]) {
+    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to, leadStage: $leadStage, leadStages: $leadStages) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
   }`;
   return (await gql<{ conversations: Connection<Conversation> }>(query, { first: PAGE_SIZE, after, ...filter }))
     .conversations;
@@ -161,11 +162,6 @@ export async function sendTextMessage(conversationId: string, body: string, repl
   return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } })).sendTextMessage;
 }
 
-export async function sendTemplateMessage(conversationId: string, name: string, language?: string) {
-  const query = `mutation SendTemplate($input: SendTemplateInput!) { sendTemplateMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
-  return (await gql<{ sendTemplateMessage: Message }>(query, { input: { conversationId, name, language } }))
-    .sendTemplateMessage;
-}
 
 // My Chats: the chat's assignee is linked to this user's login. Never by name or email: unassigned chats and
 // name-only assignees (no userId) are never anyone's. (The server's "me" filter applies the same rule.)
@@ -182,9 +178,10 @@ export async function fetchMessageTemplates() {
   ).messageTemplates;
 }
 
+// A chat with this number: a new one, or the one it already has (startedNow false); never a second contact
 export async function startConversation(waId: string, name?: string) {
-  const query = `mutation StartConversation($input: StartConversationInput!) { startConversation(input: $input) { ${CONVERSATION_FIELDS} } }`;
-  return (await gql<{ startConversation: Conversation }>(query, { input: { waId, name } })).startConversation;
+  const query = `mutation StartConversation($input: StartConversationInput!) { startConversation(input: $input) { startedNow ${CONVERSATION_FIELDS} } }`;
+  return (await gql<{ startConversation: Conversation & { startedNow: boolean } }>(query, { input: { waId, name: name || undefined } })).startConversation;
 }
 
 export async function simulateIncomingMessage(input?: { waId?: string; name?: string; body?: string }) {

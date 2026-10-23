@@ -14,6 +14,7 @@ import {
   listChatFiles,
   deleteRemark,
   getContact,
+  listChatNotes,
   listRemarks,
   updateContact,
   leadStageCounts,
@@ -98,6 +99,16 @@ export const typeDefs = /* GraphQL */ `
     createdAt: DateTime!
     "Last edit; null = never edited"
     editedAt: DateTime
+    "Images and documents attached to the note (download: GET /inbox/remark-files/{id})"
+    files: [RemarkFile!]!
+  }
+
+  "A file on an internal note: only the team can open it; never sent to WhatsApp"
+  type RemarkFile {
+    id: ID!
+    name: String!
+    mime: String!
+    size: Int!
   }
 
   "A file (photo, video, voice note, audio, document, sticker) sent in a chat"
@@ -296,6 +307,8 @@ export const typeDefs = /* GraphQL */ `
     contact(id: ID!): Contact!
     "Newest first"
     contactRemarks(contactId: ID!): [ContactRemark!]!
+    "Internal notes shown in the chat (its customer's remarks, oldest first; after Clear chat, only later ones). Never sent to WhatsApp"
+    chatNotes(conversationId: ID!): [ContactRemark!]!
     contactFieldOptions: ContactFieldOptions!
     "Settings → Customer lifecycle: how many of this workspace's contacts are at each lead stage (stage null = none)"
     leadStageCounts(
@@ -322,7 +335,8 @@ export const typeDefs = /* GraphQL */ `
   extend type Mutation {
     "Any member of the workspace"
     updateContact(id: ID!, input: ContactInput!): Contact!
-    addContactRemark(contactId: ID!, body: String!): ContactRemark!
+    "mentions: user ids of teammates @mentioned in the note (they get the chat in Mentions and a notification). files: ids from POST /inbox/contacts/{contactId}/remark-files (up to 10); with files the body may be empty"
+    addContactRemark(contactId: ID!, body: String!, mentions: [ID!], files: [ID!]): ContactRemark!
     "Saves your own Contact property view"
     savePropertyView(input: PropertyViewInput!): PropertyView!
     "Admins only: the contact and its chat leave the app; restorable for 14 days, then removed for good"
@@ -382,6 +396,7 @@ export const resolvers = {
   Query: {
     contact: authed(async ({ id }: { id: string }, auth) => getContact(auth, id)),
     contactRemarks: authed(async ({ contactId }: { contactId: string }, auth) => listRemarks(auth, contactId)),
+    chatNotes: authed(async ({ conversationId }: { conversationId: string }, auth) => listChatNotes(auth, conversationId)),
     contactLists: authed(async (_args: unknown, auth) => listContactLists(auth)),
     myPropertyView: authed(async (_args: unknown, auth) => getPropertyView(auth)),
     chatFiles: authed(async ({ conversationId }: { conversationId: string }, auth) => listChatFiles(auth, conversationId)),
@@ -401,7 +416,9 @@ export const resolvers = {
   },
   Mutation: {
     updateContact: authed(async ({ id, input }: { id: string; input: ContactUpdate }, auth) => updateContact(auth, id, input)),
-    addContactRemark: authed(async ({ contactId, body }: { contactId: string; body: string }, auth) => addRemark(auth, contactId, body)),
+    addContactRemark: authed(async ({ contactId, body, mentions, files }: { contactId: string; body: string; mentions?: string[] | null; files?: string[] | null }, auth) =>
+      addRemark(auth, contactId, body, mentions, files),
+    ),
     saveFieldChoices: authed(async ({ field, choices }: { field: string; choices: unknown }, auth) => saveFieldChoices(auth, { field, choices })),
     updateWorkspaceSettings: authed(async ({ input }: { input: unknown }, auth) => updateWorkspaceSettings(auth, input)),
     deleteContact: authed(async ({ id }: { id: string }, auth) => !!(await deleteContact(auth, id))),

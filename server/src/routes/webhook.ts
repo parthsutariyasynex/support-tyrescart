@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { env } from '../env.js';
-import { applyStatus, parseWebhookMessage, saveIncoming } from '../messages.js';
+import { applyStatus, isCustomerMessage, parseWebhookMessage, saveIncoming } from '../messages.js';
 import { applyCustomerReaction } from '../services/reactions.js';
 import { prisma } from '../prisma.js';
 
@@ -76,6 +76,11 @@ webhookRouter.post('/', async (req, res) => {
             if (msg?.type === 'reaction') {
               const applied = await applyCustomerReaction(account.workspaceId, msg.reaction);
               if (!applied) console.warn('[Webhook] Reaction to a message not in this workspace, ignored:', { id: msg?.id });
+              continue;
+            }
+            // Meta's own notices aren't the customer writing: logged only (no window, no unread, no auto-reply)
+            if (!isCustomerMessage(msg)) {
+              console.log('[Webhook] Not a customer message, not saved:', { id: msg?.id, type: msg?.type });
               continue;
             }
             await saveIncoming(account.workspaceId, parseWebhookMessage(msg, value.contacts));

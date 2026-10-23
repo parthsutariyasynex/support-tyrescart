@@ -231,7 +231,7 @@ describe('inbox', () => {
       'WHATSAPP_NOT_CONNECTED',
     );
     assert.equal(
-      await errorCode(`mutation($i: SendTemplateInput!) { sendTemplateMessage(input: $i) { id } }`, { i: { conversationId, name: 'hello_world' } }, A.token),
+      await errorCode(`mutation($i: SendTemplateInput!) { sendTemplateMessage(input: $i) { id } }`, { i: { conversationId, name: 'hello_world', confirmed: true, requestId: `e2e-nc-${run}` } }, A.token),
       'WHATSAPP_NOT_CONNECTED',
     );
     assert.equal(await prisma.message.count({ where: { conversationId } }), before);
@@ -1465,7 +1465,8 @@ describe('WhatsApp integration: config, webhook, numbers, templates', () => {
 
   test('real incoming messages are saved once with their WhatsApp id and open the 24-hour window', async () => {
     const wamid = `wamid.e2e-in-${run}`;
-    const message = { from: '919876500002', id: wamid, timestamp: '1760000000', type: 'text', text: { body: 'Do you fit tyres on Sunday?' } };
+    const sentAt = Math.floor(Date.now() / 1000) - 90; // Meta's timestamp: the customer sent it 90 s before it reached us
+    const message = { from: '919876500002', id: wamid, timestamp: String(sentAt), type: 'text', text: { body: 'Do you fit tyres on Sunday?' } };
     const contacts = [{ profile: { name: 'Real Customer' }, wa_id: '919876500002' }];
     await hook({ contacts, messages: [message] });
     await hook({ contacts, messages: [message] }); // Meta retry
@@ -1474,16 +1475,17 @@ describe('WhatsApp integration: config, webhook, numbers, templates', () => {
     assert.equal((await prisma.message.count({ where: { waMessageId: wamid } })), 1);
     assert.deepEqual([saved[0].direction, saved[0].body], ['in', 'Do you fit tyres on Sunday?']);
     const c = await prisma.conversation.findUniqueOrThrow({ where: { id: saved[0].conversationId } });
-    assert.ok(c.lastInboundAt && Date.now() - c.lastInboundAt.getTime() < 60_000);
+    assert.equal(c.lastInboundAt?.getTime(), sentAt * 1000); // the window runs from when the customer sent it
   });
 
   test('regression: one bad message in a batch does not drop the others (and does not wrongly close the 24-hour window)', async () => {
     // waMessageId is a VARCHAR(191) unique column: an overlong id fails at the database, inside saveIncoming,
     // simulating any real failure on one item (a DB hiccup, an unexpected shape) without needing to fake one.
     const badId = `wamid.e2e-bad-${run}-` + 'x'.repeat(200);
-    const bad = { from: '919876500003', id: badId, timestamp: '1760000000', type: 'text', text: { body: 'first, and broken' } };
+    const sentAt = Math.floor(Date.now() / 1000) - 30;
+    const bad = { from: '919876500003', id: badId, timestamp: String(sentAt - 1), type: 'text', text: { body: 'first, and broken' } };
     const goodId = `wamid.e2e-good-${run}`;
-    const good = { from: '919876500003', id: goodId, timestamp: '1760000001', type: 'text', text: { body: 'second, and fine' } };
+    const good = { from: '919876500003', id: goodId, timestamp: String(sentAt), type: 'text', text: { body: 'second, and fine' } };
     const contacts = [{ profile: { name: 'Batch Customer' }, wa_id: '919876500003' }];
 
     await hook({ contacts, messages: [bad, good] }); // bad is listed first, same batch as good
@@ -1494,7 +1496,7 @@ describe('WhatsApp integration: config, webhook, numbers, templates', () => {
     // The good message is this contact's only successfully-saved one, so it must still be the one that opens
     // the window - a batch failure earlier in the array must not leave lastInboundAt stale/unset.
     const c = await prisma.conversation.findUniqueOrThrow({ where: { id: saved[0].conversationId } });
-    assert.ok(c.lastInboundAt && Date.now() - c.lastInboundAt.getTime() < 60_000);
+    assert.equal(c.lastInboundAt?.getTime(), sentAt * 1000);
   });
 
   test('numbers must be real international numbers: starting a chat without a country code is refused', async () => {
@@ -2653,13 +2655,13 @@ describe('New Leads: Assign to Me (claim), no replies before assignment, concurr
     const lead = chat['Lead 2'];
     const before = await prisma.message.count({ where: { conversationId: lead } });
     assert.equal(await errorCode(SEND, { i: { conversationId: lead, body: 'hi' } }, ana.token), 'NOT_ASSIGNED');
-    assert.equal(await errorCode(TEMPLATE, { i: { conversationId: lead, name: 'hello_world' } }, ana.token), 'NOT_ASSIGNED');
+    assert.equal(await errorCode(TEMPLATE, { i: { conversationId: lead, name: 'hello_world', confirmed: true, requestId: `e2e-na-${run}` } }, ana.token), 'NOT_ASSIGNED');
     const rest = await rest_('POST', `/inbox/conversations/${lead}/messages`, ana.token, { type: 'text', body: 'hi' });
     assert.equal(rest.status, 409);
     assert.equal(await prisma.message.count({ where: { conversationId: lead } }), before);
     // Owners/admins and supervisors are not blocked by the lead rule; replying does not take the chat
     assert.notEqual((await gql(SEND, { i: { conversationId: lead, body: 'Admin here' } }, owner.token)).errors?.[0]?.extensions?.code, 'NOT_ASSIGNED');
-    assert.notEqual((await gql(TEMPLATE, { i: { conversationId: lead, name: 'hello_world' } }, sup.token)).errors?.[0]?.extensions?.code, 'NOT_ASSIGNED');
+    assert.notEqual((await gql(TEMPLATE, { i: { conversationId: lead, name: 'hello_world', confirmed: true, requestId: `e2e-sup-${run}` } }, sup.token)).errors?.[0]?.extensions?.code, 'NOT_ASSIGNED');
     assert.equal((await prisma.conversation.findUniqueOrThrow({ where: { id: lead } })).assignedToId, null);
 
     await ok(CLAIM, { c: lead }, ana.token);
@@ -3905,10 +3907,13 @@ describe('reminders for new unassigned chats, persisted timing, no duplicates', 
     reset();
     assert.equal(await check(later + 10 * MIN), 0);
     assert.deepEqual(got.agent, []);
-    // Unassigned again: assignedAt is cleared; read with no new message, so nobody is reminded
+    // Unassigned again: assignedAt is cleared and it's an unclaimed lead again (back in New Leads), so - as for any
+    // unclaimed lead, read or not (ad27eae) - every member is reminded until someone takes it
     await ok(`mutation($c: ID!, $m: ID, $r: String) { assignConversation(conversationId: $c, memberId: $m, reason: $r) { id } }`, { c: chatId, m: null, r: 'back' }, ws.token);
     assert.equal((await row()).assignedAt, null);
-    assert.equal(await check(later + 20 * MIN), 0);
+    reset();
+    assert.equal(await check(later + 20 * MIN), 2);
+    for (const who of ['owner', 'agent']) assert.deepEqual(got[who].map((e) => e.chats.map((c: any) => c.kind)), [['unassigned']], who);
   });
 
   test('a closed chat is not reminded', async () => {
@@ -3979,7 +3984,7 @@ describe('contact profile: properties and remarks (chat side panel)', () => {
     const o = (await ok(`{ contactFieldOptions { leadStages { value label } leadSources { value } priorities { value } remarkMaxLength } }`, {}, agent.token)).contactFieldOptions;
     assert.ok(o.leadStages.some((x: any) => x.value === 'won' && x.label === 'Won'));
     assert.deepEqual(o.priorities.map((x: any) => x.value), ['low', 'medium', 'high', 'urgent']);
-    assert.equal(o.remarkMaxLength, 2000);
+    assert.equal(o.remarkMaxLength, 16_000);
   });
 
   test('any member edits; only sent fields change; empty clears; everyone hears contact:updated', async () => {
@@ -4044,7 +4049,7 @@ describe('contact profile: properties and remarks (chat side panel)', () => {
     const r2 = (await ok(ADD, { c: contactId, b: 'Call after 5pm' }, agent2.token)).addContactRemark;
     assert.deepEqual((await ok(REMARKS, { c: contactId }, agent.token)).contactRemarks.map((r: any) => r.body), ['Call after 5pm', 'Prefers Michelin']);
     assert.equal(await errorCode(ADD, { c: contactId, b: '   ' }, agent.token), 'BAD_USER_INPUT');
-    assert.equal(await errorCode(ADD, { c: contactId, b: 'x'.repeat(2001) }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(ADD, { c: contactId, b: 'x'.repeat(16_001) }, agent.token), 'BAD_USER_INPUT');
     // Editing: the author or an admin; marked as edited; same validation; broadcast
     const EDIT = `mutation($id: ID!, $b: String!) { updateContactRemark(id: $id, body: $b) { id body editedAt authorName } }`;
     const e1 = (await ok(EDIT, { id: r1.id, b: ' Prefers Michelin Pilot Sport ' }, agent.token)).updateContactRemark;
@@ -4054,7 +4059,7 @@ describe('contact profile: properties and remarks (chat side panel)', () => {
     assert.equal(await errorCode(EDIT, { id: r2.id, b: 'hijack' }, agent.token), 'FORBIDDEN'); // Kiran can't edit Lata's
     assert.equal((await ok(EDIT, { id: r2.id, b: 'Call after 6pm' }, ws.token)).updateContactRemark.body, 'Call after 6pm'); // owner/admin can
     assert.equal(await errorCode(EDIT, { id: r1.id, b: '  ' }, agent.token), 'BAD_USER_INPUT');
-    assert.equal(await errorCode(EDIT, { id: r1.id, b: 'x'.repeat(2001) }, agent.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(EDIT, { id: r1.id, b: 'x'.repeat(16_001) }, agent.token), 'BAD_USER_INPUT');
     assert.equal(await errorCode(EDIT, { id: r1.id, b: 'x' }, B.token), 'NOT_FOUND');
     assert.equal(await errorCode(DEL, { id: r2.id }, agent.token), 'FORBIDDEN'); // Kiran can't delete Lata's
     assert.equal(await errorCode(DEL, { id: r2.id }, B.token), 'NOT_FOUND');
@@ -4780,6 +4785,20 @@ describe('chat list "Filter by": labels, collaborator, date range', () => {
     assert.deepEqual(await names({ from: '2026-02-01T00:00:00Z' }), ['F 1', 'F 2']);
     assert.equal(await errorCode(LIST, { from: '2026-02-01T00:00:00Z', to: '2026-01-01T00:00:00Z' }, ws.token), 'BAD_USER_INPUT');
     assert.deepEqual(await names({ l: [label.VIP] }, B.token), []);
+  });
+  test('stage: customer at any of the chosen stages; combines with the other groups and the left-menu stage', async () => {
+    const STAGES = `query($st: [String!], $one: String, $l: [ID!]) { conversations(leadStages: $st, leadStage: $one, labelIds: $l) { nodes { contact { name } } } }`;
+    const byName = async (n: string) => (await prisma.conversation.findUniqueOrThrow({ where: { id: chat[n] } })).contactId;
+    await prisma.contact.update({ where: { id: await byName('F 1') }, data: { leadStage: 'won' } });
+    await prisma.contact.update({ where: { id: await byName('F 2') }, data: { leadStage: 'contacted' } });
+    await prisma.contact.update({ where: { id: await byName('F 3') }, data: { leadStage: null } });
+    const stageNames = async (v: object, token = ws.token) => (await ok(STAGES, v, token)).conversations.nodes.map((c: any) => c.contact.name).sort();
+    assert.deepEqual(await stageNames({ st: ['won'] }), ['F 1']);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'] }), ['F 1', 'F 2']);
+    assert.deepEqual(await stageNames({ st: ['lost'] }), []);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'], l: [label.Lead] }), ['F 2']);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'], one: 'won' }), ['F 1']);
+    assert.deepEqual(await stageNames({ st: ['won'] }, B.token), []);
   });
 });
 

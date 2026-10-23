@@ -35,3 +35,9 @@ describe('bell: chat activity, not customer messages', () => {
     assert.equal(bellFeed({ items: many, seenAt: null }).items.length, 30);
   });
 });
+
+test('a mention in the bell: who, which chat and the note', () => {
+  const a = { id: 'x', type: 'note_mention', conversationId: 'c', actorId: 'u1', actorName: 'deep patel', contactName: 'Parth patel', data: JSON.stringify({ remarkId: 'r', mentionedUserId: 'u2', text: '@Nikhil Shah please call' }), createdAt: '2026-10-23T10:00:00.000Z' };
+  assert.equal(activityText(a as never, 'u2', 'bell'), 'deep patel mentioned you in a note on the chat with Parth patel: @Nikhil Shah please call');
+  assert.equal(inBell(a as never), true);
+});

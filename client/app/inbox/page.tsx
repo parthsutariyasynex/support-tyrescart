@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
-import { API_URL, getToken, isNetworkError } from '@/lib/api';
+import { API_URL, errorCode, getToken, isNetworkError } from '@/lib/api';
 import {
   type Conversation,
   type ConversationStatus,
@@ -27,7 +27,6 @@ import {
   setConversationStatus,
   sendTextMessage,
   simulateIncomingMessage,
-  startConversation,
   snoozeConversation,
   setConversationPinned,
   markConversationUnread,
@@ -42,7 +41,7 @@ import {
   inBell,
   markNotificationsSeen,
 } from '@/lib/activity';
-import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
+import { type Assignee, type WorkspaceMember, claimConversation, fetchAssignees, fetchWorkspaceMembers } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
 import { EMPTY_MENU_FILTERS, type MenuFilters, matchesMenuFilters, toServerFilter } from '@/lib/chatFilters';
 import { findMessageMatches } from '@/lib/messageSearch';
@@ -55,13 +54,13 @@ import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, Cont
 import { EmojiPicker, FileSendDialog } from './composerExtras';
 import { VoiceRecorder } from './voice';
 import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
-import { TemplatePicker, TemplateSendDialog } from './templates';
+import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, checkFile, filePreview, pastedName, sendFile } from '@/lib/media';
+import { ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
-import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, stagesChanged } from '@/lib/contacts';
+import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { CollaboratorsButton } from './CollaboratorsButton';
@@ -70,13 +69,22 @@ import { type StatusFilter, StatusMenu } from './StatusMenu';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
-import { dayKey, dayLabel, formatTime, listTimestamp } from '@/lib/time';
+import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
 import { setOpenConversationId } from '@/lib/desktopNotifications';
+import { dismissChatPopups } from '@/lib/messagePopups';
+import { isWindowClosedError, lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
+import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
+import { CountryCodeMenu } from './CountryCodeMenu';
+import { NewChatDialog } from './NewChatDialog';
+import { NoteBubble } from './NoteBubble';
+import { type MentionMember, MentionMenu } from './MentionMenu';
+import { insertMention, matchMembers, mentionAt } from '@/lib/mentions';
+import { WHATSAPP_TEXT_MAX, overLimit, tooLongText } from '@/lib/textLimits';
 import {
   type TypingEvent,
   type TypingState,
@@ -110,7 +118,7 @@ type PickerTarget = { conversationId: string | null; anchor: HTMLElement };
 
 
 export default function InboxPage() {
-  return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
+  return <AppShell>{(me) => <Inbox meName={me.user.name} channelPhone={me.workspace.whatsapp?.displayPhone ?? null} defaultCountry={me.workspace.settings?.defaultCountry ?? ''} />}</AppShell>;
 }
 
 type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null; sort: SortOrder; status: 'open' | 'snoozed' | 'closed' | null; leadStage: string | null } & ReturnType<typeof toServerFilter>;
@@ -213,11 +221,12 @@ function patchAllCachedConversations(fn: (c: Conversation) => Conversation) {
   saveSessionJson(SKEY_CONVOS, cachedConversationsByPath);
 }
 
-function Inbox({ meName }: { meName: string }) {
+function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; channelPhone: string | null; defaultCountry: string }) {
   const pathname = usePathname();
   const mine = pathname === '/my-chats';
   const leads = pathname === '/leads';
   const collab = pathname === '/collaborations'; // chats I collaborate on
+  const mentioned = pathname === '/mentions'; // chats where a teammate @mentioned me in a note
 
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     if (cachedConversationsByPath[pathname]?.length) {
@@ -255,6 +264,7 @@ function Inbox({ meName }: { meName: string }) {
   // confirmed working (matching logs in AppShell.tsx and inbox/notifications.tsx).
   useEffect(() => {
     setOpenConversationId(activeId);
+    if (activeId) dismissChatPopups(activeId); // its new-message pop-up has been seen
     console.debug('[notify-debug] openConversationId set to', activeId, 'on', pathname);
   }, [activeId, pathname]);
   useEffect(
@@ -339,7 +349,7 @@ function Inbox({ meName }: { meName: string }) {
   conversationsRef.current = conversations;
 
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = mine ? 'me' : leads ? 'new_leads' : collab ? 'collaborating' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : leads ? 'new_leads' : collab ? 'collaborating' : mentioned ? 'mentioned' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   // The search box: applied to the loaded chats at once; the server search (every message, label, name…) runs a
   // moment after you stop typing
   const [searchTerm, setSearchTerm] = useState('');
@@ -847,7 +857,24 @@ function Inbox({ meName }: { meName: string }) {
       if (e.userId === permissionsRef.current?.userId) return; // yourself in another tab
       setTyping((s) => applyTypingEvent(s, e));
     });
+    // Someone started a chat with a new number: it appears in everyone's list at once
+    // Mentioned in a note: the chat joins your Mentions list at once
+    socket.on('mention:you', () => {
+      if (filterRef.current.assignee === 'mentioned') loadConversations();
+    });
+    // A note that mentioned you was edited or deleted: your Mentions list and bell follow
+    socket.on('mentions:changed', () => {
+      if (filterRef.current.assignee === 'mentioned') loadConversations();
+      loadFeed();
+    });
+    socket.on('conversation:started', () => {
+      loadConversations();
+      loadUnassignedCount();
+    });
     socket.on('message:new', ({ conversation, message }: { conversation: Conversation; message: Message }) => {
+      // The 24-hour window follows the server's lastInboundAt (Meta's time of the customer's message) at once
+      if (conversation?.id && conversation.lastInboundAt !== undefined)
+        patchConversations((c) => (c.id === conversation.id && c.lastInboundAt !== conversation.lastInboundAt ? { ...c, lastInboundAt: conversation.lastInboundAt } : c));
       if (message.conversationId === activeIdRef.current)
         setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
       loadConversations();
@@ -897,10 +924,10 @@ function Inbox({ meName }: { meName: string }) {
       if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
     });
     // Contact profile edited or remarks changed (by anyone): the open profile panel follows
-    socket.on('contact:updated', (c: { id: string; leadStage?: string | null }) => {
+    socket.on('contact:updated', (c: { id: string; leadStage?: string | null; country?: string | null }) => {
       window.dispatchEvent(new CustomEvent(CONTACT_UPDATED_EVENT, { detail: c }));
       // The chat header's stage follows (it reads the stage from the chat list)
-      patchConversations((x) => (x.contact.id === c.id ? { ...x, contact: { ...x.contact, leadStage: c.leadStage ?? null } } : x));
+      patchConversations((x) => (x.contact.id === c.id ? { ...x, contact: { ...x.contact, leadStage: c.leadStage ?? null, ...('country' in c ? { country: c.country ?? null } : {}) } } : x));
     });
     socket.on('contact:properties', () => window.dispatchEvent(new Event(CUSTOM_PROPERTIES_EVENT)));
     // A contact was deleted (admins): their chat leaves the list at once; restored: it comes back
@@ -1069,6 +1096,7 @@ function Inbox({ meName }: { meName: string }) {
     if (labelFilter) return matched && c.labels.some((l) => l.id === labelFilter);
     if (assigneeFilter === 'me') return matched && isAssignedTo(c, permissions?.userId);
     if (assigneeFilter === 'collaborating') return matched && c.isCollaborator;
+    if (assigneeFilter === 'mentioned') return matched; // the server decides (who was mentioned in which note)
     if (assigneeFilter === 'unassigned') return matched && !c.assignee;
     if (assigneeFilter === 'new_leads') return matched; // New Leads: checked above
     if (assigneeFilter) return matched && c.assignee?.id === assigneeFilter;
@@ -1100,6 +1128,7 @@ function Inbox({ meName }: { meName: string }) {
         activeId={activeId}
         onSelect={selectConversation}
         onRefresh={loadConversations}
+        defaultCountry={defaultCountry}
         conversationsError={conversationsError}
         onLoadMore={conversationsCursor ? loadMoreConversations : undefined}
         searchQuery={searchQuery}
@@ -1137,6 +1166,7 @@ function Inbox({ meName }: { meName: string }) {
       {active ? (
         <ChatPanel
           meName={meName}
+          assignees={assignees}
           conversation={active}
           messages={messagesChatId === active.id ? messages : []}
           onLoadOlder={olderCursor ? loadOlderMessages : undefined}
@@ -1185,6 +1215,7 @@ function Inbox({ meName }: { meName: string }) {
           profileOpen={profileOpen}
           onToggleProfile={() => setProfileOpen(!profileOpen)}
           onOpenProfile={() => setProfileOpen(true)}
+          channelPhone={channelPhone}
         />
       ) : (
         <EmptyChatState />
@@ -1254,6 +1285,7 @@ function ConversationList({
   activeId,
   onSelect,
   onRefresh,
+  defaultCountry,
   conversationsError,
   onLoadMore,
   searchQuery,
@@ -1294,6 +1326,8 @@ function ConversationList({
   activeId: string | null;
   onSelect: (id: string) => void;
   onRefresh: () => void;
+  // The workspace's default phone country, preselected in New chat
+  defaultCountry: string;
   // Set when the list failed to load and the screen has nothing to show for it; offers Retry instead of the usual
   // empty-state copy
   conversationsError?: string | null;
@@ -1325,7 +1359,8 @@ function ConversationList({
   typing: TypingState;
 }) {
   const listContainerRef = useRef<HTMLDivElement>(null);
-  const scrollKey = `support:scroll:list:${mine ? 'mine' : leads ? 'leads' : collab ? 'collab' : 'inbox'}`;
+  const mentionsPage = usePathname() === '/mentions';
+  const scrollKey = `support:scroll:list:${mine ? 'mine' : leads ? 'leads' : collab ? 'collab' : mentionsPage ? 'mentions' : 'inbox'}`;
   const restoredScrollRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1352,16 +1387,14 @@ function ConversationList({
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const presence = usePresence(); // online / away / offline dots next to assignees
-  async function newChat() {
-    const waId = prompt('Customer WhatsApp number with country code (e.g. 919876543210)');
-    if (!waId) return;
-    try {
-      const c = await startConversation(waId.replace(/\D/g, ''));
-      onRefresh();
-      onSelect(c.id);
-    } catch (err) {
-      alert((err as Error).message);
-    }
+  // New chat (dialog): a new number gets a chat; a number that already has one opens it (never a second contact)
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const newChat = () => setNewChatOpen(true);
+  function onNewChat(c: Conversation, startedNow: boolean) {
+    setNewChatOpen(false);
+    onRefresh();
+    onSelect(c.id);
+    if (!startedNow) showToast(`existing:${c.id}:${Date.now()}`, c.id, 'This number already has a chat: opened it.', c.contact.name || `+${c.contact.waId}`);
   }
 
   async function simulate() {
@@ -1375,6 +1408,7 @@ function ConversationList({
 
   return (
     <section className="relative z-30 flex h-full min-h-0 w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
+      {newChatOpen && <NewChatDialog defaultCountry={defaultCountry} onDone={onNewChat} onClose={() => setNewChatOpen(false)} />}
       {/* Top Header Metrics + Refresh Button */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
         <StatusMenu value={statusFilter} onChange={onStatusFilterChange} counts={statusCounts} />
@@ -1394,6 +1428,17 @@ function ConversationList({
                 <path d="M17 4v16" />
               </svg>
               {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
+            </button>
+            <button
+              type="button"
+              title="New chat"
+              aria-label="New chat"
+              onClick={newChat}
+              className="flex h-6 w-6 items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-primary"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
             </button>
             {/* Search: hidden until the icon is clicked (stays open while a search is active) */}
             <button
@@ -1501,6 +1546,8 @@ function ConversationList({
           </p>
         ) : conversations.length === 0 && collab ? (
           <div className="p-4 text-xs text-muted">No collaborations yet. Chats you are added to as a collaborator will appear here.</div>
+        ) : conversations.length === 0 && mentionsPage ? (
+          <div className="p-4 text-xs text-muted">No mentions yet. Chats where a teammate @mentions you in an internal note will appear here.</div>
         ) : conversations.length === 0 && mine ? (
           <div className="space-y-2 p-5 text-xs leading-relaxed text-muted">
             <p>
@@ -1668,6 +1715,8 @@ function ChatPanel({
   profileOpen,
   onToggleProfile,
   onOpenProfile,
+  channelPhone,
+  assignees,
 }: {
   conversation: Conversation;
   meName: string; // you: the "My name" quick fill when sending a template
@@ -1701,6 +1750,10 @@ function ChatPanel({
   onToggleProfile: () => void;
   // The customer's name (or picture) in the header: opens that panel
   onOpenProfile: () => void;
+  // The workspace's WhatsApp number replies go out from ("via WhatsApp +971…" above the message box)
+  channelPhone: string | null;
+  // Teammates (for @mentions in notes: their colour)
+  assignees: Assignee[];
 }) {
   const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
@@ -1714,6 +1767,30 @@ function ChatPanel({
   // Voice note: the recorder replaces the message box while recording / previewing
   const [voiceMode, setVoiceMode] = useState(false);
   useEffect(() => setVoiceMode(false), [conversation.id]);
+  // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
+  // to the customer's Remarks in the profile panel). Each chat opens on Reply.
+  const [mode, setMode] = useState<'reply' | 'note'>('reply');
+  // Internal notes in the chat (yellow bubbles): this customer's remarks, live (contact:remarks: added, edited or
+  // deleted by anyone). Only shown to the team; never sent to WhatsApp.
+  const [notes, setNotes] = useState<ContactRemark[]>([]);
+  const notesFor = useRef(conversation.id);
+  const loadNotes = useCallback(() => {
+    const id = conversation.id;
+    fetchChatNotes(id)
+      .then((list) => notesFor.current === id && setNotes(list))
+      .catch(() => {}); // the chat still works without them
+  }, [conversation.id]);
+  useEffect(() => {
+    notesFor.current = conversation.id;
+    setNotes([]);
+    loadNotes();
+  }, [conversation.id, loadNotes]);
+  useEffect(() => {
+    const on = (e: Event) => (e as CustomEvent<{ contactId?: string }>).detail?.contactId === conversation.contact.id && loadNotes();
+    window.addEventListener(CONTACT_REMARKS_EVENT, on);
+    return () => window.removeEventListener(CONTACT_REMARKS_EVENT, on);
+  }, [conversation.contact.id, loadNotes]);
+  useEffect(() => setMode('reply'), [conversation.id]);
   const [error, setError] = useState('');
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -1741,6 +1818,24 @@ function ChatPanel({
     setMatchPos((p) => (p + dir + matches.length) % matches.length);
   };
   const [editing, setEditing] = useState<Message | null>(null);
+  const noting = mode === 'note' && !editing; // editing a message is always a reply
+  // WhatsApp's 24-hour window: over 24 hours since the customer last wrote (or they never did), only approved
+  // templates can be sent, so the message box gives way to "Send template". A customer message arriving live opens
+  // it again at once; a timer closes it at the exact moment it runs out. The server refuses the rest (WINDOW_CLOSED).
+  const lastCustomerAt = lastCustomerMessageAt(conversation.lastInboundAt);
+  const [, setWindowTick] = useState(0);
+  useEffect(() => {
+    const ms = msUntilClose(lastCustomerAt);
+    if (ms === null) return;
+    const t = setTimeout(() => setWindowTick((n) => n + 1), Math.min(ms + 250, 2_147_483_647));
+    return () => clearTimeout(t);
+  }, [lastCustomerAt]);
+  // The server refused a send for the closed window (its clock decides): the box switches to "Send template" at once,
+  // until the customer writes again (a new lastInboundAt)
+  const [refusedAt, setRefusedAt] = useState<number | null | undefined>(undefined);
+  useEffect(() => setRefusedAt(undefined), [conversation.id]); // per chat
+  const windowClosed = !windowOpen(lastCustomerAt) || refusedAt === lastCustomerAt;
+  const noteRefusal = (err: unknown) => isWindowClosedError(err, errorCode(err)) && setRefusedAt(lastCustomerAt);
   // Replying to this message (WhatsApp style): quoted above the message box and above the sent reply
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Forwarding this message to other chats (the Forward dialog)
@@ -1760,13 +1855,95 @@ function ChatPanel({
     setReplyTo(null);
     setConfirmDelete(null);
     setUndo(null);
+    setTemplate(null);
+    // Opening a chat puts the cursor in the message box so you can start typing at once (as WhatsApp Web does);
+    // not on touch-only devices, where it would pop up the keyboard over the chat
+    if (window.matchMedia('(pointer: fine)').matches) requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
   }, [conversation.id]);
+
+  // Esc leaves the chat (back to the list), WhatsApp style - see escapeClosesChat for when it doesn't. What was
+  // open and focused is noted first (capture), before menus and dialogs close themselves on the same Esc; the
+  // decision comes last (bubble), after every other handler had its turn.
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
+  useEffect(() => {
+    let start: { target: EscapeTarget | null; overlayOpen: boolean } | null = null;
+    const onCapture = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const el = e.target instanceof HTMLElement ? e.target : null;
+      start = {
+        target: el && { tagName: el.tagName, isContentEditable: el.isContentEditable, composerEmpty: el === inputRef.current ? inputRef.current.value === '' : null },
+        overlayOpen: !!document.querySelector(OVERLAY_SELECTOR),
+      };
+    };
+    const onBubble = (e: KeyboardEvent) => {
+      const s = start;
+      start = null;
+      if (!s || !escapeClosesChat(e, s.target, s.overlayOpen)) return;
+      e.preventDefault();
+      inputRef.current?.blur();
+      onClosedRef.current();
+    };
+    window.addEventListener('keydown', onCapture, true);
+    window.addEventListener('keydown', onBubble);
+    return () => {
+      window.removeEventListener('keydown', onCapture, true);
+      window.removeEventListener('keydown', onBubble);
+    };
+  }, []);
 
   const typingSender = useTypingSender(onTyping);
   // "/" at the start of the message box opens the quick replies menu; Esc hides it until you type again
   const [quickClosed, setQuickClosed] = useState(false);
   const [quickActive, setQuickActive] = useState(0);
   const quickSearch = !editing && !quickClosed ? slashQuery(text) : null;
+  // "Add note": @ opens the list of teammates (name and email); picking one puts "@Name " at the cursor
+  const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
+  useEffect(() => {
+    if (mode === 'note' && members === null) fetchWorkspaceMembers().then(setMembers, () => setMembers([]));
+  }, [mode, members]);
+  const [caret, setCaret] = useState(0);
+  const [mentionClosed, setMentionClosed] = useState(false); // Esc: hidden until the text changes
+  const mention = noting && !mentionClosed ? mentionAt(text, caret) : null;
+  const mentionItems = useMemo(
+    () =>
+      mention
+        ? matchMembers((members ?? []).filter((m) => m.id !== viewer?.userId), mention.query).map((m) => ({
+            ...m,
+            color: assignees.find((a) => a.userId === m.id)?.color ?? 'var(--color-primary)',
+          }))
+        : [],
+    [mention?.query, mention !== null, members, viewer?.userId, assignees], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const [mentionActive, setMentionActive] = useState(0);
+  // Teammates picked from the list for this note; sent with it if their "@Name" is still in the text
+  const [picked, setPicked] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => setPicked([]), [conversation.id]);
+  // Add note → 📎: images and documents for the note (uploaded when it's saved, then attached to it)
+  const [noteFiles, setNoteFiles] = useState<File[]>([]);
+  const noteFileInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => setNoteFiles([]), [conversation.id]);
+  function addNoteFiles(list: FileList | null) {
+    const chosen = Array.from(list ?? []);
+    const problems = chosen.map((f) => ('problem' in checkFile(f) ? `${f.name}: ${(checkFile(f) as { problem: string }).problem}` : null)).filter(Boolean);
+    const ok = chosen.filter((f) => !('problem' in checkFile(f)));
+    const room = NOTE_FILES_MAX - noteFiles.length;
+    setNoteFiles((prev) => [...prev, ...ok.slice(0, Math.max(0, room))]);
+    setError([...problems, ...(ok.length > room ? [`Up to ${NOTE_FILES_MAX} files per note`] : [])].join(' · '));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+  useEffect(() => setMentionActive(0), [mention?.query]);
+  function pickMention(m: MentionMember) {
+    if (!mention) return;
+    const r = insertMention(text, mention, m.name);
+    setPicked((p) => (p.some((x) => x.id === m.id) ? p : [...p, { id: m.id, name: m.name }]));
+    setText(r.text);
+    setCaret(r.caret);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(r.caret, r.caret);
+    });
+  }
   const quick = useQuickReplies(quickSearch);
   useEffect(() => setQuickActive(0), [quickSearch]);
   // The message box grows with multi-line text (up to ~8 lines, then scrolls)
@@ -1801,6 +1978,7 @@ function ChatPanel({
       cancelEdit();
       setUndo(null);
       onCleared();
+      loadNotes(); // notes before the clear are hidden for you too, like the messages
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -1846,14 +2024,20 @@ function ChatPanel({
 
   async function sendImageWithCaption(caption: string) {
     if (!imageFile) return;
-    const m = await sendFile(conversation.id, imageFile, caption, replyTo?.id);
+    const m = await sendFile(conversation.id, imageFile, caption, replyTo?.id).catch((err) => {
+      noteRefusal(err);
+      throw err;
+    });
     onSent(m);
     setImageFile(null);
     setReplyTo(null);
   }
 
   async function sendVoiceNote(recording: Blob) {
-    const m = await sendVoice(conversation.id, recording, replyTo?.id);
+    const m = await sendVoice(conversation.id, recording, replyTo?.id).catch((err) => {
+      noteRefusal(err);
+      throw err;
+    });
     onSent(m);
     setVoiceMode(false);
     setReplyTo(null);
@@ -1862,15 +2046,16 @@ function ChatPanel({
   // A chosen or dropped file: checked first (type, size), then the preview window
   function pickFile(f: File | undefined, many = false) {
     if (!f) return;
+    if (windowClosed) return setError('24-hour window closed: only approved templates can be sent until the customer writes again.');
     const r = checkFile(f);
     if ('problem' in r) return setError(r.problem);
     setError(many ? 'One file at a time: sending the first one.' : '');
     setImageFile(f);
   }
   // Files can be sent (and dropped) only where the message box is: an open chat you may reply in
-  const canAttach = !isClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  const canAttach = !isClosed && !windowClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
   // Reacting follows the reply rules (open chat you may write in); the message must have gone through WhatsApp
-  const canReact = !isClosed && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  const canReact = !isClosed && !windowClosed && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
   async function react(m: Message, emoji: string | null) {
     setError('');
     const before = m;
@@ -1947,12 +2132,14 @@ function ChatPanel({
     if (action === 'forward') {
       setForwarding(m);
     } else if (action === 'reply') {
+      setMode('reply');
       if (editing) cancelEdit();
       setReplyTo(m);
       requestAnimationFrame(() => inputRef.current?.focus());
     } else if (action === 'copy') {
       navigator.clipboard?.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
     } else if (action === 'edit') {
+      setMode('reply');
       setReplyTo(null);
       setEditing(m);
       setText(m.body);
@@ -1965,6 +2152,28 @@ function ChatPanel({
   function cancelEdit() {
     setEditing(null);
     setText('');
+  }
+
+  // Add note: an internal note on the customer (their Remarks in the profile panel; everyone sees it there live)
+  async function saveNote(body: string) {
+    if (busy || (!body.trim() && !noteFiles.length)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const mentions = picked.filter((m) => body.includes(`@${m.name}`)).map((m) => m.id);
+      // Files first (one by one), then the note with them; if anything fails, the text and files stay to try again
+      const fileIds: string[] = [];
+      for (const f of noteFiles) fileIds.push((await uploadRemarkFile(conversation.contact.id, f)).id);
+      await addRemark(conversation.contact.id, body.trim(), mentions, fileIds);
+      setText('');
+      setPicked([]);
+      setNoteFiles([]);
+      showToast(`note:${conversation.id}:${Date.now()}`, conversation.id, 'Note added', "Saved to the customer's Remarks · only your team sees it");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function saveEdit() {
@@ -2004,15 +2213,19 @@ function ChatPanel({
     }
   }
 
-  // Messages and activity in time order. While older messages aren't loaded yet, skip activity older than the
-  // first loaded message so events don't pile up at the top.
+  // Messages, activity and internal notes in time order. While older messages aren't loaded yet, skip activity and
+  // notes older than the first loaded message so they don't pile up at the top.
   const oldestLoaded = onLoadOlder && messages[0] ? messages[0].createdAt : null;
   const stream = [
     ...messages.map((m) => ({ kind: 'message' as const, at: m.createdAt, id: m.id, m })),
     ...activity
       .filter((a) => !oldestLoaded || a.createdAt >= oldestLoaded)
       .map((a) => ({ kind: 'activity' as const, at: a.createdAt, id: a.id, a })),
+    ...notes
+      .filter((n) => !oldestLoaded || n.createdAt >= oldestLoaded)
+      .map((n) => ({ kind: 'note' as const, at: n.createdAt, id: `note:${n.id}`, n })),
   ].sort((x, y) => x.at.localeCompare(y.at));
+  const teammateNames = useMemo(() => assignees.map((a) => a.name), [assignees]);
 
   // Scroll only when something newer arrives or conversation changes, restoring saved scroll on refresh
   const lastId = stream.at(-1)?.id;
@@ -2126,6 +2339,8 @@ function ChatPanel({
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
     } catch (err) {
       setError((err as Error).message);
+      noteRefusal(err);
+      setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
     }
   }
 
@@ -2157,7 +2372,7 @@ function ChatPanel({
         e.preventDefault();
         dragDepth.current = 0;
         setDragging(false);
-        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : windowClosed ? '24-hour window closed: only approved templates can be sent until the customer writes again.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
         const files = e.dataTransfer.files;
         pickFile(files[0], files.length > 1);
       }}
@@ -2167,7 +2382,7 @@ function ChatPanel({
         const files = [...e.clipboardData.items].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter((f): f is File => !!f);
         if (!files.length) return;
         e.preventDefault();
-        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : windowClosed ? '24-hour window closed: only approved templates can be sent until the customer writes again.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
         pickFile(pastedName(files[0]), files.length > 1);
       }}
     >
@@ -2177,7 +2392,7 @@ function ChatPanel({
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
           </svg>
           <p className="mt-2 text-sm font-semibold text-ink">{canAttach ? 'Drop to send' : "Files can't be sent in this chat"}</p>
-          <p className="mt-0.5 text-xs text-muted">{canAttach ? 'JPEG or PNG images up to 5 MB · PDF, Word, Excel, PowerPoint or text up to 100 MB' : isClosed ? 'Reopen the chat first.' : 'Assign it to yourself first.'}</p>
+          <p className="mt-0.5 text-xs text-muted">{canAttach ? 'JPEG or PNG images up to 5 MB · PDF, Word, Excel, PowerPoint or text up to 100 MB' : isClosed ? 'Reopen the chat first.' : windowClosed ? '24-hour window closed: send a template instead.' : 'Assign it to yourself first.'}</p>
         </div>
       )}
       {/* Ambient Doodle Pattern */}
@@ -2264,6 +2479,7 @@ function ChatPanel({
               <path d="m21 21-4.3-4.3" />
             </svg>
           </button>
+          <CountryCodeMenu contactId={conversation.contact.id} country={conversation.contact.country} waId={conversation.contact.waId} />
           <button
             onClick={(e) => onOpenLabels(e.currentTarget)}
             title="Label chat"
@@ -2404,6 +2620,13 @@ function ChatPanel({
               </span>
             </div>
           );
+          if (item.kind === 'note')
+            return (
+              <Fragment key={item.id}>
+                {separator}
+                <NoteBubble note={item.n} teammateNames={teammateNames} />
+              </Fragment>
+            );
           if (item.kind === 'activity')
             return (
               <Fragment key={item.id}>
@@ -2454,10 +2677,15 @@ function ChatPanel({
         {error && (
           <div className="mb-2 rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</div>
         )}
+        {!noting && !error && overLimit(text, WHATSAPP_TEXT_MAX) && (
+          <div className="mb-2 rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger" role="status">
+            {tooLongText(text, WHATSAPP_TEXT_MAX)}
+          </div>
+        )}
 
         {undo && <UndoToast key={undo.id} busy={busy} onUndo={doUndo} onDone={clearUndo} />}
 
-        {replyTo && !editing && !isClosed && (
+        {replyTo && !editing && !isClosed && !windowClosed && (
           <div className="mb-2 flex items-start gap-2 rounded-lg bg-surface-muted p-1.5" aria-label="Replying to">
             <QuoteBlock
               quote={{
@@ -2489,6 +2717,9 @@ function ChatPanel({
           </div>
         )}
 
+        {mention && !isClosed && (
+          <MentionMenu members={mentionItems} loading={members === null} active={mentionActive} onHover={setMentionActive} onPick={pickMention} />
+        )}
         {quickSearch !== null && !isClosed && (
           <QuickReplyMenu
             query={quickSearch}
@@ -2515,12 +2746,23 @@ function ChatPanel({
               ? `Couldn't reopen this chat: ${reopenError}. Click it in the chat list to try again.`
               : 'This chat is closed. Click it in the chat list to reopen it.'}
           </p>
-        ) : !conversation.assignee && !editing && viewer?.role !== 'supervisor' && !viewer?.isAdmin ? (
+        ) : !conversation.assignee && !editing && !noting && viewer?.role !== 'supervisor' && !viewer?.isAdmin ? (
           // New Lead, as an agent: take it before replying (the server refuses agents' replies too). Owners, admins
-          // and supervisors get the normal composer and may reply without taking the chat.
+          // and supervisors get the normal composer and may reply without taking the chat. An internal note doesn't
+          // need the chat: "Add note" opens the note box (its Reply tab comes back here).
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-3 rounded-xl bg-primary-subtle px-4 py-2.5 text-xs">
               <span className="text-body">New lead: assign it to yourself to reply to the customer.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('note');
+                  requestAnimationFrame(() => inputRef.current?.focus());
+                }}
+                className="ml-auto shrink-0 rounded-lg border border-warning-border bg-warning-soft px-3 py-1.5 font-semibold text-warning hover:bg-warning-soft-hover"
+              >
+                Add note
+              </button>
               <button
                 type="button"
                 onClick={onClaim}
@@ -2535,11 +2777,106 @@ function ChatPanel({
         voiceMode ? (
           <VoiceRecorder onSend={sendVoiceNote} onClose={() => setVoiceMode(false)} />
         ) : (
+        <>
+        {/* Reply / Add note, Template, and the number replies go out from */}
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+          <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
+            {(
+              [
+                { key: 'reply', label: 'Reply', icon: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /> },
+                { key: 'note', label: 'Add note', icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /> },
+              ] as const
+            ).map((t) => {
+              const on = (t.key === 'note') === noting;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={on}
+                  disabled={!!editing && t.key === 'note'}
+                  onClick={() => {
+                    setMode(t.key);
+                    if (t.key === 'note') {
+                      setReplyTo(null);
+                      setTemplate(null);
+                    }
+                    requestAnimationFrame(() => inputRef.current?.focus());
+                  }}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
+                    on ? (t.key === 'note' ? 'bg-warning-soft-hover text-warning shadow-xs' : 'bg-surface text-primary shadow-xs') : 'text-muted hover:text-body'
+                  }`}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    {t.icon}
+                  </svg>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+          {!noting && !(windowClosed && !editing) && <TemplatePicker disabled={!!editing} highlight={false} onPick={setTemplate} />}
+          
+        </div>
+        {noting && noteFiles.length > 0 && (
+          <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Files for this note">
+            {noteFiles.map((f, i) => (
+              <li key={`${f.name}:${i}`} className="flex max-w-[240px] items-center gap-2 rounded-lg border border-warning-border bg-warning-soft px-2 py-1 text-[12px]">
+                <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[9px] font-bold text-body-soft">{documentLabel(f.type, f.name)}</span>
+                <span className="min-w-0 truncate text-ink" title={f.name}>
+                  {f.name}
+                </span>
+                <span className="shrink-0 text-[10px] text-faint">{formatSize(f.size)}</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setNoteFiles((prev) => prev.filter((_, j) => j !== i))}
+                  aria-label={`Remove ${f.name}`}
+                  className="shrink-0 rounded px-1 text-faint hover:text-ink disabled:opacity-40"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {template && !noting && !editing ? (
+          // A chosen template: filled in, previewed and sent right here (inside or outside the 24-hour window)
+          <TemplateComposer
+            key={`${conversation.id}:${template.name}:${template.language}`}
+            template={template}
+            conversationId={conversation.id}
+            customer={{ id: conversation.contact.id, name: conversation.contact.name, waId: conversation.contact.waId }}
+            meName={meName}
+            onSent={onSent}
+            onClose={() => {
+              setTemplate(null);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          />
+        ) : windowClosed && !noting && !editing ? (
+          // After 24 hours: no typing or sending, only an approved template (Add note still works: it stays internal)
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning-border bg-warning-soft px-4 py-3 text-xs" role="status">
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-warning">24-hour window closed</p>
+              <p className="mt-0.5 text-body-soft">
+                {lastCustomerAt
+                  ? `The customer last wrote ${formatDateTime(lastCustomerAt)}. `
+                  : "The customer hasn't written yet. "}
+                WhatsApp only allows approved templates until they write again.
+              </p>
+            </div>
+            <TemplatePicker variant="primary" disabled={false} highlight onPick={setTemplate} />
+          </div>
+        ) : (
         <form
           onSubmit={(e) => {
             e.preventDefault();
             typingSender.stop();
+            // Over WhatsApp's limit for one message: kept as typed, nothing sent (the warning above says why)
+            if (!noting && overLimit(text, WHATSAPP_TEXT_MAX)) return setError(tooLongText(text, WHATSAPP_TEXT_MAX));
             if (editing) return void saveEdit();
+            if (noting) return void saveNote(text); // a note may be files only
             if (!text.trim()) return;
             send(text);
             setText('');
@@ -2580,6 +2917,35 @@ function ChatPanel({
               pickFile(f);
             }}
           />
+          {noting && (
+            <>
+              <input
+                ref={noteFileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPT}
+                className="hidden"
+                aria-hidden="true"
+                onChange={(e) => {
+                  addNoteFiles(e.target.files);
+                  e.target.value = ''; // the same file can be chosen again
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => noteFileInputRef.current?.click()}
+                disabled={busy || noteFiles.length >= NOTE_FILES_MAX}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-faint transition hover:bg-surface-strong hover:text-body-soft disabled:opacity-40"
+                title="Attach images or documents to the note (only your team sees them)"
+                aria-label="Attach files to the note"
+              >
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
+            </>
+          )}
+          {!noting && (
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -2592,9 +2958,7 @@ function ChatPanel({
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           </button>
-
-          {/* WhatsApp templates: the only messages allowed once the 24-hour window has closed */}
-          <TemplatePicker disabled={!!editing || isClosed} highlight={false} onPick={setTemplate} />
+          )}
 
           {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
           <textarea
@@ -2603,11 +2967,33 @@ function ChatPanel({
             value={text}
             onChange={(e) => {
               setText(e.target.value);
+              setCaret(e.target.selectionStart);
               setQuickClosed(false); // Esc hides the menu only until the text changes
+              setMentionClosed(false);
               typingSender.onInput(e.target.value);
             }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onBlur={typingSender.stop}
             onKeyDown={(e) => {
+              if (mention) {
+                const count = mentionItems.length;
+                if (e.key === 'ArrowDown' && count) {
+                  e.preventDefault();
+                  return setMentionActive((i) => (i + 1) % count);
+                }
+                if (e.key === 'ArrowUp' && count) {
+                  e.preventDefault();
+                  return setMentionActive((i) => (i - 1 + count) % count);
+                }
+                if (((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') && count && !e.nativeEvent.isComposing) {
+                  e.preventDefault(); // insert the teammate, don't save the note
+                  return pickMention(mentionItems[Math.min(mentionActive, count - 1)]);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault(); // closes the list only (not the chat)
+                  return setMentionClosed(true);
+                }
+              }
               if (quickSearch !== null) {
                 const count = quick.items.length;
                 if (e.key === 'ArrowDown' && count) {
@@ -2627,20 +3013,31 @@ function ChatPanel({
                   return setQuickClosed(true);
                 }
               }
-              if (e.key === 'Escape' && editing) cancelEdit();
-              else if (e.key === 'Escape' && replyTo) setReplyTo(null);
+              // Esc cancels the edit / reply first (marked handled, so it doesn't also leave the chat)
+              if (e.key === 'Escape' && editing) {
+                e.preventDefault();
+                cancelEdit();
+              } else if (e.key === 'Escape' && replyTo) {
+                e.preventDefault();
+                setReplyTo(null);
+              }
               // Same form submit as before (send, or save an edit); Shift+Enter keeps its default new line
               if (enterAction({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing }) === 'send') {
                 e.preventDefault();
                 e.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder={editing ? 'Edit message' : 'Type a message, or / for quick replies'}
-            className="flex-1 resize-none rounded-xl border border-line bg-surface-muted/70 px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
+            placeholder={editing ? 'Edit message' : noting ? 'Write an internal note for your team…' : 'Type a message, or / for quick replies'}
+            aria-label={noting ? 'Internal note' : 'Message'}
+            className={`flex-1 resize-none rounded-xl border px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition ${
+              noting
+                ? 'border-warning-border bg-warning-soft focus:border-warning focus:ring-1 focus:ring-warning'
+                : 'border-line bg-surface-muted/70 focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary'
+            }`}
           />
 
           {/* Empty message box: microphone to record a voice note (like WhatsApp); otherwise Send */}
-          {!text.trim() && !editing ? (
+          {!text.trim() && !editing && !noting ? (
             <button
               type="button"
               onClick={() => {
@@ -2660,28 +3057,20 @@ function ChatPanel({
           ) : (
           <button
             type="submit"
-            disabled={!text.trim() || busy}
+            disabled={(!text.trim() && !(noting && noteFiles.length)) || busy}
             className="flex h-9 items-center justify-center gap-1.5 rounded-xl bg-primary px-4 text-xs font-semibold text-on-primary shadow-xs hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
-            <span>{editing ? (busy ? 'Saving…' : 'Save') : 'Send'}</span>
+            <span>{editing ? (busy ? 'Saving…' : 'Save') : noting ? (busy ? 'Saving…' : 'Add note') : 'Send'}</span>
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
               <path d="m3.4 20.4 17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
             </svg>
           </button>
           )}
         </form>
+        )}
+        </>
         ))}
         {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
-        {template && (
-          <TemplateSendDialog
-            template={template}
-            conversationId={conversation.id}
-            customer={{ name: conversation.contact.name, waId: conversation.contact.waId }}
-            meName={meName}
-            onSent={onSent}
-            onClose={() => setTemplate(null)}
-          />
-        )}
       </footer>
 
       {menu && (

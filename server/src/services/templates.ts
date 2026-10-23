@@ -15,14 +15,12 @@ import {
   uploadMedia,
   uploadTemplateSample,
 } from '../whatsapp.js';
-import { recordActivity } from './activity.js';
+import { previewOf, recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
-import { isFollowUpName } from './followUpRules.js';
 import { checkCanSend, checkFile, cleanFileName } from './inbox.js';
 import { getPermissions, requireAdmin } from './permissions.js';
 import { withSender } from './senders.js';
 import { type TemplateInfo, type TemplateSpec, buildCreateComponents, buildSendComponents, renderTemplate, sendValuesSchema, templateSpecSchema } from './templateModel.js';
-import { watchFollowUpTemplates } from './templateWatch.js';
 import { parse } from './validate.js';
 
 // WhatsApp templates: sending one with its values from a chat (any member who may write there), and managing the
@@ -74,9 +72,37 @@ const sendSchema = z.object({
   values: sendValuesSchema.default({ header: {}, body: {}, buttons: {} }),
 });
 
+// --- Manual sending only. A template goes to a customer only when a signed-in team member confirmed it in the chat
+// ("Yes, Send"): the request must say confirmed: true and carry the requestId made for that one confirmation.
+// Nothing in the app sends templates by itself (automations send text replies only). The same requestId again
+// (a double click, a retried request) returns the first result instead of sending twice, and the same template
+// can't be sent to the same chat twice at once.
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
+const REMEMBER_MS = 10 * 60_000;
+const confirmedSends = new Map<string, { at: number; result: Promise<Awaited<ReturnType<typeof sendApprovedTemplate>>> }>();
+const sendsInFlight = new Set<string>();
+
+export async function sendTemplateMessage(auth: AuthPayload, rawInput: unknown, file?: { bytes?: Buffer; mime?: string; name?: string }) {
+  const raw = (rawInput ?? {}) as { confirmed?: unknown; requestId?: unknown; conversationId?: unknown; name?: unknown };
+  if (raw.confirmed !== true || typeof raw.requestId !== 'string' || !REQUEST_ID.test(raw.requestId))
+    throw new AppError('Templates are sent only after you confirm them in the chat ("Yes, Send")', 400, 'CONFIRMATION_REQUIRED');
+  const now = Date.now();
+  for (const [k, v] of confirmedSends) if (now - v.at > REMEMBER_MS) confirmedSends.delete(k);
+  const key = `${auth.workspaceId}:${auth.userId}:${raw.requestId}`;
+  const earlier = confirmedSends.get(key);
+  if (earlier) return earlier.result;
+  const lock = `${auth.workspaceId}:${String(raw.conversationId)}:${String(raw.name)}`;
+  if (sendsInFlight.has(lock)) throw new AppError('This template is already being sent to this chat', 409, 'DUPLICATE_SEND');
+  sendsInFlight.add(lock);
+  const result = sendApprovedTemplate(auth, rawInput, file).finally(() => sendsInFlight.delete(lock));
+  confirmedSends.set(key, { at: now, result });
+  result.catch(() => confirmedSends.delete(key)); // refused before sending (e.g. a value missing): may be fixed and confirmed again
+  return result;
+}
+
 // Sends an approved template with its values (and its header file, if it has an image/video/document header).
 // The chat shows the text with the values filled in (and the header file); WhatsApp delivers the real template.
-export async function sendTemplateMessage(auth: AuthPayload, rawInput: unknown, file?: { bytes?: Buffer; mime?: string; name?: string }) {
+async function sendApprovedTemplate(auth: AuthPayload, rawInput: unknown, file?: { bytes?: Buffer; mime?: string; name?: string }) {
   const input = parse(sendSchema, rawInput ?? {});
   await getPermissions(auth);
   // Templates may be sent outside WhatsApp's 24-hour window (that's what they're for)
@@ -133,7 +159,7 @@ export async function sendTemplateMessage(auth: AuthPayload, rawInput: unknown, 
     conversationId: conversation.id,
     actorId: auth.userId,
     type: 'message_sent',
-    data: { preview: `[Template ${t.name}] ${text}`.slice(0, 200), messageType: 'template', status: saved.status },
+    data: { preview: previewOf(`[Template ${t.name}] ${text}`, 200), messageType: 'template', status: saved.status },
   });
   return saved;
 }
@@ -175,8 +201,6 @@ export async function createMessageTemplate(auth: AuthPayload, rawSpec: unknown,
   try {
     const created = await createTemplate(account, { name: spec.name, language: spec.language, category: spec.category, components });
     emitToWorkspace(auth.workspaceId, 'templates:changed', {});
-    // The follow-up template: watch Meta's review, so the workspace hears when it's decided
-    if (isFollowUpName(spec.name)) watchFollowUpTemplates(auth.workspaceId, { [`${spec.name}|${spec.language}`]: created.status });
     return created;
   } catch (err) {
     throw metaError("WhatsApp didn't accept the template", err);
@@ -197,8 +221,6 @@ export async function updateMessageTemplate(auth: AuthPayload, templateId: strin
   } catch (err) {
     throw metaError("WhatsApp didn't accept the change", err);
   }
-  // An edited follow-up template goes back to review: watch it (its status is read at the first check)
-  if (isFollowUpName(spec.name)) watchFollowUpTemplates(auth.workspaceId);
   emitToWorkspace(auth.workspaceId, 'templates:changed', {});
   return true;
 }

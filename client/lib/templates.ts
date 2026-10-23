@@ -30,8 +30,16 @@ const FIELDS = `id name language category status rejectedReason parameterFormat 
 const MESSAGE_FIELDS =
   'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
 
+// Meta's sample template, added to every WhatsApp Business account by Meta (not one of ours); the server leaves it
+// out too
+export const META_SAMPLE_TEMPLATES: readonly string[] = ['hello_world'];
+// What the chat's template list offers: the account's approved templates only, never Meta's sample. The server
+// already sends only these; checked here again so nothing else can show up
+export const chatTemplates = <T extends Pick<Template, 'name' | 'status'>>(list: T[]) => list.filter((t) => t.status === 'APPROVED' && !META_SAMPLE_TEMPLATES.includes(t.name));
+
+// The account's approved templates, read live from Meta through the server (Send template / Template)
 export async function fetchApprovedTemplates() {
-  return (await gql<{ messageTemplates: Template[] }>(`query Templates { messageTemplates { ${FIELDS} } }`)).messageTemplates;
+  return chatTemplates((await gql<{ messageTemplates: Template[] }>(`query Templates { messageTemplates { ${FIELDS} } }`)).messageTemplates);
 }
 export async function fetchAllTemplates() {
   return (await gql<{ allMessageTemplates: Template[] }>(`query AllTemplates { allMessageTemplates { ${FIELDS} } }`)).allMessageTemplates;
@@ -44,11 +52,12 @@ export async function fetchEditorInfo() {
 
 const mediaHeader = (t: Pick<Template, 'header'>) => (t.header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(t.header.format) ? t.header.format : null);
 
-// Send from a chat: a header file goes to the upload route, everything else through GraphQL
-export async function sendTemplate(conversationId: string, t: Template, values: TemplateValues, file?: File | null): Promise<Message> {
+// Send from a chat, only after the agent's "Yes, Send": a header file goes to the upload route, everything else
+// through GraphQL. requestId is made once per confirmation, so a repeated request can't send it twice.
+export async function sendTemplate(conversationId: string, t: Template, values: TemplateValues, file: File | null | undefined, requestId: string): Promise<Message> {
   if (mediaHeader(t)) {
     if (!file) throw new Error(`Choose the header ${mediaHeader(t)!.toLowerCase()}`);
-    const q = new URLSearchParams({ name: t.name, language: t.language, values: JSON.stringify(values), fileName: file.name });
+    const q = new URLSearchParams({ name: t.name, language: t.language, values: JSON.stringify(values), fileName: file.name, confirmed: 'true', requestId });
     const res = await fetch(`${API_URL}/inbox/conversations/${encodeURIComponent(conversationId)}/template?${q}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${getToken() ?? ''}`, 'Content-Type': file.type || 'application/octet-stream' },
@@ -60,7 +69,7 @@ export async function sendTemplate(conversationId: string, t: Template, values: 
   }
   return (
     await gql<{ sendTemplateMessage: Message }>(`mutation SendTemplate($input: SendTemplateInput!) { sendTemplateMessage(input: $input) { ${MESSAGE_FIELDS} } }`, {
-      input: { conversationId, name: t.name, language: t.language, values: JSON.stringify(values) },
+      input: { conversationId, name: t.name, language: t.language, values: JSON.stringify(values), confirmed: true, requestId },
     })
   ).sendTemplateMessage;
 }
@@ -87,6 +96,46 @@ export function fillPieces(text: string, values: Record<string, string>): Piece[
   if (last < text.length) out.push({ text: text.slice(last) });
   return out;
 }
+// The customer's first and last name for a template, by the same rule the server uses for variables: what's saved
+// on the contact, else the WhatsApp profile name ("Alice Patel" → Alice, Patel). '' when unknown: the field is then
+// left for the agent to fill in (WhatsApp refuses empty values, so nothing is guessed).
+export function customerNames(c: { firstName?: string | null; lastName?: string | null; name?: string | null }) {
+  const words = c.name?.trim().split(/\s+/).filter(Boolean) ?? [];
+  return { first: c.firstName?.trim() || words[0] || '', last: c.lastName?.trim() || words.slice(1).join(' ') };
+}
+
+// Which body variable gets which name: {{1}} the first name and {{2}} the last name (named templates: first_name /
+// last_name). null for any other variable (filled in by hand).
+export function nameFor(variable: string): 'first' | 'last' | null {
+  if (variable === '1' || /^first_?name$/i.test(variable)) return 'first';
+  if (variable === '2' || /^last_?name$/i.test(variable)) return 'last';
+  return null;
+}
+
+// A name the customer doesn't have: WhatsApp refuses an empty value, so the variable gets this invisible character
+// instead (a zero-width space). The customer reads "Hello 👋, …": no made-up name, the approved template unchanged.
+export const NO_NAME = '\u200B';
+
+// Body values filled in from the customer's names; a name that isn't known is NO_NAME
+export function autoFillValues(t: Pick<Template, 'bodyVariables'>, names: { first: string; last: string }): TemplateValues {
+  const body: Record<string, string> = {};
+  for (const v of t.bodyVariables) {
+    const which = nameFor(v);
+    if (which) body[v] = names[which] || NO_NAME;
+  }
+  return { header: {}, body, buttons: {} };
+}
+
+// The message as the customer will read it: the values filled in, and a variable with no value (or NO_NAME) left
+// out together with its extra space ("Hello {{1}} 👋," with no name → "Hello 👋,"), never shown as {{1}}.
+export function readableMessage(text: string, values: Record<string, string>) {
+  return text
+    .replace(VAR_RE, (_, v: string) => (values[v] ?? '').replaceAll(NO_NAME, '').trim())
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ +([,.!?;:])/g, '$1')
+    .replace(/^[ \t]+|[ \t]+$/gm, '');
+}
+
 // What still has to be filled in before sending (and the header file)
 export function missingValues(t: Template, values: TemplateValues, file?: File | null) {
   const missing: string[] = [];

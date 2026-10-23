@@ -98,6 +98,9 @@ export function activityText(a: Activity, meId: string | null, where: 'chat' | '
       return `${who} restored a deleted message${where === 'bell' ? ` in ${chat}` : ''}`;
     case 'message_received':
       return `${a.contactName ?? 'Customer'}: ${d.preview ?? 'New message'}`;
+    // Only ever in the bell of the person mentioned
+    case 'note_mention':
+      return `${who} mentioned you in a note${where === 'bell' ? ` on ${chat}` : ''}${d.text ? `: ${d.text}` : ''}`;
     default:
       return `${who} updated ${chat}`;
   }

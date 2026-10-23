@@ -22,13 +22,14 @@ describe('chat list "Filter by" menu', () => {
     labels: [{ id: 'l-vip', name: 'VIP', color: '#000' }],
     assignee: { id: 'm-ana', name: 'Ana', color: '#000', userId: 'u-ana' },
     lastMessageAt: '2026-10-10T08:00:00.000Z', // 12:00 on 10 Oct in Dubai
+    contact: { id: 'c-1', waId: '971500000001', name: 'Sam', leadStage: 'new' },
   };
   const f = (over: Partial<typeof EMPTY_MENU_FILTERS>) => ({ ...EMPTY_MENU_FILTERS, ...over });
 
   test('nothing selected matches everything and counts zero', () => {
     assert.equal(matchesMenuFilters(chat, EMPTY_MENU_FILTERS), true);
     assert.equal(activeFilterCount(EMPTY_MENU_FILTERS), 0);
-    assert.deepEqual(toServerFilter(EMPTY_MENU_FILTERS), { labelIds: null, assigneeIds: null, from: null, to: null });
+    assert.deepEqual(toServerFilter(EMPTY_MENU_FILTERS), { labelIds: null, assigneeIds: null, from: null, to: null, leadStages: null });
   });
   test('labels: any of the chosen', () => {
     assert.equal(matchesMenuFilters(chat, f({ labelIds: ['l-vip'] })), true);
@@ -45,7 +46,7 @@ describe('chat list "Filter by" menu', () => {
     inEveryMachineZone(() => {
       assert.equal(dayStart('2026-10-21'), '2026-10-20T20:00:00.000Z');
       assert.equal(dayEnd('2026-10-21'), '2026-10-21T19:59:59.999Z');
-      assert.deepEqual(toServerFilter(f({ from: '2026-10-01', to: '2026-10-02' })), { labelIds: null, assigneeIds: null, from: '2026-09-30T20:00:00.000Z', to: '2026-10-02T19:59:59.999Z' });
+      assert.deepEqual(toServerFilter(f({ from: '2026-10-01', to: '2026-10-02' })), { labelIds: null, assigneeIds: null, from: '2026-09-30T20:00:00.000Z', to: '2026-10-02T19:59:59.999Z', leadStages: null });
       // 00:30 on 11 Oct in Dubai (still the 10th in UTC, and already 02:00 on the 11th in India)
       const late = { ...chat, lastMessageAt: '2026-10-10T20:30:00.000Z' };
       assert.equal(matchesMenuFilters(late, f({ from: '2026-10-11', to: '2026-10-11' })), true);
@@ -60,6 +61,14 @@ describe('chat list "Filter by" menu', () => {
     assert.equal(matchesMenuFilters(chat, f({ from: '2026-10-11' })), false);
     assert.equal(matchesMenuFilters(chat, f({ to: '2026-10-09' })), false);
     assert.equal(matchesMenuFilters(chat, f({ from: '2026-10-01' })), true);
+  });
+  test('stage: any of the chosen lifecycle stages; a customer without a stage never matches', () => {
+    assert.equal(matchesMenuFilters(chat, f({ leadStages: ['new'] })), true);
+    assert.equal(matchesMenuFilters(chat, f({ leadStages: ['won', 'new'] })), true);
+    assert.equal(matchesMenuFilters(chat, f({ leadStages: ['won'] })), false);
+    assert.equal(matchesMenuFilters({ ...chat, contact: { ...chat.contact, leadStage: null } }, f({ leadStages: ['new'] })), false);
+    assert.equal(activeFilterCount(f({ leadStages: ['new', 'won'] })), 1);
+    assert.deepEqual(toServerFilter(f({ leadStages: ['new'] })).leadStages, ['new']);
   });
   test('groups combine with AND; count is per group; toggle adds and removes', () => {
     assert.equal(matchesMenuFilters(chat, f({ labelIds: ['l-vip'], assigneeIds: ['m-ben'] })), false);

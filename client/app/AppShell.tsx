@@ -15,17 +15,17 @@ import { setTimeZone } from '@/lib/time';
 import {
   type AssignmentEvent,
   type ReminderEvent,
-  type TemplateStatusEvent,
   addedAsCollaboratorText,
   assignedToYouText,
   assignmentChangedText,
   clearToast,
   removedAsCollaboratorText,
   newChatText,
+  type MentionEvent,
+  mentionedYouText,
   reminderText,
   removedFromYouText,
   showToast,
-  templateStatusText,
   useToast,
 } from '@/lib/toasts';
 import { AssignedToast } from './inbox/messages';
@@ -38,8 +38,10 @@ import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 import { STAGE_COUNTS_EVENT } from '@/lib/contacts';
-import { FOLLOW_UP_TEMPLATE_EVENT } from '@/lib/automations';
-import { type MessageEvent, customerMessageNotice, shouldSuppressNotification } from '@/lib/desktopNotifications';
+import { type MessageEvent, appInBackground, customerMessageNotice, shouldSuppressNotification } from '@/lib/desktopNotifications';
+import { alertsYou, clearMessagePopups, showMessagePopup, soundEnabled } from '@/lib/messagePopups';
+import { fetchConversation } from '@/lib/inbox';
+import { MessagePopups } from './inbox/MessagePopups';
 
 // Customer messages already notified in this tab (the same message can arrive twice, e.g. after a reconnect)
 const seenMessages = new Set<string>();
@@ -103,7 +105,7 @@ export function settingsReturnPath() {
 }
 
 // Pages that show the chat list and conversation (the inbox page component): a toast click opens the chat in place
-const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations'];
+const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations', '/mentions'];
 export const OPEN_CHAT_EVENT = 'app:open-chat';
 
 // Slim Left Icon Rail + Full App Shell
@@ -155,6 +157,8 @@ export function AppShell({
     const socket = io(API_URL, { auth: { token: getToken() } });
     const unbind = bindPresence(socket);
     const open = (id: string) => openChatRef.current(id);
+    // The notification sound, unless turned off in Settings → Notifications
+    const ping = () => soundEnabled() && playPing();
     // TEMPORARY debug instrumentation for the real-message notification flow - remove once confirmed working
     // end to end (matching logs in inbox/page.tsx and inbox/notifications.tsx).
     socket.on('connect', () => console.debug('[notify-debug] AppShell socket connected', socket.id));
@@ -164,13 +168,14 @@ export function AppShell({
     // desktop pop-up they already had while the tab is in the background (unchanged)
     const alertHidden = (title: string, body: string, tag: string, conversationId: string) => {
       if (!document.hidden) return;
-      playPing();
+      ping();
       showDesktopNotification(title, body, tag, () => open(conversationId));
     };
-    // A customer wrote: desktop pop-up with their name and the message (sound too), for any chat other than the
-    // one you're currently looking at - including while the app is the focused window, not just when backgrounded.
-    // Clicking it opens the chat. One per message; never for our own messages.
-    socket.on('message:new', (e: MessageEvent) => {
+    // A customer wrote: their name and the message, with the sound, for any chat other than the one you're currently
+    // looking at - an in-app pop-up while you're in the app (any page), a desktop pop-up while you're in another
+    // tab or window. Clicking it opens the chat. One per message; never for our own messages; only for chats you may
+    // work on (alertsYou).
+    socket.on('message:new', async (e: MessageEvent) => {
       console.debug('[notify-debug] message:new received', { messageId: e?.message?.id, conversationId: e?.message?.conversationId, direction: e?.message?.direction, deletedAt: e?.message?.deletedAt });
       const n = customerMessageNotice(e, seenMessages);
       if (!n) {
@@ -180,8 +185,16 @@ export function AppShell({
       const suppressed = shouldSuppressNotification(n.conversationId);
       console.debug('[notify-debug] notice built, checking suppression', { conversationId: n.conversationId, suppressed });
       if (suppressed) return;
-      playPing();
-      showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId), true); // each message alerts, like WhatsApp Web
+      const isAdmin = isAdminRole(roleRef.current ?? '');
+      if (!isAdmin && e.conversation?.assignedToId) {
+        // Someone's chat: alert only its assignee and collaborators (the event goes to the whole workspace)
+        const c = await fetchConversation(n.conversationId).catch(() => null);
+        if (!c || !alertsYou({ assigneeUserId: c.assignee?.userId ?? null, isCollaborator: c.isCollaborator, unassigned: !c.assignee }, { userId: me.user.id, isAdmin })) return;
+        if (shouldSuppressNotification(n.conversationId)) return; // opened meanwhile
+      }
+      ping();
+      if (appInBackground()) showDesktopNotification(n.title, n.body, n.tag, () => open(n.conversationId), true); // each message alerts, like WhatsApp Web
+      else showMessagePopup(n);
     });
     socket.on('assignment:you', (e: AssignmentEvent) => {
       const t = assignedToYouText(e);
@@ -210,16 +223,15 @@ export function AppShell({
       const t = removedAsCollaboratorText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
     });
+    // A teammate @mentioned you in a note: a pop-up (sound and desktop pop-up too while you're in another tab)
+    socket.on('mention:you', (e: MentionEvent) => {
+      const t = mentionedYouText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+      alertHidden(t.message, t.detail, `mention-${e.conversationId}`, e.conversationId);
+    });
     socket.on('chat:new', (e: { conversationId: string; contactName: string }) => {
       const t = newChatText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
-    });
-    // Meta decided on the follow-up template: admins are told; the Simple automations page refreshes its status
-    socket.on('templates:status', (e: TemplateStatusEvent) => {
-      window.dispatchEvent(new Event(FOLLOW_UP_TEMPLATE_EVENT));
-      if (!isAdminRole(roleRef.current ?? '')) return;
-      const t = templateStatusText(e);
-      showToast(t.key, '', t.message, t.detail);
     });
     // Left menu → Lifecycle stages: its chat counts follow new chats, stage changes and deleted/restored contacts
     const stageCountsChanged = () => window.dispatchEvent(new Event(STAGE_COUNTS_EVENT));
@@ -238,6 +250,7 @@ export function AppShell({
       window.removeEventListener('keydown', unlock);
       unbind();
       socket.disconnect();
+      clearMessagePopups();
     };
   }, [me?.user.id, me?.workspace.id]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -446,7 +459,7 @@ export function AppShell({
                 <p className="px-2 pb-1.5 text-[10px] font-bold tracking-wider text-faint uppercase">
                   CONVERSATIONS
                 </p>
-                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', 'Collaborations', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
+                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', 'Collaborations', 'Mentions', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
                   <p className="px-2.5 py-2 text-[11px] text-faint">No menu item matches “{menuQuery.trim()}”</p>
                 )}
                 <div className="space-y-0.5">
@@ -484,6 +497,22 @@ export function AppShell({
                         <path d="M19 8v6M22 11h-6" />
                       </svg>
                       <span>Collaborations</span>
+                    </Link>
+                  )}
+                  {showItem('Mentions') && (
+                    <Link
+                      href="/mentions"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/mentions'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /><circle cx="12" cy="12" r="4" />
+                      </svg>
+                      <span>Mentions</span>
                     </Link>
                   )}
                   {showItem('Inbox') && (
@@ -780,6 +809,20 @@ export function AppShell({
                   </svg>
                 </Link>
                 <Link
+                  href="/mentions"
+                  scroll={false}
+                  title="Mentions"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/mentions'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /><circle cx="12" cy="12" r="4" />
+                  </svg>
+                </Link>
+                <Link
                   href="/inbox"
                   scroll={false}
                   title="Inbox"
@@ -918,7 +961,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname.startsWith('/contacts/') ? 'View contact details' : pathname.startsWith('/settings') ? 'Settings' : pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname.startsWith('/contacts/') ? 'View contact details' : pathname.startsWith('/settings') ? 'Settings' : pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/mentions' ? 'Mentions' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -1404,6 +1447,7 @@ export function AppShell({
         <main className="flex-1 min-h-0 overflow-hidden">{children(me)}</main>
       </div>
 
+      <MessagePopups onOpen={(id) => openChatRef.current(id)} />
       {toast && (
         <AssignedToast
           key={toast.id}

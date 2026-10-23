@@ -1,5 +1,6 @@
 import { sendTextMessage, type Conversation, type Message } from './inbox';
 import { DOCUMENT_TYPES, IMAGE_TYPES, isMediaPlaceholder, mediaUrl, sendFile } from './media';
+import { lastCustomerMessageAt, windowOpen } from './messagingWindow';
 import { sendVoice } from './voice';
 
 // Forwarding a message to other chats, like WhatsApp: the same text, or the same file (with its name and caption),
@@ -24,7 +25,7 @@ export function forwardKind(m: Pick<Message, 'type' | 'body' | 'mediaMime' | 'de
 // Why a chat can't take a forwarded message right now ('' = it can): the same rules the message box follows
 export function forwardBlocked(c: Pick<Conversation, 'status' | 'lastInboundAt'>, now = Date.now()) {
   if (c.status === 'closed') return 'Closed: reopen it to write';
-  if (!c.lastInboundAt || now - new Date(c.lastInboundAt).getTime() >= 24 * 3_600_000) return '24-hour window closed: only templates can be sent';
+  if (!windowOpen(lastCustomerMessageAt(c.lastInboundAt), now)) return '24-hour window closed: only templates can be sent';
   return '';
 }
 

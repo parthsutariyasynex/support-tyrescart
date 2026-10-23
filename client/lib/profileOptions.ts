@@ -1,4 +1,4 @@
-import { type CountryCode, getCountries, getCountryCallingCode, parsePhoneNumberFromString } from 'libphonenumber-js';
+import { type CountryCode, getCountries, getCountryCallingCode, isValidPhoneNumber, parsePhoneNumberFromString } from 'libphonenumber-js';
 
 // Settings → General: the country picker beside "Phone number" and the "Your time zone" list. Both come from the
 // platform (libphonenumber's country list, the browser's own country and time zone names), nothing hand-written.
@@ -18,6 +18,27 @@ export function phoneCountries(locale = 'en'): PhoneCountry[] {
   return countries;
 }
 
+// A customer's country for the chat header: the one set in their profile (saved by name), else the country of
+// their WhatsApp number. dial is the calling code ("91") and flag its flag; both null for a name typed in before
+// the Country dropdown. null when unknown.
+export function contactCountry(country: string | null | undefined, waId: string): { dial: string | null; flag: string | null; name: string } | null {
+  const set = country?.trim();
+  if (set) {
+    const c = phoneCountries().find((x) => x.name.toLowerCase() === set.toLowerCase());
+    return c ? { dial: c.dial, flag: c.flag, name: c.name } : { dial: null, flag: null, name: set };
+  }
+  const code = parsePhoneNumberFromString(`+${waId}`)?.country;
+  const c = code ? phoneCountries().find((x) => x.code === code) : undefined;
+  return c ? { dial: c.dial, flag: c.flag, name: c.name } : null;
+}
+
+// Search in a "+91 India" list: a calling code ("+97", "971") matches by its digits, anything else by the name
+export function filterDialCountries<C extends { value: string; label: string }>(list: C[], query: string) {
+  const digits = query.trim().replace(/^\+/, '');
+  if (/^\d+$/.test(digits)) return list.filter((c) => c.label.startsWith(`+${digits}`));
+  return filterCountries(list, query);
+}
+
 // A saved number (E.164, e.g. +971501234567) as country + the number without its country code
 export function splitPhone(e164: string | null | undefined, fallback: CountryCode = 'AE') {
   const n = e164 ? parsePhoneNumberFromString(e164) : undefined;
@@ -31,6 +52,15 @@ export function joinPhone(country: CountryCode, national: string) {
   if (national.trim().startsWith('+')) return `+${national.replace(/[^\d]/g, '')}`;
   const digits = national.replace(/[^\d]/g, '').replace(/^0+/, '');
   return digits ? `+${getCountryCallingCode(country)}${digits}` : '';
+}
+
+// New chat: the number typed (with the chosen country, or a full +international one pasted) as WhatsApp's id (digits
+// with country code, as the server stores it), or why it isn't a real number. The server checks it again.
+export function newChatNumber(country: CountryCode, typed: string): { waId: string } | { problem: string } {
+  const e164 = joinPhone(country, typed);
+  if (!e164) return { problem: 'Enter the WhatsApp number' };
+  if (!isValidPhoneNumber(e164)) return { problem: `${e164} isn't a valid number. Check the country code and the number.` };
+  return { waId: e164.slice(1) };
 }
 
 export type TimeZoneOption = { value: string; label: string; offsetMinutes: number };

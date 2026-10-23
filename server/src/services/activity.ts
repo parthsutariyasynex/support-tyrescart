@@ -30,13 +30,16 @@ export type ActivityType =
   | 'remark_deleted'
   | 'message_sent'
   | 'list_added'
-  | 'list_removed';
+  | 'list_removed'
+  // An internal note @mentioned someone (one per person and note; data: remarkId, mentionedUserId, text): only that
+  // person's bell and Mentions list
+  | 'note_mention';
 
 // Profile edits and remarks are only for the contact details page's activity log: never in the chat timeline or
 // anyone's bell (so the chat and the notifications stay exactly as they were)
 const PROFILE_ONLY: ActivityType[] = ['contact_updated', 'remark_added', 'remark_edited', 'remark_deleted', 'message_sent', 'list_added', 'list_removed'];
 // Customer messages already appear as bubbles, so they're only in the bell, not the chat timeline
-const NOT_IN_TIMELINE: ActivityType[] = ['message_received', ...PROFILE_ONLY];
+const NOT_IN_TIMELINE: ActivityType[] = ['message_received', 'note_mention', ...PROFILE_ONLY];
 
 type Row = Prisma.ActivityEventGetPayload<{ include: { conversation: { select: { contact: true } } } }>;
 
@@ -57,6 +60,14 @@ async function toActivity(row: Row) {
 
 const include = { conversation: { select: { contact: true } } } as const;
 
+// A short version of a message for activity lists (the bell, the contact's activity): the message itself is always
+// stored in full; a shortened preview ends with "…", so it's never silently cut. Cut between whole characters, never
+// inside an emoji (half an emoji is invalid text the database refuses, and the activity would be lost).
+export function previewOf(text: string, max: number) {
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max - 1).join('').trimEnd()}…` : text;
+}
+
 export async function recordActivity(e: {
   workspaceId: string;
   conversationId: string;
@@ -69,6 +80,12 @@ export async function recordActivity(e: {
     const activity = await toActivity(row);
     // Profile entries go only to the contact details page (its own event): not the chat timeline, not the bell
     if (PROFILE_ONLY.includes(e.type)) return emitToWorkspace(e.workspaceId, 'contact:activity', activity);
+    // A mention: only the bell of the person mentioned (kept there, so it's seen after being offline too)
+    if (e.type === 'note_mention') {
+      const to = (e.data as { mentionedUserId?: unknown } | undefined)?.mentionedUserId;
+      if (typeof to === 'string' && to !== e.actorId) emitToUser(e.workspaceId, to, 'notification:new', activity);
+      return;
+    }
     // Chat timelines (anyone who has the chat open) keep getting every event
     emitToWorkspace(e.workspaceId, 'activity:new', activity);
     // The bell is per person: owners/admins get everything; everyone else only what concerns them (their chats,
@@ -139,7 +156,19 @@ export async function listNotifications({ userId, workspaceId }: AuthPayload, fi
     select: { notificationsSeenAt: true, role: true },
   });
   if (!member) return { items: [], unseen: 0, seenAt: null };
-  const where: Prisma.ActivityEventWhereInput = { workspaceId, type: { notIn: PROFILE_ONLY }, AND: [notMine, visibleTo(userId, member.role)] };
+  const where: Prisma.ActivityEventWhereInput = {
+    workspaceId,
+    AND: [
+      notMine,
+      {
+        OR: [
+          { AND: [{ type: { notIn: [...PROFILE_ONLY, 'note_mention'] } }, visibleTo(userId, member.role)] },
+          // mentions: only the person mentioned (admins don't get everyone else's)
+          { type: 'note_mention', data: { path: '$.mentionedUserId', equals: userId } },
+        ],
+      },
+    ],
+  };
   const [rows, unseen] = await Promise.all([
     prisma.activityEvent.findMany({
       where,
@@ -175,7 +204,7 @@ export async function listContactActivity(workspaceId: string, contactId: string
   if (!(await prisma.contact.findFirst({ where: { id: contactId, workspaceId }, select: { id: true } }))) throw notFound('Contact');
   if (!conversation) return [];
   const rows = await prisma.activityEvent.findMany({
-    where: { workspaceId, conversationId: conversation.id },
+    where: { workspaceId, conversationId: conversation.id, type: { not: 'note_mention' } }, // mentions: the bell only
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: Math.min(Math.max(first, 1), 500),
     include,

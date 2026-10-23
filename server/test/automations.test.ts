@@ -80,7 +80,7 @@ describe('automation rules', () => {
     const n = vars.nameParts;
     assert.deepEqual(n({ name: 'Alice Patel' }), { first: 'Alice', last: 'Patel' });
     assert.deepEqual(n({ name: '  Maria   de la  Cruz ' }), { first: 'Maria', last: 'de la Cruz' }); // the rest, spaces tidied
-    assert.deepEqual(n({ name: 'Alice' }), { first: 'Alice', last: '' }); // one word: no last name (the follow-up fallback applies)
+    assert.deepEqual(n({ name: 'Alice' }), { first: 'Alice', last: '' }); // one word: no last name
     assert.deepEqual(n({ name: '   ' }), { first: 'there', last: '' });
     assert.deepEqual(n({ name: null }), { first: 'there', last: '' });
     // entered names always win, each on its own
@@ -312,9 +312,14 @@ describe('auto-reply through the webhook', () => {
     assert.equal((await autoReplies(convA.id)).length, 1);
     // ...after 24 hours, one more (the cooldown runs from the last automatic reply)
     const last = (await prisma.conversation.findUniqueOrThrow({ where: { id: convA.id } })).lastAutoReplyAt!;
-    await auto.runAutomations(ws, convA.id, new Date(last.getTime() + 24 * 3_600_000 - 60_000));
+    // the customer writes again at that (simulated) time, as on a real webhook: inside their new 24-hour window
+    const writesAt = async (at: Date) => {
+      await prisma.conversation.update({ where: { id: convA.id }, data: { lastInboundAt: at } });
+      await auto.runAutomations(ws, convA.id, at);
+    };
+    await writesAt(new Date(last.getTime() + 24 * 3_600_000 - 60_000));
     assert.equal((await autoReplies(convA.id)).length, 1, 'not before 24 hours');
-    await auto.runAutomations(ws, convA.id, new Date(last.getTime() + 24 * 3_600_000 + 60_000));
+    await writesAt(new Date(last.getTime() + 24 * 3_600_000 + 60_000));
     replies = await autoReplies(convA.id);
     assert.equal(replies.length, 2);
     assert.ok(replies[1].body.endsWith(` ${a.first.toLowerCase()}@example.com`));
