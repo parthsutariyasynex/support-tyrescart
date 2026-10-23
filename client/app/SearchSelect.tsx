@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 
 // A dropdown with a search box on top, for long lists (e.g. "Your time zone"): the current choice and a chevron;
-// opened, type to filter, ↑ ↓ Enter to choose, Esc or a click outside to close.
-export function SearchSelect<T extends { value: string; label: string }>({
+// opened, type to filter, ↑ ↓ Enter to choose, Esc or a click outside to close. An option's flag (e.g. 🇮🇳), if it has
+// one, is shown before its label, kept out of the label so searching it is unchanged.
+export function SearchSelect<T extends { value: string; label: string; flag?: string }>({
   id,
   value,
   options,
@@ -70,6 +71,7 @@ export function SearchSelect<T extends { value: string; label: string }>({
         aria-label={`${label}: ${current?.label ?? value}`}
         className="flex w-full items-center gap-2 rounded-xl border border-line bg-input px-3.5 py-2.5 text-left text-sm text-ink transition hover:bg-surface focus:border-primary-hover focus:outline-hidden disabled:cursor-not-allowed disabled:opacity-60"
       >
+        {current?.flag && <span className="shrink-0 text-base leading-none">{current.flag}</span>}
         <span className="flex-1 truncate">{current?.label ?? value}</span>
         <svg className={`h-4 w-4 shrink-0 text-body-soft transition-transform ${open ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <path d="m6 9 6 6 6-6" />
@@ -126,6 +128,7 @@ export function SearchSelect<T extends { value: string; label: string }>({
                     onClick={() => choose(o.value)}
                     className={`flex w-full items-center gap-2 px-3.5 py-2 text-left text-[13px] ${i === active ? 'bg-surface-muted' : ''} ${selected ? 'font-medium text-primary' : 'text-ink'}`}
                   >
+                    {o.flag && <span className="shrink-0 text-base leading-none">{o.flag}</span>}
                     <span className="flex-1">{o.label}</span>
                     {selected && (
                       <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

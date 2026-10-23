@@ -19,7 +19,7 @@ export function NewChatDialog({
   onDone: (conversation: Conversation, startedNow: boolean) => void;
   onClose: () => void;
 }) {
-  const countries = useMemo(() => phoneCountries().map((c) => ({ value: c.code, label: `+${c.dial} ${c.name}` })), []);
+  const countries = useMemo(() => phoneCountries().map((c) => ({ value: c.code, label: `+${c.dial} ${c.name}`, flag: c.flag })), []);
   const [country, setCountry] = useState<CountryCode>(() => (countries.some((c) => c.value === defaultCountry) ? defaultCountry : countries[0].value) as CountryCode);
   const [number, setNumber] = useState('');
   const [name, setName] = useState('');
@@ -61,7 +61,7 @@ export function NewChatDialog({
 
         <label className="mt-4 block text-[11px] font-semibold text-muted">WhatsApp number</label>
         <div className="mt-1 grid grid-cols-[minmax(0,11rem)_minmax(0,1fr)] gap-2">
-          <SearchSelect label="Country code" value={country} options={countries} filter={filterDialCountries} onChange={(v) => setCountry(v as CountryCode)} placeholder="Search +971 or country" />
+          <SearchSelect label="Country code" value={country} options={countries} filter={filterDialCountries} onChange={(v) => setCountry(v as CountryCode)} placeholder="Country or +971" />
           <input
             ref={numberRef}
             value={number}
