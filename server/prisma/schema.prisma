@@ -543,7 +543,7 @@ model AutomationSettings {
   // chosen. followUpValues: JSON, each template variable -> a contact/company variable key, e.g.
   // {"body":{"1":"contact.first_name","2":"contact.last_name"}}. followUpActiveSince: when it became active (on, with
   // a template): only chats whose 24 hours run out after that get one, so old chats are never messaged in bulk.
-  followUpEnabled      Boolean   @default(true)
+  followUpEnabled      Boolean   @default(false)
   followUpTemplate     String?   @db.VarChar(512)
   followUpLanguage     String?   @db.VarChar(20)
   followUpValues       String?   @db.Text
