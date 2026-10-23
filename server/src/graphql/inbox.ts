@@ -258,7 +258,7 @@ export const typeDefs = /* GraphQL */ `
 
   extend type Query {
     "Newest first. first: 1-100 (default 50). labelId: only conversations with that label. assignee: an assignee id, 'unassigned', 'me' (assigned to you), 'collaborating' (only chats you collaborate on), or 'new_leads' (open, unassigned, never assigned). status: open | closed · search: one box for everything, case-insensitive substring: customer name, phone digits, any message text, label name, assignee name, or the words open / closed / unread / assigned / unassigned"
-    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime, leadStage: String): ConversationConnection!
+    conversations(first: Int, after: String, labelId: ID, assignee: ID, status: String, search: String, sort: String, labelIds: [ID!], assigneeIds: [ID!], from: DateTime, to: DateTime, leadStage: String, leadStages: [String!]): ConversationConnection!
     conversationCounts: ConversationCounts!
     "Approved templates of the connected number, live from Meta"
     messageTemplates: [MessageTemplate!]!
@@ -312,7 +312,7 @@ export const typeDefs = /* GraphQL */ `
 `;
 
 type PageArgs = { first?: number | null; after?: string | null };
-type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null; sort?: string | null; labelIds?: string[] | null; assigneeIds?: string[] | null; from?: Date | null; to?: Date | null; leadStage?: string | null };
+type ConversationPageArgs = PageArgs & { labelId?: string | null; assignee?: string | null; status?: string | null; search?: string | null; sort?: string | null; labelIds?: string[] | null; assigneeIds?: string[] | null; from?: Date | null; to?: Date | null; leadStage?: string | null; leadStages?: string[] | null };
 const pageArgs = ({ first, after }: PageArgs) => ({ first: first ?? undefined, after: after ?? undefined });
 
 type AssigneeRefMember = { id: string; role: string; user: { id: string; name: string } };
@@ -347,11 +347,11 @@ export const resolvers = {
     needsParameters: (t: { needsParameters?: boolean }) => !!t.needsParameters,
   },
   Query: {
-    conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
+    conversations: authed(async ({ labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, leadStages, ...args }: ConversationPageArgs, { workspaceId, userId }) =>
       toConnection(
         (await listConversations(
           workspaceId,
-          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined, sort: sort ?? undefined, labelIds: labelIds ?? undefined, assigneeIds: assigneeIds ?? undefined, from: from ?? undefined, to: to ?? undefined, leadStage: leadStage ?? undefined },
+          { ...pageArgs(args), labelId: labelId ?? undefined, assignee: assignee ?? undefined, status: status ?? undefined, search: search?.trim() || undefined, sort: sort ?? undefined, labelIds: labelIds ?? undefined, assigneeIds: assigneeIds ?? undefined, from: from ?? undefined, to: to ?? undefined, leadStage: leadStage ?? undefined, leadStages: leadStages ?? undefined },
           userId,
         )) as Page<ConversationParent>,
       ),

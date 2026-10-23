@@ -29,8 +29,17 @@ describe('contact profile helpers', () => {
   test('country from the phone until set; subscriber yes/no; chat details', () => {
     const rows = propertyRows(base, null, opts, { channel: 'WhatsApp · +971 4 000 0000', lastOutboundAt: null, lastInboundAt: '2026-10-14T07:05:00.000Z' });
     const v = (k: string) => displayValue(rows.find((r) => r.key === k)!);
-    assert.equal(v('country'), 'United Arab Emirates');
-    assert.equal(displayValue(propertyRows({ ...base, country: 'Oman' }, null, opts).find((r) => r.key === 'country')!), 'Oman');
+    assert.equal(v('country'), '+971 United Arab Emirates');
+    const country = (c: Partial<typeof base>) => propertyRows({ ...base, ...c }, null, opts).find((r) => r.key === 'country')!;
+    assert.equal(displayValue(country({ country: 'Oman' })), '+968 Oman');
+    // A searchable dropdown of every country (saved by name, shown with its calling code); "Not set" first to clear it
+    assert.equal(country({}).kind, 'select');
+    assert.equal(country({}).searchable, true);
+    assert.deepEqual(country({}).options![0], { value: '', label: '– Not set' });
+    assert.ok(country({}).options!.some((o) => o.value === 'United Arab Emirates' && o.label === '+971 United Arab Emirates'));
+    assert.ok(country({}).options!.length > 200);
+    // A country typed in before the dropdown (not in the list) still shows as it was saved
+    assert.equal(displayValue(country({ country: 'Somewhere' })), 'Somewhere');
     assert.equal(v('subscribed'), 'Yes');
     assert.equal(displayValue(propertyRows({ ...base, subscribed: false }, null, opts).find((r) => r.key === 'subscribed')!), 'No');
     assert.equal(v('channel'), 'WhatsApp · +971 4 000 0000');

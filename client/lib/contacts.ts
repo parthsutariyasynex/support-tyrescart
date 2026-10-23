@@ -1,4 +1,5 @@
 import { gql } from './api';
+import { phoneCountries } from './profileOptions';
 import { currentTimeZone, formatDateTime } from './time';
 
 // Customer profile for the chat side panel: "Contact property" fields and "Remarks" (internal notes).
@@ -141,6 +142,8 @@ export type PropertyRow = {
   editable: boolean;
   kind: 'text' | 'email' | 'select';
   options?: ContactOption[];
+  // A long list (Country): a dropdown with a search box
+  searchable?: boolean;
   // Custom properties (Settings → Contact properties → Add column)
   custom?: { id: string; type: string; key: string };
   inputType?: 'text' | 'number' | 'date' | 'url' | 'datetime-local' | 'multiline';
@@ -237,6 +240,10 @@ export const YES_NO: ContactOption[] = [
   { value: 'false', label: 'No' },
 ];
 
+// Country dropdown: every country with its calling code ("+91 India"), saved by its English name (the same names
+// the phone-number fallback uses); "Not set" clears it (the phone number's country shows again)
+export const countryOptions = (): ContactOption[] => [{ value: '', label: '– Not set' }, ...phoneCountries().map((c) => ({ value: c.name, label: `+${c.dial} ${c.name}` }))];
+
 // The "Contact property" list, in the order shown. First name falls back to the WhatsApp name and country to the
 // phone number's country until they are set. Chat details (channel, last contact times) are read-only.
 export function propertyRows(c: ContactProfile, owner: string | null, opts: ContactFieldOptions | null, chat: ChatDetails | null = null): PropertyRow[] {
@@ -252,7 +259,7 @@ export function propertyRows(c: ContactProfile, owner: string | null, opts: Cont
     { key: 'leadStage', label: 'Lead stage', value: c.leadStage ?? '', editable: true, kind: 'select', options: opts?.leadStages ?? [] },
     { key: 'leadSource', label: 'Lead source', value: c.leadSource ?? '', editable: true, kind: 'select', options: opts?.leadSources ?? [] },
     { key: 'priority', label: 'Priority', value: c.priority ?? '', editable: true, kind: 'select', options: opts?.priorities ?? [] },
-    { key: 'country', label: 'Country', value: c.country ?? c.phoneCountry ?? '', editable: true, kind: 'text' },
+    { key: 'country', label: 'Country', value: c.country ?? c.phoneCountry ?? '', editable: true, kind: 'select', options: countryOptions(), searchable: true },
     { key: 'subscribed', label: 'Subscriber', value: String(c.subscribed ?? true), editable: true, kind: 'select', options: YES_NO },
     { key: 'channel', label: 'Last channel', value: chat?.channel ?? '', editable: false, kind: 'text' },
     { key: 'lastFromYou', label: 'Last contact from you', value: when(chat?.lastOutboundAt), editable: false, kind: 'text' },

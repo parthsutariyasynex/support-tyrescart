@@ -77,6 +77,9 @@ import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
 import { setOpenConversationId } from '@/lib/desktopNotifications';
+import { dismissChatPopups } from '@/lib/messagePopups';
+import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
+import { CountryCodeMenu } from './CountryCodeMenu';
 import {
   type TypingEvent,
   type TypingState,
@@ -255,6 +258,7 @@ function Inbox({ meName }: { meName: string }) {
   // confirmed working (matching logs in AppShell.tsx and inbox/notifications.tsx).
   useEffect(() => {
     setOpenConversationId(activeId);
+    if (activeId) dismissChatPopups(activeId); // its new-message pop-up has been seen
     console.debug('[notify-debug] openConversationId set to', activeId, 'on', pathname);
   }, [activeId, pathname]);
   useEffect(
@@ -897,10 +901,10 @@ function Inbox({ meName }: { meName: string }) {
       if (conversationId === activeIdRef.current) markConversationRead(conversationId).catch(() => {});
     });
     // Contact profile edited or remarks changed (by anyone): the open profile panel follows
-    socket.on('contact:updated', (c: { id: string; leadStage?: string | null }) => {
+    socket.on('contact:updated', (c: { id: string; leadStage?: string | null; country?: string | null }) => {
       window.dispatchEvent(new CustomEvent(CONTACT_UPDATED_EVENT, { detail: c }));
       // The chat header's stage follows (it reads the stage from the chat list)
-      patchConversations((x) => (x.contact.id === c.id ? { ...x, contact: { ...x.contact, leadStage: c.leadStage ?? null } } : x));
+      patchConversations((x) => (x.contact.id === c.id ? { ...x, contact: { ...x.contact, leadStage: c.leadStage ?? null, ...('country' in c ? { country: c.country ?? null } : {}) } } : x));
     });
     socket.on('contact:properties', () => window.dispatchEvent(new Event(CUSTOM_PROPERTIES_EVENT)));
     // A contact was deleted (admins): their chat leaves the list at once; restored: it comes back
@@ -1760,7 +1764,41 @@ function ChatPanel({
     setReplyTo(null);
     setConfirmDelete(null);
     setUndo(null);
+    // Opening a chat puts the cursor in the message box so you can start typing at once (as WhatsApp Web does);
+    // not on touch-only devices, where it would pop up the keyboard over the chat
+    if (window.matchMedia('(pointer: fine)').matches) requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
   }, [conversation.id]);
+
+  // Esc leaves the chat (back to the list), WhatsApp style - see escapeClosesChat for when it doesn't. What was
+  // open and focused is noted first (capture), before menus and dialogs close themselves on the same Esc; the
+  // decision comes last (bubble), after every other handler had its turn.
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
+  useEffect(() => {
+    let start: { target: EscapeTarget | null; overlayOpen: boolean } | null = null;
+    const onCapture = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const el = e.target instanceof HTMLElement ? e.target : null;
+      start = {
+        target: el && { tagName: el.tagName, isContentEditable: el.isContentEditable, composerEmpty: el === inputRef.current ? inputRef.current.value === '' : null },
+        overlayOpen: !!document.querySelector(OVERLAY_SELECTOR),
+      };
+    };
+    const onBubble = (e: KeyboardEvent) => {
+      const s = start;
+      start = null;
+      if (!s || !escapeClosesChat(e, s.target, s.overlayOpen)) return;
+      e.preventDefault();
+      inputRef.current?.blur();
+      onClosedRef.current();
+    };
+    window.addEventListener('keydown', onCapture, true);
+    window.addEventListener('keydown', onBubble);
+    return () => {
+      window.removeEventListener('keydown', onCapture, true);
+      window.removeEventListener('keydown', onBubble);
+    };
+  }, []);
 
   const typingSender = useTypingSender(onTyping);
   // "/" at the start of the message box opens the quick replies menu; Esc hides it until you type again
@@ -2264,6 +2302,7 @@ function ChatPanel({
               <path d="m21 21-4.3-4.3" />
             </svg>
           </button>
+          <CountryCodeMenu contactId={conversation.contact.id} country={conversation.contact.country} waId={conversation.contact.waId} />
           <button
             onClick={(e) => onOpenLabels(e.currentTarget)}
             title="Label chat"
@@ -2627,8 +2666,14 @@ function ChatPanel({
                   return setQuickClosed(true);
                 }
               }
-              if (e.key === 'Escape' && editing) cancelEdit();
-              else if (e.key === 'Escape' && replyTo) setReplyTo(null);
+              // Esc cancels the edit / reply first (marked handled, so it doesn't also leave the chat)
+              if (e.key === 'Escape' && editing) {
+                e.preventDefault();
+                cancelEdit();
+              } else if (e.key === 'Escape' && replyTo) {
+                e.preventDefault();
+                setReplyTo(null);
+              }
               // Same form submit as before (send, or save an edit); Shift+Enter keeps its default new line
               if (enterAction({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing }) === 'send') {
                 e.preventDefault();

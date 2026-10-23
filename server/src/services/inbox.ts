@@ -36,6 +36,8 @@ const conversationPageSchema = pageSchema.extend({
   labelIds: z.array(z.string().min(1).max(64)).max(100).optional(),
   // Left menu → Lifecycle stages: only chats whose customer is at this stage (a stage's value)
   leadStage: z.string().trim().min(1).max(20).optional(),
+  // "Filter by" menu → Stage: customer at any of these stages
+  leadStages: z.array(z.string().trim().min(1).max(20)).max(100).optional(),
   assigneeIds: z.array(z.string().min(1).max(64)).max(100).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
@@ -101,11 +103,12 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   };
   if (page === undefined) return prisma.conversation.findMany(query);
 
-  const { first, after, labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage } = parse(conversationPageSchema, page);
+  const { first, after, labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, leadStages } = parse(conversationPageSchema, page);
   if (from && to && from > to) throw new AppError('"from" must be before "to"', 400, 'BAD_USER_INPUT');
   const memberIds = (assigneeIds ?? []).filter((a) => a !== 'unassigned');
   const menuFilters: Prisma.ConversationWhereInput[] = [
     ...(labelIds?.length ? [{ labels: { some: { labelId: { in: labelIds } } } }] : []),
+    ...(leadStages?.length ? [{ contact: { leadStage: { in: leadStages } } }] : []),
     ...(assigneeIds?.length
       ? [{ OR: [...(memberIds.length ? [{ assignedToId: { in: memberIds } }] : []), ...(assigneeIds.includes('unassigned') ? [{ assignedToId: null }] : [])] }]
       : []),

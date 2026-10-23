@@ -13,6 +13,8 @@ export function SearchSelect<T extends { value: string; label: string }>({
   label,
   placeholder = 'Search',
   disabled,
+  defaultOpen = false,
+  onClose,
 }: {
   id?: string;
   value: string;
@@ -22,8 +24,10 @@ export function SearchSelect<T extends { value: string; label: string }>({
   label: string; // for screen readers
   placeholder?: string;
   disabled?: boolean;
+  defaultOpen?: boolean; // open as soon as it's shown (editing a field in place)
+  onClose?: () => void; // closed without choosing a different value
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
@@ -35,7 +39,11 @@ export function SearchSelect<T extends { value: string; label: string }>({
     if (!open) return;
     setQuery('');
     setActive(Math.max(0, options.findIndex((o) => o.value === value)));
-    const onPointer = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const onPointer = (e: MouseEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+      onClose?.();
+    };
     document.addEventListener('mousedown', onPointer);
     return () => document.removeEventListener('mousedown', onPointer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -47,6 +55,7 @@ export function SearchSelect<T extends { value: string; label: string }>({
   const choose = (v: string) => {
     setOpen(false);
     if (v !== value) onChange(v);
+    else onClose?.();
   };
 
   return (
@@ -97,6 +106,7 @@ export function SearchSelect<T extends { value: string; label: string }>({
                     e.preventDefault();
                     e.stopPropagation();
                     setOpen(false);
+                    onClose?.();
                   }
                 }}
                 placeholder={placeholder}

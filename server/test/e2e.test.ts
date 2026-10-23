@@ -4781,6 +4781,20 @@ describe('chat list "Filter by": labels, collaborator, date range', () => {
     assert.equal(await errorCode(LIST, { from: '2026-02-01T00:00:00Z', to: '2026-01-01T00:00:00Z' }, ws.token), 'BAD_USER_INPUT');
     assert.deepEqual(await names({ l: [label.VIP] }, B.token), []);
   });
+  test('stage: customer at any of the chosen stages; combines with the other groups and the left-menu stage', async () => {
+    const STAGES = `query($st: [String!], $one: String, $l: [ID!]) { conversations(leadStages: $st, leadStage: $one, labelIds: $l) { nodes { contact { name } } } }`;
+    const byName = async (n: string) => (await prisma.conversation.findUniqueOrThrow({ where: { id: chat[n] } })).contactId;
+    await prisma.contact.update({ where: { id: await byName('F 1') }, data: { leadStage: 'won' } });
+    await prisma.contact.update({ where: { id: await byName('F 2') }, data: { leadStage: 'contacted' } });
+    await prisma.contact.update({ where: { id: await byName('F 3') }, data: { leadStage: null } });
+    const stageNames = async (v: object, token = ws.token) => (await ok(STAGES, v, token)).conversations.nodes.map((c: any) => c.contact.name).sort();
+    assert.deepEqual(await stageNames({ st: ['won'] }), ['F 1']);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'] }), ['F 1', 'F 2']);
+    assert.deepEqual(await stageNames({ st: ['lost'] }), []);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'], l: [label.Lead] }), ['F 2']);
+    assert.deepEqual(await stageNames({ st: ['won', 'contacted'], one: 'won' }), ['F 1']);
+    assert.deepEqual(await stageNames({ st: ['won'] }, B.token), []);
+  });
 });
 
 describe('snooze: snoozed chats come back on time or when the customer writes', () => {

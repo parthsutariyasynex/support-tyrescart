@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { playPing, showDesktopNotification, unlockSound } from '../inbox/notifications';
+import { setSoundEnabled, soundEnabled } from '@/lib/messagePopups';
 
 // Settings → General → System preference: this browser's desktop notifications (allowed / blocked / not asked yet),
 // the sound, and what the app always shows. Desktop notifications and the sound reach you while you aren't looking
@@ -28,6 +29,8 @@ const card = 'rounded-xl border border-line bg-surface p-6';
 export function NotificationSettings() {
   const [permission, setPermission] = useState<Permission | null>(null);
   const [message, setMessage] = useState('');
+  const [sound, setSound] = useState(true);
+  useEffect(() => setSound(soundEnabled()), []);
 
   // The status follows the browser: allowing or blocking in its site settings shows here without a reload
   useEffect(() => {
@@ -70,7 +73,7 @@ export function NotificationSettings() {
             <h4 id="desktop-title" className="text-[15px] font-bold text-ink">
               Desktop notifications
             </h4>
-            <p className="mt-1 text-[13px] text-body-soft">Pop-ups from this browser while you aren&apos;t looking at the app: another tab or window, or minimised.</p>
+            <p className="mt-1 text-[13px] text-body-soft">Pop-ups from this browser while you aren&apos;t looking at the app: another tab or window, or minimised. Only for chats you may work on: yours, ones you collaborate on, and unassigned ones (owners and admins: all).</p>
           </div>
           {permission && (
             <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${STATUS[permission].tone}`} aria-label="Desktop notifications status">
@@ -135,18 +138,36 @@ export function NotificationSettings() {
             <h4 id="sound-title" className="text-[15px] font-bold text-ink">
               Sound
             </h4>
-            <p className="mt-1 text-[13px] text-body-soft">A short sound plays with each desktop notification. Browsers allow it after your first click on the page.</p>
+            <p className="mt-1 text-[13px] text-body-soft">
+              A short sound plays with each new message and notification, in the app or in the background. Browsers allow it after your first click on the page. Saved
+              for this browser.
+            </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              unlockSound();
-              playPing();
-            }}
-            className={`${secondary} shrink-0`}
-          >
-            Play sound
-          </button>
+          <div className="flex shrink-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                unlockSound();
+                playPing();
+              }}
+              className={secondary}
+            >
+              Play sound
+            </button>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={sound}
+              aria-label="Notification sound"
+              onClick={() => {
+                setSoundEnabled(!sound);
+                setSound(!sound);
+              }}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors ${sound ? 'bg-success' : 'bg-faint/50'}`}
+            >
+              <span style={{ backgroundColor: '#fff', boxShadow: '0 1px 3px rgb(0 0 0 / 0.3)' }} className={`inline-block h-5 w-5 rounded-full transition-transform ${sound ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
         </div>
       </section>
 
@@ -157,7 +178,7 @@ export function NotificationSettings() {
               In the app
             </h4>
             <p className="mt-1 text-[13px] text-body-soft">
-              The 🔔 bell keeps your recent activity, and messages appear at the bottom of the screen for chats assigned to you, new chats and reminders. These are
+              The 🔔 bell keeps your recent activity. New customer messages slide in at the top right (name and message; click to open the chat), and messages appear at the bottom of the screen for chats assigned to you, new chats and reminders. These are
               always on.
             </p>
           </div>

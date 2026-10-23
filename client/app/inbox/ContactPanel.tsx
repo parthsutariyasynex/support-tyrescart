@@ -50,6 +50,8 @@ import { PropertySettings } from './PropertySettings';
 import { useStagesChanged } from './StageMenu';
 import { MediaViewer } from './composerExtras';
 import { downloadFile } from '@/lib/media';
+import { filterDialCountries } from '@/lib/profileOptions';
+import { SearchSelect } from '../SearchSelect';
 
 // Live updates from the inbox page's socket (contact:updated / contact:remarks), passed on as window events
 export const CONTACT_UPDATED_EVENT = 'app:contact-updated';
@@ -869,7 +871,21 @@ function PropertyItem({
     >
       <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted">{row.label}</dt>
       <dd className="mt-0.5">
-        {editing && row.kind === 'select' ? (
+        {editing && row.searchable ? (
+          <div onClick={(e) => e.stopPropagation()}>
+            <SearchSelect
+              defaultOpen
+              disabled={busy}
+              label={row.label}
+              value={value}
+              options={row.options ?? []}
+              filter={filterDialCountries}
+              onChange={(v) => save(v)}
+              onClose={() => !busy && onEdit(false)}
+              placeholder={`Search ${row.label.toLowerCase()}`}
+            />
+          </div>
+        ) : editing && row.kind === 'select' ? (
           <select autoFocus disabled={busy} value={value} onChange={(e) => save(e.target.value)} onBlur={() => !busy && onEdit(false)} onKeyDown={(e) => e.key === 'Escape' && onEdit(false)} className={`${field} cursor-pointer`}>
             {row.key !== 'subscribed' && <option value="">–</option>}
             {row.options?.map((o) => (

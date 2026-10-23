@@ -6,7 +6,7 @@ import { filePreview, isMediaPlaceholder } from './media';
 // looking at - every other chat alerts even while the app is the focused window (see shouldSuppressNotification).
 
 export type MessageEvent = {
-  conversation?: { contact?: { name?: string | null; waId?: string } | null } | null;
+  conversation?: { assignedToId?: string | null; contact?: { name?: string | null; waId?: string } | null } | null;
   message: { id: string; conversationId: string; direction: string; type: string; body: string; mediaName?: string | null; deletedAt?: string | null };
 };
 export type Notice = { title: string; body: string; tag: string; conversationId: string };

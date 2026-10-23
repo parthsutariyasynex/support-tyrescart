@@ -146,3 +146,23 @@ body {
   background: var(--color-primary);
   border: none;
 }
+
+/* New-message pop-ups (MessagePopups) slide in from the right */
+@keyframes message-popup-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.message-popup {
+  animation: message-popup-in 0.25s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-popup {
+    animation: none;
+  }
+}
