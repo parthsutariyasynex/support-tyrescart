@@ -116,7 +116,7 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   ];
   const dir = sort === 'oldest' ? ('asc' as const) : ('desc' as const);
   if (after) await requireConversation(workspaceId, after);
-  if ((assignee === 'me' || assignee === 'collaborating') && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
+  if ((assignee === 'me' || assignee === 'collaborating' || assignee === 'mentioned') && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
   // The viewer's pinned chats come first on the first page (whatever their age), and are left out of the pages
   const pins = viewerId
     ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
@@ -128,6 +128,9 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
       ...(assignee === 'collaborating'
         ? // Collaborations: chats I've been added to as a collaborator
           { collaborators: { some: { userId: viewerId } } }
+        : assignee === 'mentioned'
+        ? // Mentions: chats where someone @mentioned me in an internal note
+          { activity: { some: { type: 'note_mention', data: { path: '$.mentionedUserId', equals: viewerId } } } }
         : assignee === 'me'
         ? // My Chats: assigned to me (chats I only collaborate on are in Collaborations)
           { assignedTo: { userId: viewerId } }

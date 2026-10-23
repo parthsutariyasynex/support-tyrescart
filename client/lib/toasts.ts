@@ -132,6 +132,14 @@ export const newChatText = (e: { conversationId: string; contactName: string }) 
   detail: e.contactName,
 });
 
+// mention:you (sent only to the teammate mentioned): someone @mentioned you in an internal note
+export type MentionEvent = { conversationId: string; actorName: string | null; contactName: string; text: string };
+export const mentionedYouText = (e: MentionEvent) => ({
+  key: `mention:${e.conversationId}:${e.text}`,
+  message: `${e.actorName ?? 'A teammate'} mentioned you in a note.`,
+  detail: `${e.contactName} · ${e.text}`,
+});
+
 export type ReminderEvent = { at: string; chats: { conversationId: string; contactName: string; kind?: 'assigned' | 'unassigned' }[] };
 
 // assignment:reminder (per person): chats assigned to you not opened/answered, and new chats nobody has taken

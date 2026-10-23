@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
-import { collaboratorRemovedByYouText, pinText, removedAsCollaboratorText, labelToastText, addedAsCollaboratorText, assignedToYouText, assignmentChangedText, clearToast, currentToast, isDuplicateToast, newChatText, reminderText, removedFromYouText, resetToasts, showToast } from './toasts';
+import { collaboratorRemovedByYouText, pinText, removedAsCollaboratorText, labelToastText, addedAsCollaboratorText, assignedToYouText, assignmentChangedText, clearToast, currentToast, isDuplicateToast, newChatText, reminderText, removedFromYouText, resetToasts, mentionedYouText, showToast } from './toasts';
 
 const base = { conversationId: 'c1', actorId: 'u-parth', actorName: 'Parth', contactName: 'Riya', previous: null };
 
@@ -64,4 +64,13 @@ describe('toast texts', () => {
     assert.equal(both.message, 'Reminder: 1 chat assigned to you still needs attention; 1 new chat is still unassigned and unread.');
     assert.equal(both.detail, 'A, B');
   });
+});
+
+test('mentioned in a note: who, which customer and the note', () => {
+  assert.deepEqual(mentionedYouText({ conversationId: 'c1', actorName: 'Ana', contactName: 'Parth patel', text: '@deep patel please call back' }), {
+    key: 'mention:c1:@deep patel please call back',
+    message: 'Ana mentioned you in a note.',
+    detail: 'Parth patel · @deep patel please call back',
+  });
+  assert.equal(mentionedYouText({ conversationId: 'c1', actorName: null, contactName: 'X', text: 'y' }).message, 'A teammate mentioned you in a note.');
 });

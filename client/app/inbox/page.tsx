@@ -41,7 +41,7 @@ import {
   inBell,
   markNotificationsSeen,
 } from '@/lib/activity';
-import { type Assignee, claimConversation, fetchAssignees } from '@/lib/assignees';
+import { type Assignee, type WorkspaceMember, claimConversation, fetchAssignees, fetchWorkspaceMembers } from '@/lib/assignees';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
 import { EMPTY_MENU_FILTERS, type MenuFilters, matchesMenuFilters, toServerFilter } from '@/lib/chatFilters';
 import { findMessageMatches } from '@/lib/messageSearch';
@@ -58,9 +58,9 @@ import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, checkFile, filePreview, pastedName, sendFile } from '@/lib/media';
+import { ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
-import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, addRemark, stagesChanged } from '@/lib/contacts';
+import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { CollaboratorsButton } from './CollaboratorsButton';
@@ -81,6 +81,9 @@ import { isWindowClosedError, lastCustomerMessageAt, msUntilClose, windowOpen } 
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
 import { CountryCodeMenu } from './CountryCodeMenu';
 import { NewChatDialog } from './NewChatDialog';
+import { NoteBubble } from './NoteBubble';
+import { type MentionMember, MentionMenu } from './MentionMenu';
+import { insertMention, matchMembers, mentionAt } from '@/lib/mentions';
 import { WHATSAPP_TEXT_MAX, overLimit, tooLongText } from '@/lib/textLimits';
 import {
   type TypingEvent,
@@ -223,6 +226,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   const mine = pathname === '/my-chats';
   const leads = pathname === '/leads';
   const collab = pathname === '/collaborations'; // chats I collaborate on
+  const mentioned = pathname === '/mentions'; // chats where a teammate @mentioned me in a note
 
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     if (cachedConversationsByPath[pathname]?.length) {
@@ -345,7 +349,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   conversationsRef.current = conversations;
 
   const labelFilter = filterType.startsWith('label:') ? filterType.slice(6) : null;
-  const assigneeFilter = mine ? 'me' : leads ? 'new_leads' : collab ? 'collaborating' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
+  const assigneeFilter = mine ? 'me' : leads ? 'new_leads' : collab ? 'collaborating' : mentioned ? 'mentioned' : filterType.startsWith('assigned:') ? filterType.slice(9) : null;
   // The search box: applied to the loaded chats at once; the server search (every message, label, name…) runs a
   // moment after you stop typing
   const [searchTerm, setSearchTerm] = useState('');
@@ -854,6 +858,15 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       setTyping((s) => applyTypingEvent(s, e));
     });
     // Someone started a chat with a new number: it appears in everyone's list at once
+    // Mentioned in a note: the chat joins your Mentions list at once
+    socket.on('mention:you', () => {
+      if (filterRef.current.assignee === 'mentioned') loadConversations();
+    });
+    // A note that mentioned you was edited or deleted: your Mentions list and bell follow
+    socket.on('mentions:changed', () => {
+      if (filterRef.current.assignee === 'mentioned') loadConversations();
+      loadFeed();
+    });
     socket.on('conversation:started', () => {
       loadConversations();
       loadUnassignedCount();
@@ -1083,6 +1096,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     if (labelFilter) return matched && c.labels.some((l) => l.id === labelFilter);
     if (assigneeFilter === 'me') return matched && isAssignedTo(c, permissions?.userId);
     if (assigneeFilter === 'collaborating') return matched && c.isCollaborator;
+    if (assigneeFilter === 'mentioned') return matched; // the server decides (who was mentioned in which note)
     if (assigneeFilter === 'unassigned') return matched && !c.assignee;
     if (assigneeFilter === 'new_leads') return matched; // New Leads: checked above
     if (assigneeFilter) return matched && c.assignee?.id === assigneeFilter;
@@ -1152,6 +1166,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       {active ? (
         <ChatPanel
           meName={meName}
+          assignees={assignees}
           conversation={active}
           messages={messagesChatId === active.id ? messages : []}
           onLoadOlder={olderCursor ? loadOlderMessages : undefined}
@@ -1344,7 +1359,8 @@ function ConversationList({
   typing: TypingState;
 }) {
   const listContainerRef = useRef<HTMLDivElement>(null);
-  const scrollKey = `support:scroll:list:${mine ? 'mine' : leads ? 'leads' : collab ? 'collab' : 'inbox'}`;
+  const mentionsPage = usePathname() === '/mentions';
+  const scrollKey = `support:scroll:list:${mine ? 'mine' : leads ? 'leads' : collab ? 'collab' : mentionsPage ? 'mentions' : 'inbox'}`;
   const restoredScrollRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1530,6 +1546,8 @@ function ConversationList({
           </p>
         ) : conversations.length === 0 && collab ? (
           <div className="p-4 text-xs text-muted">No collaborations yet. Chats you are added to as a collaborator will appear here.</div>
+        ) : conversations.length === 0 && mentionsPage ? (
+          <div className="p-4 text-xs text-muted">No mentions yet. Chats where a teammate @mentions you in an internal note will appear here.</div>
         ) : conversations.length === 0 && mine ? (
           <div className="space-y-2 p-5 text-xs leading-relaxed text-muted">
             <p>
@@ -1698,6 +1716,7 @@ function ChatPanel({
   onToggleProfile,
   onOpenProfile,
   channelPhone,
+  assignees,
 }: {
   conversation: Conversation;
   meName: string; // you: the "My name" quick fill when sending a template
@@ -1733,6 +1752,8 @@ function ChatPanel({
   onOpenProfile: () => void;
   // The workspace's WhatsApp number replies go out from ("via WhatsApp +971…" above the message box)
   channelPhone: string | null;
+  // Teammates (for @mentions in notes: their colour)
+  assignees: Assignee[];
 }) {
   const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
@@ -1749,6 +1770,26 @@ function ChatPanel({
   // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
   // to the customer's Remarks in the profile panel). Each chat opens on Reply.
   const [mode, setMode] = useState<'reply' | 'note'>('reply');
+  // Internal notes in the chat (yellow bubbles): this customer's remarks, live (contact:remarks: added, edited or
+  // deleted by anyone). Only shown to the team; never sent to WhatsApp.
+  const [notes, setNotes] = useState<ContactRemark[]>([]);
+  const notesFor = useRef(conversation.id);
+  const loadNotes = useCallback(() => {
+    const id = conversation.id;
+    fetchChatNotes(id)
+      .then((list) => notesFor.current === id && setNotes(list))
+      .catch(() => {}); // the chat still works without them
+  }, [conversation.id]);
+  useEffect(() => {
+    notesFor.current = conversation.id;
+    setNotes([]);
+    loadNotes();
+  }, [conversation.id, loadNotes]);
+  useEffect(() => {
+    const on = (e: Event) => (e as CustomEvent<{ contactId?: string }>).detail?.contactId === conversation.contact.id && loadNotes();
+    window.addEventListener(CONTACT_REMARKS_EVENT, on);
+    return () => window.removeEventListener(CONTACT_REMARKS_EVENT, on);
+  }, [conversation.contact.id, loadNotes]);
   useEffect(() => setMode('reply'), [conversation.id]);
   const [error, setError] = useState('');
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -1856,6 +1897,53 @@ function ChatPanel({
   const [quickClosed, setQuickClosed] = useState(false);
   const [quickActive, setQuickActive] = useState(0);
   const quickSearch = !editing && !quickClosed ? slashQuery(text) : null;
+  // "Add note": @ opens the list of teammates (name and email); picking one puts "@Name " at the cursor
+  const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
+  useEffect(() => {
+    if (mode === 'note' && members === null) fetchWorkspaceMembers().then(setMembers, () => setMembers([]));
+  }, [mode, members]);
+  const [caret, setCaret] = useState(0);
+  const [mentionClosed, setMentionClosed] = useState(false); // Esc: hidden until the text changes
+  const mention = noting && !mentionClosed ? mentionAt(text, caret) : null;
+  const mentionItems = useMemo(
+    () =>
+      mention
+        ? matchMembers((members ?? []).filter((m) => m.id !== viewer?.userId), mention.query).map((m) => ({
+            ...m,
+            color: assignees.find((a) => a.userId === m.id)?.color ?? 'var(--color-primary)',
+          }))
+        : [],
+    [mention?.query, mention !== null, members, viewer?.userId, assignees], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const [mentionActive, setMentionActive] = useState(0);
+  // Teammates picked from the list for this note; sent with it if their "@Name" is still in the text
+  const [picked, setPicked] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => setPicked([]), [conversation.id]);
+  // Add note → 📎: images and documents for the note (uploaded when it's saved, then attached to it)
+  const [noteFiles, setNoteFiles] = useState<File[]>([]);
+  const noteFileInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => setNoteFiles([]), [conversation.id]);
+  function addNoteFiles(list: FileList | null) {
+    const chosen = Array.from(list ?? []);
+    const problems = chosen.map((f) => ('problem' in checkFile(f) ? `${f.name}: ${(checkFile(f) as { problem: string }).problem}` : null)).filter(Boolean);
+    const ok = chosen.filter((f) => !('problem' in checkFile(f)));
+    const room = NOTE_FILES_MAX - noteFiles.length;
+    setNoteFiles((prev) => [...prev, ...ok.slice(0, Math.max(0, room))]);
+    setError([...problems, ...(ok.length > room ? [`Up to ${NOTE_FILES_MAX} files per note`] : [])].join(' · '));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+  useEffect(() => setMentionActive(0), [mention?.query]);
+  function pickMention(m: MentionMember) {
+    if (!mention) return;
+    const r = insertMention(text, mention, m.name);
+    setPicked((p) => (p.some((x) => x.id === m.id) ? p : [...p, { id: m.id, name: m.name }]));
+    setText(r.text);
+    setCaret(r.caret);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(r.caret, r.caret);
+    });
+  }
   const quick = useQuickReplies(quickSearch);
   useEffect(() => setQuickActive(0), [quickSearch]);
   // The message box grows with multi-line text (up to ~8 lines, then scrolls)
@@ -1890,6 +1978,7 @@ function ChatPanel({
       cancelEdit();
       setUndo(null);
       onCleared();
+      loadNotes(); // notes before the clear are hidden for you too, like the messages
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -2067,12 +2156,18 @@ function ChatPanel({
 
   // Add note: an internal note on the customer (their Remarks in the profile panel; everyone sees it there live)
   async function saveNote(body: string) {
-    if (busy) return;
+    if (busy || (!body.trim() && !noteFiles.length)) return;
     setBusy(true);
     setError('');
     try {
-      await addRemark(conversation.contact.id, body.trim());
+      const mentions = picked.filter((m) => body.includes(`@${m.name}`)).map((m) => m.id);
+      // Files first (one by one), then the note with them; if anything fails, the text and files stay to try again
+      const fileIds: string[] = [];
+      for (const f of noteFiles) fileIds.push((await uploadRemarkFile(conversation.contact.id, f)).id);
+      await addRemark(conversation.contact.id, body.trim(), mentions, fileIds);
       setText('');
+      setPicked([]);
+      setNoteFiles([]);
       showToast(`note:${conversation.id}:${Date.now()}`, conversation.id, 'Note added', "Saved to the customer's Remarks · only your team sees it");
     } catch (err) {
       setError((err as Error).message);
@@ -2118,15 +2213,19 @@ function ChatPanel({
     }
   }
 
-  // Messages and activity in time order. While older messages aren't loaded yet, skip activity older than the
-  // first loaded message so events don't pile up at the top.
+  // Messages, activity and internal notes in time order. While older messages aren't loaded yet, skip activity and
+  // notes older than the first loaded message so they don't pile up at the top.
   const oldestLoaded = onLoadOlder && messages[0] ? messages[0].createdAt : null;
   const stream = [
     ...messages.map((m) => ({ kind: 'message' as const, at: m.createdAt, id: m.id, m })),
     ...activity
       .filter((a) => !oldestLoaded || a.createdAt >= oldestLoaded)
       .map((a) => ({ kind: 'activity' as const, at: a.createdAt, id: a.id, a })),
+    ...notes
+      .filter((n) => !oldestLoaded || n.createdAt >= oldestLoaded)
+      .map((n) => ({ kind: 'note' as const, at: n.createdAt, id: `note:${n.id}`, n })),
   ].sort((x, y) => x.at.localeCompare(y.at));
+  const teammateNames = useMemo(() => assignees.map((a) => a.name), [assignees]);
 
   // Scroll only when something newer arrives or conversation changes, restoring saved scroll on refresh
   const lastId = stream.at(-1)?.id;
@@ -2521,6 +2620,13 @@ function ChatPanel({
               </span>
             </div>
           );
+          if (item.kind === 'note')
+            return (
+              <Fragment key={item.id}>
+                {separator}
+                <NoteBubble note={item.n} teammateNames={teammateNames} />
+              </Fragment>
+            );
           if (item.kind === 'activity')
             return (
               <Fragment key={item.id}>
@@ -2611,6 +2717,9 @@ function ChatPanel({
           </div>
         )}
 
+        {mention && !isClosed && (
+          <MentionMenu members={mentionItems} loading={members === null} active={mentionActive} onHover={setMentionActive} onPick={pickMention} />
+        )}
         {quickSearch !== null && !isClosed && (
           <QuickReplyMenu
             query={quickSearch}
@@ -2637,12 +2746,23 @@ function ChatPanel({
               ? `Couldn't reopen this chat: ${reopenError}. Click it in the chat list to try again.`
               : 'This chat is closed. Click it in the chat list to reopen it.'}
           </p>
-        ) : !conversation.assignee && !editing && viewer?.role !== 'supervisor' && !viewer?.isAdmin ? (
+        ) : !conversation.assignee && !editing && !noting && viewer?.role !== 'supervisor' && !viewer?.isAdmin ? (
           // New Lead, as an agent: take it before replying (the server refuses agents' replies too). Owners, admins
-          // and supervisors get the normal composer and may reply without taking the chat.
+          // and supervisors get the normal composer and may reply without taking the chat. An internal note doesn't
+          // need the chat: "Add note" opens the note box (its Reply tab comes back here).
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-3 rounded-xl bg-primary-subtle px-4 py-2.5 text-xs">
               <span className="text-body">New lead: assign it to yourself to reply to the customer.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('note');
+                  requestAnimationFrame(() => inputRef.current?.focus());
+                }}
+                className="ml-auto shrink-0 rounded-lg border border-warning-border bg-warning-soft px-3 py-1.5 font-semibold text-warning hover:bg-warning-soft-hover"
+              >
+                Add note
+              </button>
               <button
                 type="button"
                 onClick={onClaim}
@@ -2698,6 +2818,28 @@ function ChatPanel({
           {!noting && !(windowClosed && !editing) && <TemplatePicker disabled={!!editing} highlight={false} onPick={setTemplate} />}
           
         </div>
+        {noting && noteFiles.length > 0 && (
+          <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Files for this note">
+            {noteFiles.map((f, i) => (
+              <li key={`${f.name}:${i}`} className="flex max-w-[240px] items-center gap-2 rounded-lg border border-warning-border bg-warning-soft px-2 py-1 text-[12px]">
+                <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[9px] font-bold text-body-soft">{documentLabel(f.type, f.name)}</span>
+                <span className="min-w-0 truncate text-ink" title={f.name}>
+                  {f.name}
+                </span>
+                <span className="shrink-0 text-[10px] text-faint">{formatSize(f.size)}</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setNoteFiles((prev) => prev.filter((_, j) => j !== i))}
+                  aria-label={`Remove ${f.name}`}
+                  className="shrink-0 rounded px-1 text-faint hover:text-ink disabled:opacity-40"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {template && !noting && !editing ? (
           // A chosen template: filled in, previewed and sent right here (inside or outside the 24-hour window)
           <TemplateComposer
@@ -2734,8 +2876,8 @@ function ChatPanel({
             // Over WhatsApp's limit for one message: kept as typed, nothing sent (the warning above says why)
             if (!noting && overLimit(text, WHATSAPP_TEXT_MAX)) return setError(tooLongText(text, WHATSAPP_TEXT_MAX));
             if (editing) return void saveEdit();
+            if (noting) return void saveNote(text); // a note may be files only
             if (!text.trim()) return;
-            if (noting) return void saveNote(text);
             send(text);
             setText('');
           }}
@@ -2775,6 +2917,34 @@ function ChatPanel({
               pickFile(f);
             }}
           />
+          {noting && (
+            <>
+              <input
+                ref={noteFileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPT}
+                className="hidden"
+                aria-hidden="true"
+                onChange={(e) => {
+                  addNoteFiles(e.target.files);
+                  e.target.value = ''; // the same file can be chosen again
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => noteFileInputRef.current?.click()}
+                disabled={busy || noteFiles.length >= NOTE_FILES_MAX}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-faint transition hover:bg-surface-strong hover:text-body-soft disabled:opacity-40"
+                title="Attach images or documents to the note (only your team sees them)"
+                aria-label="Attach files to the note"
+              >
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
+            </>
+          )}
           {!noting && (
           <button
             type="button"
@@ -2797,11 +2967,33 @@ function ChatPanel({
             value={text}
             onChange={(e) => {
               setText(e.target.value);
+              setCaret(e.target.selectionStart);
               setQuickClosed(false); // Esc hides the menu only until the text changes
+              setMentionClosed(false);
               typingSender.onInput(e.target.value);
             }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onBlur={typingSender.stop}
             onKeyDown={(e) => {
+              if (mention) {
+                const count = mentionItems.length;
+                if (e.key === 'ArrowDown' && count) {
+                  e.preventDefault();
+                  return setMentionActive((i) => (i + 1) % count);
+                }
+                if (e.key === 'ArrowUp' && count) {
+                  e.preventDefault();
+                  return setMentionActive((i) => (i - 1 + count) % count);
+                }
+                if (((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') && count && !e.nativeEvent.isComposing) {
+                  e.preventDefault(); // insert the teammate, don't save the note
+                  return pickMention(mentionItems[Math.min(mentionActive, count - 1)]);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault(); // closes the list only (not the chat)
+                  return setMentionClosed(true);
+                }
+              }
               if (quickSearch !== null) {
                 const count = quick.items.length;
                 if (e.key === 'ArrowDown' && count) {
@@ -2865,7 +3057,7 @@ function ChatPanel({
           ) : (
           <button
             type="submit"
-            disabled={!text.trim() || busy}
+            disabled={(!text.trim() && !(noting && noteFiles.length)) || busy}
             className="flex h-9 items-center justify-center gap-1.5 rounded-xl bg-primary px-4 text-xs font-semibold text-on-primary shadow-xs hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
             <span>{editing ? (busy ? 'Saving…' : 'Save') : noting ? (busy ? 'Saving…' : 'Add note') : 'Send'}</span>

@@ -21,6 +21,8 @@ import {
   clearToast,
   removedAsCollaboratorText,
   newChatText,
+  type MentionEvent,
+  mentionedYouText,
   reminderText,
   removedFromYouText,
   showToast,
@@ -103,7 +105,7 @@ export function settingsReturnPath() {
 }
 
 // Pages that show the chat list and conversation (the inbox page component): a toast click opens the chat in place
-const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations'];
+const CHAT_PAGES = ['/inbox', '/my-chats', '/leads', '/collaborations', '/mentions'];
 export const OPEN_CHAT_EVENT = 'app:open-chat';
 
 // Slim Left Icon Rail + Full App Shell
@@ -220,6 +222,12 @@ export function AppShell({
     socket.on('collaborator:removed', (e: { conversationId: string; actorName: string | null; contactName: string }) => {
       const t = removedAsCollaboratorText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
+    });
+    // A teammate @mentioned you in a note: a pop-up (sound and desktop pop-up too while you're in another tab)
+    socket.on('mention:you', (e: MentionEvent) => {
+      const t = mentionedYouText(e);
+      showToast(t.key, e.conversationId, t.message, t.detail);
+      alertHidden(t.message, t.detail, `mention-${e.conversationId}`, e.conversationId);
     });
     socket.on('chat:new', (e: { conversationId: string; contactName: string }) => {
       const t = newChatText(e);
@@ -451,7 +459,7 @@ export function AppShell({
                 <p className="px-2 pb-1.5 text-[10px] font-bold tracking-wider text-faint uppercase">
                   CONVERSATIONS
                 </p>
-                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', 'Collaborations', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
+                {menuQuery.trim() && !['Inbox', 'New Leads', 'My Chats', 'Collaborations', 'Mentions', ...(isAdminRole(me.role) ? ['Teams', 'Reports'] : [])].some(showItem) && (
                   <p className="px-2.5 py-2 text-[11px] text-faint">No menu item matches “{menuQuery.trim()}”</p>
                 )}
                 <div className="space-y-0.5">
@@ -489,6 +497,22 @@ export function AppShell({
                         <path d="M19 8v6M22 11h-6" />
                       </svg>
                       <span>Collaborations</span>
+                    </Link>
+                  )}
+                  {showItem('Mentions') && (
+                    <Link
+                      href="/mentions"
+                      scroll={false}
+                      className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition ${
+                        pathname === '/mentions'
+                          ? 'bg-secondary text-on-primary shadow-2xs'
+                          : 'text-body hover:bg-surface-strong'
+                      }`}
+                    >
+                      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /><circle cx="12" cy="12" r="4" />
+                      </svg>
+                      <span>Mentions</span>
                     </Link>
                   )}
                   {showItem('Inbox') && (
@@ -785,6 +809,20 @@ export function AppShell({
                   </svg>
                 </Link>
                 <Link
+                  href="/mentions"
+                  scroll={false}
+                  title="Mentions"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+                    pathname === '/mentions'
+                      ? 'bg-secondary text-on-primary shadow-2xs'
+                      : 'text-faint hover:bg-surface-strong hover:text-body'
+                  }`}
+                >
+                  <svg className="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /><circle cx="12" cy="12" r="4" />
+                  </svg>
+                </Link>
+                <Link
                   href="/inbox"
                   scroll={false}
                   title="Inbox"
@@ -923,7 +961,7 @@ export function AppShell({
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-ink">{pathname.startsWith('/contacts/') ? 'View contact details' : pathname.startsWith('/settings') ? 'Settings' : pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
+                <h1 className="text-base font-bold tracking-tight text-ink">{pathname.startsWith('/contacts/') ? 'View contact details' : pathname.startsWith('/settings') ? 'Settings' : pathname === '/account' ? 'My account' : pathname === '/teams' ? 'Teams' : pathname === '/reports' ? 'Reports' : pathname === '/my-chats' ? 'My Chats' : pathname === '/collaborations' ? 'Collaborations' : pathname === '/mentions' ? 'Mentions' : pathname === '/leads' ? 'New Leads' : 'Inbox'}</h1>
                 {isConnected ? (
                   <span className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full border border-primary-soft-border bg-primary-soft px-2.5 py-0.5 text-[11px] font-semibold text-primary">
                     <span className="h-1.5 w-1.5 rounded-full bg-accent" />

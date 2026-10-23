@@ -1,4 +1,4 @@
-import { gql } from './api';
+import { API_URL, getToken, gql } from './api';
 import { phoneCountries } from './profileOptions';
 import { currentTimeZone, formatDateTime } from './time';
 
@@ -28,7 +28,9 @@ export type ContactProfile = {
   createdAt: string;
   updatedAt: string;
 };
-export type ContactRemark = { id: string; contactId: string; body: string; createdById: string | null; authorName: string | null; createdAt: string; editedAt: string | null };
+// A file on an internal note (image or document): only the team can open it, never sent to WhatsApp
+export type RemarkFile = { id: string; name: string; mime: string; size: number };
+export type ContactRemark = { id: string; contactId: string; body: string; createdById: string | null; authorName: string | null; createdAt: string; editedAt: string | null; files: RemarkFile[] };
 // Lead stages also carry their id, colour, whether they're a Lost stage (`closed`) and the default (new contacts)
 export type ContactOption = { value: string; label: string; color?: string | null; closed?: boolean | null; id?: string | null; isDefault?: boolean | null };
 export type ContactFieldOptions = { leadStages: ContactOption[]; leadSources: ContactOption[]; priorities: ContactOption[]; remarkMaxLength: number };
@@ -37,7 +39,7 @@ export type EditableField = 'firstName' | 'lastName' | 'email' | 'companyName' |
 export type ChatDetails = { channel: string; lastOutboundAt: string | null; lastInboundAt: string | null };
 
 const FIELDS = 'id waId name firstName lastName email companyName jobTitle leadStage leadSource priority country phoneCountry subscribed waBsuid waUsername lists { id name } customValues { propertyId value } conversationId createdAt updatedAt';
-const REMARK_FIELDS = 'id contactId body createdById authorName createdAt editedAt';
+const REMARK_FIELDS = 'id contactId body createdById authorName createdAt editedAt files { id name mime size }';
 
 export async function fetchContact(id: string) {
   return (await gql<{ contact: ContactProfile }>(`query Contact($id: ID!) { contact(id: $id) { ${FIELDS} } }`, { id })).contact;
@@ -45,11 +47,58 @@ export async function fetchContact(id: string) {
 export async function updateContact(id: string, input: Partial<Record<EditableField, string | boolean>>) {
   return (await gql<{ updateContact: ContactProfile }>(`mutation UpdateContact($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { ${FIELDS} } }`, { id, i: input })).updateContact;
 }
+// Internal notes shown in a chat (yellow bubbles): its customer's remarks, oldest first (after Clear chat, only later ones)
+export async function fetchChatNotes(conversationId: string) {
+  return (await gql<{ chatNotes: ContactRemark[] }>(`query ChatNotes($c: ID!) { chatNotes(conversationId: $c) { ${REMARK_FIELDS} } }`, { c: conversationId })).chatNotes;
+}
 export async function fetchRemarks(contactId: string) {
   return (await gql<{ contactRemarks: ContactRemark[] }>(`query Remarks($c: ID!) { contactRemarks(contactId: $c) { ${REMARK_FIELDS} } }`, { c: contactId })).contactRemarks;
 }
-export async function addRemark(contactId: string, body: string) {
-  return (await gql<{ addContactRemark: ContactRemark }>(`mutation AddRemark($c: ID!, $b: String!) { addContactRemark(contactId: $c, body: $b) { ${REMARK_FIELDS} } }`, { c: contactId, b: body })).addContactRemark;
+// mentions: user ids of the teammates @mentioned in it (they see the chat in Mentions and are notified)
+// files: ids from uploadRemarkFile (attached to the note when it's saved; with files the text may be empty)
+export async function addRemark(contactId: string, body: string, mentions: string[] = [], files: string[] = []) {
+  return (
+    await gql<{ addContactRemark: ContactRemark }>(
+      `mutation AddRemark($c: ID!, $b: String!, $m: [ID!], $f: [ID!]) { addContactRemark(contactId: $c, body: $b, mentions: $m, files: $f) { ${REMARK_FIELDS} } }`,
+      { c: contactId, b: body, m: mentions.length ? mentions : null, f: files.length ? files : null },
+    )
+  ).addContactRemark;
+}
+
+// Add note → 📎: upload one file for a note (saved with it by addRemark). Up to NOTE_FILES_MAX per note.
+export const NOTE_FILES_MAX = 10;
+export async function uploadRemarkFile(contactId: string, file: File): Promise<RemarkFile> {
+  const res = await fetch(`${API_URL}/inbox/contacts/${encodeURIComponent(contactId)}/remark-files?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken() ?? ''}`, 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `Couldn't upload ${file.name} (${res.status})`);
+  return data as RemarkFile;
+}
+
+// A note's file as a local link (fetched with the sign-in token; the team only), kept for this page
+const remarkFileUrls = new Map<string, Promise<string>>();
+export function remarkFileUrl(id: string) {
+  let p = remarkFileUrls.get(id);
+  if (!p) {
+    p = fetch(`${API_URL}/inbox/remark-files/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${getToken() ?? ''}` } }).then(async (r) => {
+      if (!r.ok) throw new Error(r.status === 404 ? 'File not available' : `Couldn't load the file (${r.status})`);
+      return URL.createObjectURL(await r.blob());
+    });
+    p.catch(() => remarkFileUrls.delete(id));
+    remarkFileUrls.set(id, p);
+  }
+  return p;
+}
+export async function downloadRemarkFile(f: RemarkFile) {
+  const a = document.createElement('a');
+  a.href = await remarkFileUrl(f.id);
+  a.download = f.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 export async function updateRemark(id: string, body: string) {
   return (await gql<{ updateContactRemark: ContactRemark }>(`mutation UpdateRemark($id: ID!, $b: String!) { updateContactRemark(id: $id, body: $b) { ${REMARK_FIELDS} } }`, { id, b: body })).updateContactRemark;

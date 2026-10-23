@@ -87,6 +87,15 @@ const nextConfig: NextConfig = {
         destination: `${API}/inbox/messages/:id/media`,
       },
       {
+        // Internal notes: uploading a file for a note (the file is the body), and opening one (the team only)
+        source: '/inbox/contacts/:id/remark-files',
+        destination: `${API}/inbox/contacts/:id/remark-files`,
+      },
+      {
+        source: '/inbox/remark-files/:id',
+        destination: `${API}/inbox/remark-files/:id`,
+      },
+      {
         source: '/me/avatar',
         destination: `${API}/me/avatar`,
       },

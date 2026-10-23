@@ -1,6 +1,7 @@
 import express, { Router } from 'express';
 import { requireAuth } from '../auth.js';
 import { sendTemplateMessage } from '../services/templates.js';
+import { readRemarkFile, uploadRemarkFile } from '../services/contacts.js';
 import { withSender } from '../services/senders.js';
 import { env } from '../env.js';
 import { sweepPresence } from '../presence.js';
@@ -84,6 +85,23 @@ inboxRouter.post('/conversations/:id/template', express.raw({ type: () => true, 
     { bytes: body, mime: req.headers['content-type'], name: typeof req.query.fileName === 'string' ? req.query.fileName : undefined },
   );
   res.json(await withSender(sent));
+});
+
+// A file for an internal note (Add note → 📎): the body is the file, ?name= its name. Returns its id, attached when the
+// note is saved (addContactRemark files). Never sent to WhatsApp.
+inboxRouter.post('/contacts/:id/remark-files', express.raw({ type: () => true, limit: '100mb' }), async (req, res) => {
+  const body = Buffer.isBuffer(req.body) && req.body.length ? req.body : undefined;
+  res.json(await uploadRemarkFile(req.auth!, req.params.id, body, req.headers['content-type'], req.query.name));
+});
+
+// A note's file, for the team only (signed in, same workspace)
+inboxRouter.get('/remark-files/:id', async (req, res) => {
+  const { bytes, mime, name } = await readRemarkFile(req.auth!, req.params.id);
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(bytes);
 });
 
 inboxRouter.get('/messages/:id/media', async (req, res) => {

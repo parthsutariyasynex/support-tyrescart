@@ -2,7 +2,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { z } from 'zod';
 import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
-import { emitToWorkspace } from '../realtime.js';
+import { emitToUser, emitToWorkspace } from '../realtime.js';
 import { clearedAt } from './conversationClear.js';
 import { previewOf, recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
@@ -11,6 +11,10 @@ import { choicesOf, requireChoice } from './fieldChoices.js';
 import { listLeadStages, requireStageValue } from './leadStages.js';
 import { getPermissions, requireAdmin } from './permissions.js';
 import { parse } from './validate.js';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { env } from '../env.js';
+import { checkFile, cleanFileName } from './inbox.js';
 
 // Customer profile (chat side panel): "Contact property" fields and "Remarks" (internal notes).
 // Every member of the workspace (owner, admin, supervisor, agent) can view and edit them; a remark can be deleted
@@ -147,14 +151,130 @@ async function logFieldChanges(auth: AuthPayload, before: Record<string, unknown
 async function logRemark(auth: AuthPayload, contactId: string, type: 'remark_added' | 'remark_edited' | 'remark_deleted', body: string) {
   const conversationId = await conversationOf(auth.workspaceId, contactId);
   if (conversationId) await recordActivity({ workspaceId: auth.workspaceId, conversationId, actorId: auth.userId, type, data: { text: previewOf(body, 500) } });
+  return conversationId;
+}
+
+// --- @mentions in notes. One note_mention activity per person and note (data: remarkId, mentionedUserId, text): it
+// puts the chat in that person's Mentions list and stays in their 🔔 (so a mention made while they were offline is
+// still there). Editing the note adds and removes them to match its @Names; deleting the note removes them.
+type MentionPerson = { id: string; name: string };
+
+// The note's current mention records: who is mentioned
+async function mentionsOf(workspaceId: string, remarkId: string) {
+  const rows = await prisma.activityEvent.findMany({ where: { workspaceId, type: 'note_mention', data: { path: '$.remarkId', equals: remarkId } }, select: { id: true, data: true } });
+  return rows.map((r) => ({ id: r.id, userId: (r.data as { mentionedUserId?: string } | null)?.mentionedUserId ?? '' }));
+}
+
+// Tell each newly mentioned person: their bell (kept) and a pop-up now if they're online (mention:you)
+async function mentionPeople(auth: AuthPayload, conversationId: string, contact: { name: string | null; waId: string }, remarkId: string, people: MentionPerson[], text: string) {
+  if (!people.length) return;
+  const actor = await prisma.user.findUnique({ where: { id: auth.userId }, select: { name: true } });
+  const preview = previewOf(text, 200);
+  const event = { conversationId, actorName: actor?.name ?? null, contactName: contact.name || `+${contact.waId}`, text: preview };
+  for (const p of people) {
+    await recordActivity({ workspaceId: auth.workspaceId, conversationId, actorId: auth.userId, type: 'note_mention', data: { remarkId, mentionedUserId: p.id, text: preview } });
+    emitToUser(auth.workspaceId, p.id, 'mention:you', event);
+  }
+}
+
+// Someone's Mentions list or bell changed without a new mention (a note edited or deleted): their screens reload them
+const mentionsChanged = (workspaceId: string, userIds: string[]) => {
+  for (const id of new Set(userIds)) emitToUser(workspaceId, id, 'mentions:changed', {});
+};
+
+// Teammates whose "@Name" is in the text (a mention starts a word and ends where the name does): active members of
+// the workspace, never the person writing. Used when a note is edited (adding a note gets the picked ids).
+async function mentionedInText(auth: AuthPayload, text: string): Promise<MentionPerson[]> {
+  if (!text.includes('@')) return [];
+  const members = await prisma.member.findMany({ where: { workspaceId: auth.workspaceId, active: true, userId: { not: auth.userId } }, select: { user: { select: { id: true, name: true } } } });
+  const escape = (n: string) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return members
+    .map((m) => m.user)
+    .filter((u) => u.name.trim() && new RegExp(`(^|\\s)@${escape(u.name.trim())}(?![\\p{L}\\p{N}])`, 'u').test(text));
+}
+
+// @mentions in a note ("Add note" → @): only active members of this workspace, never yourself, each once
+async function mentionedMembers(auth: AuthPayload, raw: unknown): Promise<{ id: string; name: string }[]> {
+  if (raw == null) return [];
+  const ids = [...new Set(parse(z.array(z.string().min(1).max(64)).max(100), raw))].filter((id) => id !== auth.userId);
+  if (!ids.length) return [];
+  const members = await prisma.member.findMany({ where: { workspaceId: auth.workspaceId, active: true, userId: { in: ids } }, select: { user: { select: { id: true, name: true } } } });
+  if (members.length !== ids.length) throw new AppError('Mention teammates of this workspace', 400, 'BAD_USER_INPUT');
+  return members.map((m) => m.user);
 }
 
 // --- Remarks
 
-async function withAuthors<T extends { createdById: string | null }>(rows: T[]) {
+// Each remark with its author's name and its attached files (in the order they were added)
+async function withAuthors<T extends { id: string; createdById: string | null }>(rows: T[]) {
   const ids = [...new Set(rows.map((r) => r.createdById).filter((x): x is string => !!x))];
   const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
-  return rows.map((r) => ({ ...r, authorName: users.find((u) => u.id === r.createdById)?.name ?? null }));
+  const files = rows.length
+    ? await prisma.remarkFile.findMany({ where: { remarkId: { in: rows.map((r) => r.id) } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, remarkId: true, name: true, mime: true, size: true } })
+    : [];
+  return rows.map((r) => ({
+    ...r,
+    authorName: users.find((u) => u.id === r.createdById)?.name ?? null,
+    files: files.filter((f) => f.remarkId === r.id).map(({ remarkId: _, ...f }) => f),
+  }));
+}
+
+// --- Files on internal notes (Add note → 📎). Uploaded one by one first (kept with no note yet), then attached when
+// the note is saved. Images (JPEG, PNG) and documents (PDF, Word, Excel, PowerPoint, text), checked by their actual
+// bytes like chat files, stored in the uploads folder. Only signed-in teammates of the workspace can open them; they are
+// never sent to WhatsApp or the customer.
+export const NOTE_FILES_MAX = 10;
+const PENDING_KEEP_MS = 24 * 60 * 60 * 1000; // uploaded but never saved with a note: removed after a day
+
+export async function uploadRemarkFile(auth: AuthPayload, contactId: string, bytes: Buffer | undefined, rawMime: string | undefined, rawName: unknown) {
+  await getPermissions(auth);
+  await requireContact(auth.workspaceId, contactId);
+  const kind = (rawMime ?? '').toLowerCase().startsWith('image/') ? 'image' : 'document';
+  const { mime, ext } = checkFile(bytes, rawMime, kind);
+  const row = await prisma.remarkFile.create({
+    data: { workspaceId: auth.workspaceId, contactId, path: '', name: cleanFileName(rawName, ext), mime, size: bytes!.length, createdById: auth.userId },
+  });
+  const relative = path.join(auth.workspaceId, 'notes', `${row.id}.${ext}`);
+  await mkdir(path.join(env.uploadsDir, auth.workspaceId, 'notes'), { recursive: true });
+  await writeFile(path.join(env.uploadsDir, relative), bytes!);
+  await prisma.remarkFile.update({ where: { id: row.id }, data: { path: relative } });
+  void removePendingFiles(auth); // tidy up this person's abandoned uploads
+  return { id: row.id, name: row.name, mime, size: row.size };
+}
+
+async function removeFiles(rows: { id: string; path: string }[]) {
+  if (!rows.length) return;
+  await prisma.remarkFile.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+  for (const r of rows) if (r.path) await unlink(path.join(env.uploadsDir, r.path)).catch(() => {});
+}
+async function removePendingFiles(auth: AuthPayload) {
+  const old = await prisma.remarkFile.findMany({
+    where: { workspaceId: auth.workspaceId, createdById: auth.userId, remarkId: null, createdAt: { lt: new Date(Date.now() - PENDING_KEEP_MS) } },
+    select: { id: true, path: true },
+  });
+  await removeFiles(old).catch(() => {});
+}
+
+// The file itself, for any teammate of the workspace once it's on a note (before that, only for whoever uploaded it)
+export async function readRemarkFile(auth: AuthPayload, id: string) {
+  await getPermissions(auth);
+  const f = await prisma.remarkFile.findFirst({ where: { id, workspaceId: auth.workspaceId, OR: [{ remarkId: { not: null } }, { createdById: auth.userId }] } });
+  if (!f?.path) throw notFound('File');
+  try {
+    return { bytes: await readFile(path.join(env.uploadsDir, f.path)), mime: f.mime, name: f.name };
+  } catch {
+    throw notFound('File');
+  }
+}
+
+// The files the author uploaded for this customer and is now saving with a note
+async function pendingFiles(auth: AuthPayload, contactId: string, raw: unknown) {
+  if (raw == null) return [];
+  const ids = [...new Set(parse(z.array(z.string().min(1).max(64)).max(NOTE_FILES_MAX, `Up to ${NOTE_FILES_MAX} files per note`), raw))];
+  if (!ids.length) return [];
+  const rows = await prisma.remarkFile.findMany({ where: { id: { in: ids }, workspaceId: auth.workspaceId, contactId, createdById: auth.userId, remarkId: null }, select: { id: true } });
+  if (rows.length !== ids.length) throw new AppError('Attach the files again: some of them are no longer available', 400, 'BAD_USER_INPUT');
+  return ids;
 }
 
 // Newest first
@@ -165,21 +285,44 @@ export async function listRemarks(auth: AuthPayload, contactId: string) {
   return withAuthors(rows);
 }
 
+// Internal notes in the chat (yellow bubbles between the messages): the chat customer's remarks, oldest first, after
+// "Clear chat" for this user only what came later (like the messages). Read-only here; notes are never sent to
+// WhatsApp or the customer (they are only ever stored as remarks).
+export async function listChatNotes(auth: AuthPayload, conversationId: string) {
+  await getPermissions(auth);
+  const conversation = await requireConversation(auth.workspaceId, conversationId);
+  const hideBefore = await clearedAt(auth.userId, conversationId);
+  const rows = await prisma.contactRemark.findMany({
+    where: { contactId: conversation.contactId, workspaceId: auth.workspaceId, ...(hideBefore ? { createdAt: { gt: hideBefore } } : {}) },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return withAuthors(rows);
+}
+
 const remarkSchema = z
   .string({ message: 'Remark must be text' })
   .trim()
   .min(1, 'Write a remark first')
   .max(REMARK_MAX_LENGTH, `Remark is too long (max ${REMARK_MAX_LENGTH} characters)`);
+// A note with files may have no text
+const remarkTextOrEmpty = z.string({ message: 'Remark must be text' }).trim().max(REMARK_MAX_LENGTH, `Remark is too long (max ${REMARK_MAX_LENGTH} characters)`);
 
 const announceRemarks = (workspaceId: string, contactId: string) => emitToWorkspace(workspaceId, 'contact:remarks', { contactId });
 
-export async function addRemark(auth: AuthPayload, contactId: string, body: string) {
+// mentions: user ids of teammates @mentioned in the note. Each gets the chat in their Mentions list and is told at once
+// (mention:you: a pop-up and a desktop notification)
+// files: ids of images / documents uploaded for it (uploadRemarkFile); with files the text may be empty
+export async function addRemark(auth: AuthPayload, contactId: string, body: string, mentions?: unknown, files?: unknown) {
   await getPermissions(auth);
-  await requireContact(auth.workspaceId, contactId);
-  const text = parse(remarkSchema, body);
+  const contact = await requireContact(auth.workspaceId, contactId);
+  const fileIds = await pendingFiles(auth, contactId, files);
+  const text = fileIds.length ? parse(remarkTextOrEmpty, body ?? '') : parse(remarkSchema, body);
+  const mentioned = await mentionedMembers(auth, mentions);
   const row = await prisma.contactRemark.create({ data: { workspaceId: auth.workspaceId, contactId, body: text, createdById: auth.userId } });
+  if (fileIds.length) await prisma.remarkFile.updateMany({ where: { id: { in: fileIds }, remarkId: null }, data: { remarkId: row.id } });
   announceRemarks(auth.workspaceId, contactId);
-  await logRemark(auth, contactId, 'remark_added', text);
+  const conversationId = await logRemark(auth, contactId, 'remark_added', text);
+  if (conversationId) await mentionPeople(auth, conversationId, contact, row.id, mentioned, text);
   return (await withAuthors([row]))[0];
 }
 
@@ -194,17 +337,37 @@ async function requireOwnRemark(auth: AuthPayload, id: string, action: 'edit' | 
 
 export async function updateRemark(auth: AuthPayload, id: string, body: string) {
   const row = await requireOwnRemark(auth, id, 'edit');
-  const text = parse(remarkSchema, body);
+  const hasFiles = (await prisma.remarkFile.count({ where: { remarkId: id } })) > 0;
+  const text = parse(hasFiles ? remarkTextOrEmpty : remarkSchema, body);
   if (text === row.body) return (await withAuthors([row]))[0]; // unchanged: not marked as edited
   const updated = await prisma.contactRemark.update({ where: { id }, data: { body: text, editedAt: new Date(), editedById: auth.userId } });
   announceRemarks(auth.workspaceId, row.contactId);
-  await logRemark(auth, row.contactId, 'remark_edited', text);
+  const conversationId = await logRemark(auth, row.contactId, 'remark_edited', text);
+  // Mentions follow the edited text: an @Name taken out removes that mention (Mentions list, bell); a new one is
+  // mentioned (and told); the ones still there keep their mention, with the new text
+  if (conversationId) {
+    const before = await mentionsOf(auth.workspaceId, id);
+    const now = await mentionedInText(auth, text);
+    const gone = before.filter((m) => !now.some((p) => p.id === m.userId));
+    const kept = before.filter((m) => now.some((p) => p.id === m.userId));
+    const added = now.filter((p) => !before.some((m) => m.userId === p.id));
+    if (gone.length) await prisma.activityEvent.deleteMany({ where: { id: { in: gone.map((m) => m.id) } } });
+    for (const m of kept) await prisma.activityEvent.update({ where: { id: m.id }, data: { data: { remarkId: id, mentionedUserId: m.userId, text: previewOf(text, 200) } } });
+    const contact = await prisma.contact.findUniqueOrThrow({ where: { id: row.contactId }, select: { name: true, waId: true } });
+    await mentionPeople(auth, conversationId, contact, id, added, text);
+    mentionsChanged(auth.workspaceId, [...gone, ...kept].map((m) => m.userId));
+  }
   return (await withAuthors([updated]))[0];
 }
 
 export async function deleteRemark(auth: AuthPayload, id: string) {
   const row = await requireOwnRemark(auth, id, 'delete');
+  await removeFiles(await prisma.remarkFile.findMany({ where: { remarkId: id }, select: { id: true, path: true } })); // its files go too
+  // its mentions go too: off the Mentions lists and out of the bells
+  const mentions = await mentionsOf(auth.workspaceId, id);
+  if (mentions.length) await prisma.activityEvent.deleteMany({ where: { id: { in: mentions.map((m) => m.id) } } });
   await prisma.contactRemark.delete({ where: { id } });
+  mentionsChanged(auth.workspaceId, mentions.map((m) => m.userId));
   announceRemarks(auth.workspaceId, row.contactId);
   await logRemark(auth, row.contactId, 'remark_deleted', row.body);
   return true;

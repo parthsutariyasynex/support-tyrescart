@@ -3907,10 +3907,13 @@ describe('reminders for new unassigned chats, persisted timing, no duplicates', 
     reset();
     assert.equal(await check(later + 10 * MIN), 0);
     assert.deepEqual(got.agent, []);
-    // Unassigned again: assignedAt is cleared; read with no new message, so nobody is reminded
+    // Unassigned again: assignedAt is cleared and it's an unclaimed lead again (back in New Leads), so - as for any
+    // unclaimed lead, read or not (ad27eae) - every member is reminded until someone takes it
     await ok(`mutation($c: ID!, $m: ID, $r: String) { assignConversation(conversationId: $c, memberId: $m, reason: $r) { id } }`, { c: chatId, m: null, r: 'back' }, ws.token);
     assert.equal((await row()).assignedAt, null);
-    assert.equal(await check(later + 20 * MIN), 0);
+    reset();
+    assert.equal(await check(later + 20 * MIN), 2);
+    for (const who of ['owner', 'agent']) assert.deepEqual(got[who].map((e) => e.chats.map((c: any) => c.kind)), [['unassigned']], who);
   });
 
   test('a closed chat is not reminded', async () => {

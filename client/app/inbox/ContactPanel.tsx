@@ -51,6 +51,7 @@ import { useStagesChanged } from './StageMenu';
 import { MediaViewer } from './composerExtras';
 import { downloadFile } from '@/lib/media';
 import { overLimit } from '@/lib/textLimits';
+import { NoteFiles } from './NoteBubble';
 import { filterDialCountries } from '@/lib/profileOptions';
 import { SearchSelect } from '../SearchSelect';
 
@@ -623,7 +624,8 @@ export function Remarks({
                 </div>
               ) : (
                 <>
-                  <p className="whitespace-pre-wrap break-words text-xs text-ink">{r.body}</p>
+                  {r.body && <p className="whitespace-pre-wrap break-words text-xs text-ink">{r.body}</p>}
+                  <NoteFiles files={r.files} className={r.body ? 'mt-1.5' : ''} />
                   <div className="mt-1 flex items-start justify-between gap-2">
                     <span className="min-w-0 text-[10px] leading-4 text-muted" title={r.editedAt ? `Edited ${formatDateTime(r.editedAt)}` : undefined}>
                       {r.authorName ?? 'Former member'} · {formatDateTime(r.createdAt)}

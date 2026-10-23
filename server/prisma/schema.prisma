@@ -41,35 +41,35 @@ model User {
 }
 
 model Workspace {
-  id             String                @id @default(cuid())
-  name           String
-  createdAt      DateTime              @default(now())
+  id               String                  @id @default(cuid())
+  name             String
+  createdAt        DateTime                @default(now())
   // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
   // --- deletes stay as they are) ---
-  createdBy      String?
-  updatedAt      DateTime              @default(now()) @updatedAt
-  updatedBy      String?
-  deletedAt      DateTime?
-  deletedBy      String?
+  createdBy        String?
+  updatedAt        DateTime                @default(now()) @updatedAt
+  updatedBy        String?
+  deletedAt        DateTime?
+  deletedBy        String?
   // active | inactive (record status)
-  status         String                @default("active")
-  members        Member[]
-  whatsapp       WhatsAppAccount?
-  contacts       Contact[]
-  conversations  Conversation[]
-  labels         Label[]
-  activity       ActivityEvent[]
-  quickReplies   QuickReply[]
-  assignments    AssignmentRecord[]
-  contactRemarks ContactRemark[]
-  contactLists   ContactList[]
-  propertyViews  ContactPropertyView[]
-  propertyDefault ContactPropertyDefault?
+  status           String                  @default("active")
+  members          Member[]
+  whatsapp         WhatsAppAccount?
+  contacts         Contact[]
+  conversations    Conversation[]
+  labels           Label[]
+  activity         ActivityEvent[]
+  quickReplies     QuickReply[]
+  assignments      AssignmentRecord[]
+  contactRemarks   ContactRemark[]
+  contactLists     ContactList[]
+  propertyViews    ContactPropertyView[]
+  propertyDefault  ContactPropertyDefault?
   customProperties ContactCustomProperty[]
-  leadStages     LeadStage[]
-  settings       WorkspaceSettings?
-  automation     AutomationSettings?
-  fieldChoices   ContactFieldChoice[]
+  leadStages       LeadStage[]
+  settings         WorkspaceSettings?
+  automation       AutomationSettings?
+  fieldChoices     ContactFieldChoice[]
 }
 
 model Member {
@@ -123,44 +123,44 @@ model WhatsAppAccount {
 }
 
 model Contact {
-  id            String              @id @default(cuid())
+  id            String               @id @default(cuid())
   workspaceId   String
   waId          String // phone number in international format, no +
   name          String?
-  tags          String              @default("") // comma separated; use a Tag table later
+  tags          String               @default("") // comma separated; use a Tag table later
   // --- Profile (chat side panel "Contact property"; all optional, edited by the team) ---
-  firstName     String?             @db.VarChar(100)
-  lastName      String?             @db.VarChar(100)
-  email         String?             @db.VarChar(191)
-  companyName   String?             @db.VarChar(150)
-  jobTitle      String?             @db.VarChar(100)
+  firstName     String?              @db.VarChar(100)
+  lastName      String?              @db.VarChar(100)
+  email         String?              @db.VarChar(191)
+  companyName   String?              @db.VarChar(150)
+  jobTitle      String?              @db.VarChar(100)
   // new | contacted | qualified | proposal | won | lost
-  leadStage     String?             @db.VarChar(20)
+  leadStage     String?              @db.VarChar(20)
   // whatsapp | website | referral | walk_in | phone_call | social_media | other
-  leadSource    String?             @db.VarChar(20)
+  leadSource    String?              @db.VarChar(20)
   // low | medium | high | urgent
-  priority      String?             @db.VarChar(10)
+  priority      String?              @db.VarChar(10)
   // Set by the team; when empty the panel shows the country of the phone number's calling code
-  country       String?             @db.VarChar(100)
+  country       String?              @db.VarChar(100)
   // Whether the customer wants messages from you (team-managed; new contacts start subscribed)
-  subscribed    Boolean             @default(true)
+  subscribed    Boolean              @default(true)
   // From WhatsApp's webhook when it sends them: business-scoped user ID and the customer's WhatsApp username
-  waBsuid       String?             @db.VarChar(191)
-  waUsername    String?             @db.VarChar(100)
+  waBsuid       String?              @db.VarChar(191)
+  waUsername    String?              @db.VarChar(100)
   remarks       ContactRemark[]
   customValues  ContactCustomValue[]
   listMembers   ContactListMember[]
-  createdAt     DateTime            @default(now())
+  createdAt     DateTime             @default(now())
   // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
   // --- deletes stay as they are) ---
   createdBy     String?
-  updatedAt     DateTime            @default(now()) @updatedAt
+  updatedAt     DateTime             @default(now()) @updatedAt
   updatedBy     String?
   deletedAt     DateTime?
   deletedBy     String?
   // active | inactive (record status)
-  status        String              @default("active")
-  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  status        String               @default("active")
+  workspace     Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
   @@unique([workspaceId, waId])
@@ -225,47 +225,47 @@ model Conversation {
 }
 
 model Message {
-  id             String            @id @default(cuid())
-  conversationId String
-  waMessageId    String?           @unique
-  direction      String // in | out
-  type           String // text | template | image | ...
-  body           String            @db.Text
-  status         String            @default("sent") // pending | sent | delivered | read | failed
-  error          String?           @db.Text
+  id               String            @id @default(cuid())
+  conversationId   String
+  waMessageId      String?           @unique
+  direction        String // in | out
+  type             String // text | template | image | ...
+  body             String            @db.Text
+  status           String            @default("sent") // pending | sent | delivered | read | failed
+  error            String?           @db.Text
   // Images and documents your team sends, and media customers send (downloaded from WhatsApp): a copy kept on the
   // server (path under UPLOADS_DIR), its type and size in bytes. Null for text and templates.
-  mediaPath      String?           @db.VarChar(255)
-  mediaMime      String?           @db.VarChar(100)
-  mediaSize      Int?
+  mediaPath        String?           @db.VarChar(255)
+  mediaMime        String?           @db.VarChar(100)
+  mediaSize        Int?
   // Documents: the file name shown in the chat and sent to WhatsApp
-  mediaName      String?           @db.VarChar(255)
+  mediaName        String?           @db.VarChar(255)
   // Media a customer sent: WhatsApp's id for it, used to download the file (then mediaPath is set)
-  waMediaId      String?           @db.VarChar(191)
-  createdAt      DateTime          @default(now())
+  waMediaId        String?           @db.VarChar(191)
+  createdAt        DateTime          @default(now())
   // Outgoing messages: the agent (user id) who sent it; null for customer messages and older rows
-  sentById       String?
-  editedAt       DateTime?
+  sentById         String?
+  editedAt         DateTime?
   // "Delete for everyone": body is cleared, the row stays so the conversation keeps its shape
-  deletedAt      DateTime?
-  deletedById    String?
+  deletedAt        DateTime?
+  deletedById      String?
   // Bumped on every edit/delete so concurrent edits and late socket events can't overwrite newer content
-  version        Int               @default(0)
+  version          Int               @default(0)
   // Reactions, like WhatsApp: one from the customer and one from the business (the team shares the business
   // number, so a teammate's reaction replaces another's). null = none.
-  customerReaction String?         @db.VarChar(32)
-  teamReaction     String?         @db.VarChar(32)
+  customerReaction String?           @db.VarChar(32)
+  teamReaction     String?           @db.VarChar(32)
   teamReactionById String?
   // Sent by Simple automations (e.g. "auto_reply"), not by a person; null for everything else
-  automation       String?         @db.VarChar(20)
+  automation       String?           @db.VarChar(20)
   // A reply, as in WhatsApp: the message in this chat it quotes (a teammate's reply, or a customer's reply to one
   // of ours); null for everything else
   replyToId        String?
   // --- standard audit fields (sentById = createdBy, deletedById = deletedBy, status = delivery status) ---
-  updatedAt      DateTime          @default(now()) @updatedAt
-  updatedBy      String?
-  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  revisions      MessageRevision[]
+  updatedAt        DateTime          @default(now()) @updatedAt
+  updatedBy        String?
+  conversation     Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  revisions        MessageRevision[]
 
   @@index([conversationId, createdAt])
 }
@@ -446,20 +446,42 @@ model QuickReply {
 
 // Internal notes about a customer (chat side panel "Remarks"). Seen only by the team, never sent to the customer.
 model ContactRemark {
-  id          String    @id @default(cuid())
+  id          String       @id @default(cuid())
   workspaceId String
   contactId   String
-  body        String    @db.Text
+  body        String       @db.Text
   createdById String?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime     @default(now())
   // Last edit (null = never edited) and who made it
   editedAt    DateTime?
   editedById  String?
-  contact     Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact     Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Images and documents attached to the note (Add note → 📎)
+  files       RemarkFile[]
 
   @@index([contactId, createdAt])
   @@index([workspaceId])
+}
+
+// A file attached to an internal note (Add note → 📎): an image or a document, kept in the uploads folder. Only the
+// team can open it (signed in, same workspace); it is never sent to WhatsApp or the customer. remarkId is null while
+// it's uploaded but the note isn't saved yet; deleting the note deletes its files.
+model RemarkFile {
+  id          String         @id @default(cuid())
+  workspaceId String
+  contactId   String
+  remarkId    String?
+  path        String         @db.VarChar(255)
+  name        String         @db.VarChar(255)
+  mime        String         @db.VarChar(100)
+  size        Int
+  createdById String?
+  createdAt   DateTime       @default(now())
+  remark      ContactRemark? @relation(fields: [remarkId], references: [id], onDelete: Cascade)
+
+  @@index([remarkId])
+  @@index([workspaceId, createdById, createdAt])
 }
 
 // Contact lists (profile panel "Lists"): named groups of customers, e.g. VIP or Leads. Every member can create lists
