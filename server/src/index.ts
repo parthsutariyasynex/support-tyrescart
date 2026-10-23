@@ -12,8 +12,6 @@ import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
-import { startFollowUps } from './services/followUps.js';
-import { startTemplateWatch } from './services/templateWatch.js';
 import { startSnoozeWaker } from './services/conversationStatus.js';
 import { startDeletedContactsPurge } from './services/deletedContacts.js';
 import { AppError } from './services/errors.js';
@@ -47,15 +45,11 @@ const server = createServer(app);
 initRealtime(server);
 server.listen(env.port, () => console.log(`API running on http://localhost:${env.port}`));
 const stopReminders = startAssignmentReminders();
-const stopFollowUps = startFollowUps();
-const stopTemplateWatch = startTemplateWatch();
 const stopSnoozeWaker = startSnoozeWaker();
 const stopPurge = startDeletedContactsPurge();
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
     stopReminders();
-    stopFollowUps();
-    stopTemplateWatch();
     stopSnoozeWaker();
     stopPurge();
   });

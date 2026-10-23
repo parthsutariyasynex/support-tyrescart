@@ -162,11 +162,6 @@ export async function sendTextMessage(conversationId: string, body: string, repl
   return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } })).sendTextMessage;
 }
 
-export async function sendTemplateMessage(conversationId: string, name: string, language?: string) {
-  const query = `mutation SendTemplate($input: SendTemplateInput!) { sendTemplateMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
-  return (await gql<{ sendTemplateMessage: Message }>(query, { input: { conversationId, name, language } }))
-    .sendTemplateMessage;
-}
 
 // My Chats: the chat's assignee is linked to this user's login. Never by name or email: unassigned chats and
 // name-only assignees (no userId) are never anyone's. (The server's "me" filter applies the same rule.)
@@ -183,9 +178,10 @@ export async function fetchMessageTemplates() {
   ).messageTemplates;
 }
 
+// A chat with this number: a new one, or the one it already has (startedNow false); never a second contact
 export async function startConversation(waId: string, name?: string) {
-  const query = `mutation StartConversation($input: StartConversationInput!) { startConversation(input: $input) { ${CONVERSATION_FIELDS} } }`;
-  return (await gql<{ startConversation: Conversation }>(query, { input: { waId, name } })).startConversation;
+  const query = `mutation StartConversation($input: StartConversationInput!) { startConversation(input: $input) { startedNow ${CONVERSATION_FIELDS} } }`;
+  return (await gql<{ startConversation: Conversation & { startedNow: boolean } }>(query, { input: { waId, name: name || undefined } })).startConversation;
 }
 
 export async function simulateIncomingMessage(input?: { waId?: string; name?: string; body?: string }) {

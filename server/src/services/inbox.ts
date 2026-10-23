@@ -6,18 +6,18 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isSupervisorOrAbove } from './roles.js';
 import { emitToWorkspace } from '../realtime.js';
-import { type ApprovedTemplate, listApprovedTemplates, sendAudio, sendDocument, sendImage, sendTemplate, sendText, uploadMedia } from '../whatsapp.js';
+import { type ApprovedTemplate, listApprovedTemplates, sendAudio, sendDocument, sendImage, sendText, uploadMedia } from '../whatsapp.js';
+import { windowOpen } from './messagingWindow.js';
 import { prepareVoice } from './voice.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AppError, notFound } from './errors.js';
-import { recordActivity } from './activity.js';
+import { previewOf, recordActivity } from './activity.js';
 import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './incomingMedia.js';
 import { withSender } from './senders.js';
 import { defaultStageValue } from './leadStages.js';
 import { parse } from './validate.js';
 
-const DAY = 24 * 60 * 60 * 1000;
 export const MAX_PAGE_SIZE = 100;
 
 const pageSchema = z.object({
@@ -246,17 +246,6 @@ export async function listMessageTemplates(workspaceId: string) {
 }
 
 // Each language of a template is approved separately; sending one that isn't approved fails at Meta.
-// If Meta can't be asked right now, send as requested (or 'en') and let Meta's reply decide.
-async function templateLanguage(account: { wabaId: string; accessToken: string }, name: string, requested?: string) {
-  let approved;
-  try {
-    approved = await listApprovedTemplates(account);
-  } catch {
-    return requested ?? 'en';
-  }
-  return pickTemplateLanguage(approved, name, requested);
-}
-
 export function pickTemplateLanguage(templates: Pick<ApprovedTemplate, 'name' | 'language' | 'needsParameters'>[], name: string, requested?: string) {
   const approved = templates.filter((t) => t.name === name);
   const languages = approved.map((t) => t.language).join(', ');
@@ -285,8 +274,7 @@ export async function checkCanSend(workspaceId: string, conversationId: string, 
     throw new AppError('This chat is closed. Reopen it to reply.', 409, 'CONVERSATION_CLOSED');
 
   // Free-form messages (text, images) only within 24 hours of the customer's last message; templates any time
-  const windowOpen = conversation.lastInboundAt && Date.now() - conversation.lastInboundAt.getTime() < DAY;
-  if (freeForm && !windowOpen)
+  if (freeForm && !windowOpen(conversation.lastInboundAt))
     throw new AppError('24-hour window closed. Send an approved template instead.', 400, 'WINDOW_CLOSED');
 
   // Chats started before numbers were validated may lack the country code; WhatsApp would send to the wrong number
@@ -405,7 +393,7 @@ export async function sendMediaMessage(
     conversationId,
     actorId: sentById ?? null,
     type: 'message_sent',
-    data: { preview: caption ? `${label} ${caption}`.slice(0, 200) : label, messageType: kind, status: saved.status },
+    data: { preview: caption ? previewOf(`${label} ${caption}`, 200) : label, messageType: kind, status: saved.status },
   });
   return saved;
 }
@@ -444,22 +432,20 @@ export async function readMessageMedia(workspaceId: string, messageId: string) {
 // `sentById` is the agent sending it; it decides who may edit or delete the message later
 export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
   const input = parse(sendSchema, rawInput);
-  const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, input.type !== 'template');
+  // Templates go only through sendTemplateMessage (the chat's "Yes, Send" confirmation), never through here
+  if (input.type === 'template')
+    throw new AppError('Templates are sent only after you confirm them in the chat ("Yes, Send")', 400, 'CONFIRMATION_REQUIRED');
+  const { conversation, account } = await checkCanSend(workspaceId, conversationId, sentById, true);
+  const quoted = await replyTarget(conversationId, input.replyToId);
 
-  const language = input.type === 'template' ? await templateLanguage(account, input.name, input.language) : undefined;
-  const quoted = input.type === 'text' ? await replyTarget(conversationId, input.replyToId) : null;
-
-  const body = input.type === 'text' ? input.body : `[template] ${input.name}`;
+  const body = input.body;
   const message = await prisma.message.create({
     data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById, replyToId: quoted?.id ?? null },
   });
 
   let saved;
   try {
-    const wamid =
-      input.type === 'text'
-        ? await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId)
-        : await sendTemplate(account, conversation.contact.waId, input.name, language);
+    const wamid = await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId);
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({
@@ -475,7 +461,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
     conversationId,
     actorId: sentById ?? null,
     type: 'message_sent',
-    data: { preview: body.slice(0, 200), messageType: input.type, status: saved.status },
+    data: { preview: previewOf(body, 200), messageType: input.type, status: saved.status },
   });
   return saved;
 }
@@ -497,19 +483,46 @@ const startSchema = z.object({
   name: z.string().trim().max(191).optional().nullable(),
 });
 
-// Start a chat with a new number (first message must be a template)
+// Start a chat with a number (the first message must be a template). The number is checked against real numbering
+// plans and stored one way (digits with country code), so the same customer is never added twice: an existing
+// contact and chat are reused (startedNow: false; a deleted contact comes back), and two people starting the same
+// number at once get the same chat. A new chat appears in everyone's inbox at once (conversation:started).
 export async function startConversation(workspaceId: string, rawInput: unknown, createdBy: string | null = null) {
   const { waId, name } = parse(startSchema, rawInput);
-  const contact = await prisma.contact.upsert({
-    where: { workspaceId_waId: { workspaceId, waId } },
-    update: { deletedAt: null, deletedBy: null }, // starting a chat with a deleted contact brings them back
-    create: { workspaceId, waId, name: name || null, createdBy, leadStage: await defaultStageValue(workspaceId) },
-  });
-  return prisma.conversation.upsert({
-    where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
-    update: {},
-    create: { workspaceId, contactId: contact.id, createdBy },
-  });
+  const stage = await defaultStageValue(workspaceId);
+  // Both rows are unique per workspace; a simultaneous start of the same number loses the race once and then reads
+  // what the other one made
+  let lostRace = false;
+  const once = async <T>(write: () => Promise<T>, read: () => Promise<T | null>) => {
+    try {
+      return await write();
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+      const row = await read();
+      if (!row) throw err;
+      lostRace = true;
+      return row;
+    }
+  };
+  const contactKey = { workspaceId_waId: { workspaceId, waId } };
+  const contact = await once(
+    () =>
+      prisma.contact.upsert({
+        where: contactKey,
+        update: { deletedAt: null, deletedBy: null }, // starting a chat with a deleted contact brings them back
+        create: { workspaceId, waId, name: name || null, createdBy, leadStage: stage },
+      }),
+    () => prisma.contact.findUnique({ where: contactKey }),
+  );
+  const conversationKey = { workspaceId_contactId: { workspaceId, contactId: contact.id } };
+  const existing = await prisma.conversation.findUnique({ where: conversationKey, select: { id: true } });
+  const conversation = await once(
+    () => prisma.conversation.upsert({ where: conversationKey, update: {}, create: { workspaceId, contactId: contact.id, createdBy } }),
+    () => prisma.conversation.findUnique({ where: conversationKey }),
+  );
+  const startedNow = !existing && !lostRace;
+  if (startedNow) emitToWorkspace(workspaceId, 'conversation:started', { conversationId: conversation.id, contactName: contact.name || `+${waId}` });
+  return { ...conversation, startedNow };
 }
 
 const simulateSchema = z.object({

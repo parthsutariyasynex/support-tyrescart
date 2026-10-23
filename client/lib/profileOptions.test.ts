@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { contactCountry, filterCountries, filterDialCountries, filterTimeZones, flagOf, joinPhone, phoneCountries, splitPhone, timeZoneLabel, timeZoneOptions } from './profileOptions';
+import { contactCountry, filterCountries, filterDialCountries, newChatNumber, filterTimeZones, flagOf, joinPhone, phoneCountries, splitPhone, timeZoneLabel, timeZoneOptions } from './profileOptions';
 
 test('country picker: flags, dial codes and names from the platform', () => {
   assert.equal(flagOf('AE'), '🇦🇪');
@@ -61,4 +61,13 @@ test("chat header country: the profile's country first, else the number's; old t
     assert.deepEqual(filterDialCountries(list, '+97').map((c) => c.value), ['United Arab Emirates']);
     assert.deepEqual(filterDialCountries(list, '91').map((c) => c.value), ['India']);
     assert.deepEqual(filterDialCountries(list, 'oma').map((c) => c.value), ['Oman']);
+});
+
+test('new chat number: country + number, or a pasted +international number; invalid ones explained', () => {
+  assert.deepEqual(newChatNumber('AE', '050 123 4567'), { waId: '971501234567' });
+  assert.deepEqual(newChatNumber('IN', '90163 12927'), { waId: '919016312927' });
+  assert.deepEqual(newChatNumber('AE', '+91 90163 12927'), { waId: '919016312927' }); // pasted with its own code
+  assert.deepEqual(newChatNumber('AE', ''), { problem: 'Enter the WhatsApp number' });
+  assert.ok('problem' in newChatNumber('AE', '12345'));
+  assert.ok('problem' in newChatNumber('IN', '0000000000'));
 });

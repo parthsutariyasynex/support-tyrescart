@@ -15,7 +15,6 @@ import { setTimeZone } from '@/lib/time';
 import {
   type AssignmentEvent,
   type ReminderEvent,
-  type TemplateStatusEvent,
   addedAsCollaboratorText,
   assignedToYouText,
   assignmentChangedText,
@@ -25,7 +24,6 @@ import {
   reminderText,
   removedFromYouText,
   showToast,
-  templateStatusText,
   useToast,
 } from '@/lib/toasts';
 import { AssignedToast } from './inbox/messages';
@@ -38,7 +36,6 @@ import { RoleBadge } from './RoleBadge';
 import { isAdminRole } from '@/lib/roles';
 import { rememberWorkspace, workspaceDetails } from '@/lib/workspaces';
 import { STAGE_COUNTS_EVENT } from '@/lib/contacts';
-import { FOLLOW_UP_TEMPLATE_EVENT } from '@/lib/automations';
 import { type MessageEvent, appInBackground, customerMessageNotice, shouldSuppressNotification } from '@/lib/desktopNotifications';
 import { alertsYou, clearMessagePopups, showMessagePopup, soundEnabled } from '@/lib/messagePopups';
 import { fetchConversation } from '@/lib/inbox';
@@ -227,13 +224,6 @@ export function AppShell({
     socket.on('chat:new', (e: { conversationId: string; contactName: string }) => {
       const t = newChatText(e);
       showToast(t.key, e.conversationId, t.message, t.detail);
-    });
-    // Meta decided on the follow-up template: admins are told; the Simple automations page refreshes its status
-    socket.on('templates:status', (e: TemplateStatusEvent) => {
-      window.dispatchEvent(new Event(FOLLOW_UP_TEMPLATE_EVENT));
-      if (!isAdminRole(roleRef.current ?? '')) return;
-      const t = templateStatusText(e);
-      showToast(t.key, '', t.message, t.detail);
     });
     // Left menu → Lifecycle stages: its chat counts follow new chats, stage changes and deleted/restored contacts
     const stageCountsChanged = () => window.dispatchEvent(new Event(STAGE_COUNTS_EVENT));

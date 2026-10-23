@@ -68,7 +68,8 @@ inboxRouter.post(
 
 // An image or document message's stored copy (members of the workspace only). Documents download with their name.
 // Send an approved template whose header is an image, video or document: the body is the file; `name`,
-// `language` and `values` (JSON) are query parameters, `fileName` the document's name
+// `language` and `values` (JSON) are query parameters, `fileName` the document's name; confirmed=true and requestId
+// as for sendTemplateMessage (sent only after the agent's "Yes, Send")
 inboxRouter.post('/conversations/:id/template', express.raw({ type: () => true, limit: '100mb' }), async (req, res) => {
   const body = Buffer.isBuffer(req.body) && req.body.length ? req.body : undefined;
   let values: unknown;
@@ -79,7 +80,7 @@ inboxRouter.post('/conversations/:id/template', express.raw({ type: () => true, 
   }
   const sent = await sendTemplateMessage(
     req.auth!,
-    { conversationId: req.params.id, name: req.query.name, language: req.query.language || undefined, values },
+    { conversationId: req.params.id, name: req.query.name, language: req.query.language || undefined, values, confirmed: req.query.confirmed === 'true', requestId: req.query.requestId },
     { bytes: body, mime: req.headers['content-type'], name: typeof req.query.fileName === 'string' ? req.query.fileName : undefined },
   );
   res.json(await withSender(sent));

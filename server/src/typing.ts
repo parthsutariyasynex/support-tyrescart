@@ -1,5 +1,6 @@
 import type { Server, Socket } from 'socket.io';
 import { prisma } from './prisma.js';
+import { windowOpen } from './services/messagingWindow.js';
 
 // Live "Agent is typing…" between agents. This is the one event clients send over Socket.IO, so nothing
 // in it is trusted: who is typing comes from the socket's verified token, the name from the database,
@@ -55,6 +56,11 @@ function attachTyping(socket: Socket) {
     if (name === null) {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
       name = user?.name ?? 'Someone';
+    }
+    // "typing…" only where a reply can be sent: not once WhatsApp's 24-hour window has closed (templates only)
+    if (typing) {
+      const c = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { lastInboundAt: true } });
+      if (!windowOpen(c?.lastInboundAt)) return;
     }
     if (typing) active.add(conversationId);
     else active.delete(conversationId);

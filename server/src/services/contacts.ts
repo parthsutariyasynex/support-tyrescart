@@ -4,7 +4,7 @@ import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
 import { emitToWorkspace } from '../realtime.js';
 import { clearedAt } from './conversationClear.js';
-import { recordActivity } from './activity.js';
+import { previewOf, recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
 import { requireConversation } from './inbox.js';
 import { choicesOf, requireChoice } from './fieldChoices.js';
@@ -34,7 +34,9 @@ export async function leadStageCounts(auth: AuthPayload, chats = false) {
 }
 
 
-export const REMARK_MAX_LENGTH = 2000;
+// Remarks (internal notes, "Add note") are stored in a TEXT column (65,535 bytes): up to 16,000 characters fits even
+// when every character takes 4 bytes. No lower app limit.
+export const REMARK_MAX_LENGTH = 16_000;
 
 const values = (list: readonly { value: string }[]) => list.map((o) => o.value) as [string, ...string[]];
 // Text fields: trimmed; empty clears the field (null); undefined leaves it unchanged
@@ -144,7 +146,7 @@ async function logFieldChanges(auth: AuthPayload, before: Record<string, unknown
 }
 async function logRemark(auth: AuthPayload, contactId: string, type: 'remark_added' | 'remark_edited' | 'remark_deleted', body: string) {
   const conversationId = await conversationOf(auth.workspaceId, contactId);
-  if (conversationId) await recordActivity({ workspaceId: auth.workspaceId, conversationId, actorId: auth.userId, type, data: { text: body.slice(0, 500) } });
+  if (conversationId) await recordActivity({ workspaceId: auth.workspaceId, conversationId, actorId: auth.userId, type, data: { text: previewOf(body, 500) } });
 }
 
 // --- Remarks

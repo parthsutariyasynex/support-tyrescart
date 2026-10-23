@@ -1,5 +1,4 @@
 import { getAutomationSettings, updateAutomationSettings, REPLY_MAX, workingHoursOf } from '../services/automations.js';
-import { followUpTemplateStatus } from '../services/followUps.js';
 import { authed } from './shared.js';
 
 export const typeDefs = /* GraphQL */ `
@@ -25,12 +24,6 @@ export const typeDefs = /* GraphQL */ `
     "Members new chats are assigned to, in turn"
     routingMemberIds: [ID!]!
     routingOnlineOnly: Boolean!
-    "Follow-up after 24 hours: on by default (while Simple automations is on). Sends the approved template named follow_up or follow_up_… (see followUpTemplate)"
-    followUpEnabled: Boolean!
-    "Since when follow-ups are being sent; only chats whose 24 hours run out after this get one"
-    followUpActiveSince: DateTime
-    "When the last follow-up was sent in this workspace"
-    lastFollowUpAt: DateTime
     "The workspace's default time zone (Workspace preferences), which working hours use"
     timeZone: String!
     "When the last automatic reply was sent in this workspace"
@@ -54,31 +47,6 @@ export const typeDefs = /* GraphQL */ `
     end: String!
   }
 
-  "The follow-up template found right now (read live from Meta), or why there's none"
-  type FollowUpTemplateStatus {
-    template: FollowUpTemplate
-    problem: String
-  }
-
-  type FollowUpTemplate {
-    name: String!
-    language: String!
-    "Its header and body text, with the {{variables}}"
-    text: String!
-    variables: [FollowUpVariable!]!
-    "Other follow_up templates of this number not used (the first by name, then language, is used)"
-    others: Int!
-  }
-
-  type FollowUpVariable {
-    "header | body"
-    part: String!
-    "The template's variable, e.g. 1 for {{1}}"
-    name: String!
-    "What fills it, e.g. contact.first_name"
-    key: String!
-  }
-
   type AutomationVariable {
     key: String!
     label: String!
@@ -100,14 +68,11 @@ export const typeDefs = /* GraphQL */ `
     routingMode: String
     routingMemberIds: [ID!]
     routingOnlineOnly: Boolean
-    followUpEnabled: Boolean
   }
 
   extend type Query {
     "Owners and admins"
     automationSettings: AutomationSettings!
-    "Owners and admins: the template the 24-hour follow-up uses (follow_up or follow_up_…, approved at Meta)"
-    followUpTemplate: FollowUpTemplateStatus!
   }
 
   extend type Mutation {
@@ -126,7 +91,6 @@ const shape = (s: Awaited<ReturnType<typeof getAutomationSettings>>) => ({
 export const resolvers = {
   Query: {
     automationSettings: authed(async (_args: unknown, auth) => shape(await getAutomationSettings(auth))),
-    followUpTemplate: authed((_args: unknown, auth) => followUpTemplateStatus(auth)),
   },
   Mutation: {
     updateAutomationSettings: authed(async ({ input }: { input: unknown }, auth) => shape(await updateAutomationSettings(auth, input))),

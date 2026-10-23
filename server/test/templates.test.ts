@@ -29,6 +29,7 @@ const META_TEMPLATES = [
       },
     ],
   },
+  // Meta's own sample, present in every account: never offered or sent
   { id: 'tpl_hello', name: 'hello_world', language: 'en_US', category: 'UTILITY', status: 'APPROVED', components: [{ type: 'BODY', text: 'Hello from TyresCart' }] },
   {
     id: 'tpl_named',
@@ -45,6 +46,9 @@ const META_TEMPLATES = [
   },
   { id: 'tpl_rej', name: 'old_offer', language: 'en', category: 'MARKETING', status: 'REJECTED', rejected_reason: 'PROMOTIONAL', components: [{ type: 'BODY', text: 'Big sale' }] },
   { id: 'tpl_car', name: 'carousel_x', language: 'en', category: 'MARKETING', status: 'APPROVED', components: [{ type: 'BODY', text: 'See' }, { type: 'CAROUSEL', cards: [] }] },
+  { id: 'tpl_open', name: 'shop_open', language: 'en_US', category: 'UTILITY', status: 'APPROVED', components: [{ type: 'BODY', text: 'Hello from TyresCart' }] },
+  { id: 'tpl_paused', name: 'paused_offer', language: 'en', category: 'MARKETING', status: 'PAUSED', components: [{ type: 'BODY', text: 'Paused by Meta' }] },
+  { id: 'tpl_disabled', name: 'disabled_offer', language: 'en', category: 'MARKETING', status: 'DISABLED', components: [{ type: 'BODY', text: 'Disabled by Meta' }] },
 ];
 const mock = createServer((req, res) => {
   const chunks: Buffer[] = [];
@@ -79,6 +83,9 @@ let mockUrl = '';
 
 const API = process.env.API_URL ?? 'http://localhost:5001';
 const run = Date.now();
+// One per confirmed send ("Yes, Send"), as the chat makes them
+let ridCount = 0;
+const rid = () => `test-${run}-${++ridCount}`;
 async function gql(query: string, variables: object = {}, token?: string) {
   const res = await fetch(`${API}/graphql`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ query, variables }) });
   const j = (await res.json()) as { data?: any; errors?: { message: string }[] };
@@ -131,6 +138,14 @@ describe('template model', () => {
     ]);
     assert.equal(model.renderTemplate(t, values), 'Hi Amir, your order TC-1042 is ready for fitting.\n\nTyresCart\n\n[Track order] [Thanks]');
     assert.throws(() => model.buildSendComponents(t, { ...values, body: { '1': 'Amir' } }, { id: 'm' }), /Fill in \{\{2\}\}/);
+    // A customer without a name: {{1}} is an invisible zero-width space (WhatsApp refuses empty values); the chat shows
+    // the text without it, and an empty value is still refused
+    const greet = { ...t, header: null, footer: null, buttons: [], body: { ...t.body, text: 'Hello {{1}} 👋, I just wanted to follow up regarding your earlier inquiry.', variables: ['1'] } } as typeof t;
+    const noName = { header: {}, body: { '1': '\u200B' }, buttons: {} };
+    assert.deepEqual(model.buildSendComponents(greet, noName), [{ type: 'body', parameters: [{ type: 'text', text: '\u200B' }] }]);
+    assert.equal(model.renderTemplate(greet, noName), 'Hello 👋, I just wanted to follow up regarding your earlier inquiry.');
+    assert.equal(model.renderTemplate({ ...greet, body: { ...greet.body, text: 'Hi {{1}}, thanks!' } } as typeof t, noName), 'Hi, thanks!');
+    assert.throws(() => model.buildSendComponents(greet, { header: {}, body: { '1': '  ' }, buttons: {} }), /Fill in \{\{1\}\}/);
     assert.throws(() => model.buildSendComponents(t, values), /header image/);
   });
 
@@ -204,15 +219,16 @@ describe('templates against a mock of Meta', () => {
 
     // the chat list of templates: approved only
     const approved = await svc.approvedTemplates(agent);
-    assert.deepEqual(approved.map((t) => t.name), ['carousel_x', 'hello_world', 'order_ready', 'promo']);
-    assert.equal(approved.find((t) => t.name === 'hello_world')?.needsParameters, false);
+    // approved only (not rejected, paused or disabled), and never Meta's hello_world sample
+    assert.deepEqual(approved.map((t) => t.name), ['carousel_x', 'order_ready', 'promo', 'shop_open']);
+    assert.equal(approved.find((t) => t.name === 'shop_open')?.needsParameters, false);
     assert.equal(approved.find((t) => t.name === 'order_ready')?.needsParameters, true);
 
     // send order_ready with values and a JPEG header
     const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200)]);
     seen.length = 0;
     const values = { header: {}, body: { '1': 'Amir', '2': 'TC-1042' }, buttons: { '0': 'TC-1042' } };
-    const sent = await svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'order_ready', values }, { bytes: jpeg, mime: 'image/jpeg' });
+    const sent = await svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'order_ready', values }, { bytes: jpeg, mime: 'image/jpeg' });
     assert.equal(sent.status, 'sent', String(sent.error));
     assert.equal(sent.type, 'image');
     assert.equal(sent.body, 'Hi Amir, your order TC-1042 is ready for fitting.\n\nTyresCart\n\n[Track order] [Thanks]');
@@ -228,16 +244,45 @@ describe('templates against a mock of Meta', () => {
       ],
     });
     // a plain template: no components (agents send in chats assigned to them, as for replies)
-    await assert.rejects(svc.sendTemplateMessage(agent, { conversationId: conv.id, name: 'hello_world' }), /Assign this chat/);
+    await assert.rejects(svc.sendTemplateMessage(agent, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'shop_open' }), /Assign this chat/);
     await gql(`mutation($c: ID!, $m: ID, $r: String) { assignConversation(conversationId: $c, memberId: $m, reason: $r) { id } }`, { c: conv.id, m: a.user.id, r: 'test' }, o.token);
-    const hello = await svc.sendTemplateMessage(agent, { conversationId: conv.id, name: 'hello_world' });
+    const hello = await svc.sendTemplateMessage(agent, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'shop_open' });
     assert.equal(hello.type, 'template');
-    assert.deepEqual(JSON.parse(seen.filter((r) => r.path.endsWith('/messages')).at(-1)!.body.toString()).template, { name: 'hello_world', language: { code: 'en_US' } });
+    assert.deepEqual(JSON.parse(seen.filter((r) => r.path.endsWith('/messages')).at(-1)!.body.toString()).template, { name: 'shop_open', language: { code: 'en_US' } });
     // refused before anything is sent: a missing value, a missing header file, an unsupported or unknown template
-    await assert.rejects(svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'order_ready', values: { body: { '1': 'Amir' } } }, { bytes: jpeg, mime: 'image/jpeg' }), /Fill in/);
-    await assert.rejects(svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'order_ready', values }), /JPEG and PNG|empty/);
-    await assert.rejects(svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'carousel_x' }), /carousel/);
-    await assert.rejects(svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'nope' }), /not an approved template/);
+    await assert.rejects(svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'order_ready', values: { body: { '1': 'Amir' } } }, { bytes: jpeg, mime: 'image/jpeg' }), /Fill in/);
+    await assert.rejects(svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'order_ready', values }), /JPEG and PNG|empty/);
+    await assert.rejects(svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'carousel_x' }), /carousel/);
+    await assert.rejects(svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'nope' }), /not an approved template/);
+    // Meta's sample and templates Meta paused or disabled can't be sent either, even by asking for them by name
+    for (const name of ['hello_world', 'paused_offer', 'disabled_offer', 'old_offer'])
+      await assert.rejects(svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name }), (e: any) => e.code === 'TEMPLATE_NOT_APPROVED', name);
+
+    // Manual sending only: nothing goes out without the agent's confirmation, and one confirmation sends once
+    const metaSends = () => seen.filter((r) => r.path.endsWith('/messages')).length;
+    const before = metaSends();
+    for (const unconfirmed of [{}, { confirmed: false, requestId: rid() }, { confirmed: true }, { confirmed: true, requestId: 'x' }, { confirmed: 'true', requestId: rid() }])
+      await assert.rejects(svc.sendTemplateMessage(owner, { conversationId: conv.id, name: 'shop_open', ...unconfirmed }), (e: any) => e.code === 'CONFIRMATION_REQUIRED');
+    assert.equal(metaSends(), before, 'nothing reached WhatsApp without a confirmation');
+    const once = rid();
+    const [first, again] = await Promise.all([
+      svc.sendTemplateMessage(owner, { confirmed: true, requestId: once, conversationId: conv.id, name: 'shop_open' }),
+      svc.sendTemplateMessage(owner, { confirmed: true, requestId: once, conversationId: conv.id, name: 'shop_open' }), // double click / retry
+    ]);
+    assert.equal(first.id, again.id);
+    assert.equal((await svc.sendTemplateMessage(owner, { confirmed: true, requestId: once, conversationId: conv.id, name: 'shop_open' })).id, first.id);
+    assert.equal(metaSends(), before + 1, 'sent to WhatsApp exactly once');
+    // two different confirmations of the same template to the same chat at the same moment: only one goes
+    const both = await Promise.allSettled([
+      svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'shop_open' }),
+      svc.sendTemplateMessage(owner, { confirmed: true, requestId: rid(), conversationId: conv.id, name: 'shop_open' }),
+    ]);
+    assert.deepEqual(both.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+    assert.equal((both.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason.code, 'DUPLICATE_SEND');
+    // the older send path can't send templates at all (no confirmation there)
+    const inbox = await import('../src/services/inbox.js');
+    await assert.rejects(inbox.sendMessage(owner.workspaceId, conv.id, { type: 'template', name: 'shop_open' }, owner.userId), (e: any) => e.code === 'CONFIRMATION_REQUIRED');
+    assert.equal(metaSends(), before + 2);
 
     // Settings → Templates: admins only
     await assert.rejects(svc.allTemplates(agent), /admins/i);

@@ -1,11 +1,12 @@
 import { prisma } from './prisma.js';
 import { wakeOnCustomerMessage } from './services/conversationStatus.js';
 import { emitToWorkspace } from './realtime.js';
-import { recordActivity } from './services/activity.js';
+import { previewOf, recordActivity } from './services/activity.js';
 import { withSender } from './services/senders.js';
 import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/incomingMedia.js';
 import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
+import { inboundSentAt, laterOf } from './services/messagingWindow.js';
 
 type Incoming = {
   waId: string;
@@ -19,6 +20,8 @@ type Incoming = {
   media?: { id: string; mime?: string; filename?: string };
   // The customer replied to (quoted) this message: its WhatsApp id
   replyToWaId?: string;
+  // When the customer sent it (Meta's webhook timestamp); the 24-hour window runs from here
+  sentAt?: Date;
 };
 
 // Optional chaining throughout: Meta's webhook normally matches `msg.type` exactly, but a malformed or
@@ -72,6 +75,7 @@ export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
     ...(bsuid ? { bsuid } : {}),
     ...(username ? { username } : {}),
     ...(replyToWaId ? { replyToWaId } : {}),
+    ...(msg?.timestamp !== undefined ? { sentAt: inboundSentAt(msg.timestamp) } : {}),
   };
 }
 
@@ -87,11 +91,13 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     // A new customer starts on the workspace's default lead stage
     create: { workspaceId, waId: m.waId, name: m.name, waBsuid: m.bsuid ?? null, waUsername: m.username ?? null, leadStage: await defaultStageValue(workspaceId) },
   });
-  const existed = await prisma.conversation.findUnique({ where: { workspaceId_contactId: { workspaceId, contactId: contact.id } }, select: { id: true } });
+  const existed = await prisma.conversation.findUnique({ where: { workspaceId_contactId: { workspaceId, contactId: contact.id } }, select: { id: true, lastInboundAt: true } });
+  // The 24-hour window: from when the customer sent it (never moved back by a late retry of an older message)
+  const lastInboundAt = laterOf(existed?.lastInboundAt, m.sentAt && m.sentAt <= now ? m.sentAt : now);
   const conversation = await prisma.conversation.upsert({
     where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
-    update: { lastMessageAt: now, lastInboundAt: now, unread: { increment: 1 } },
-    create: { workspaceId, contactId: contact.id, lastMessageAt: now, lastInboundAt: now, unread: 1 },
+    update: { lastMessageAt: now, lastInboundAt, unread: { increment: 1 } },
+    create: { workspaceId, contactId: contact.id, lastMessageAt: now, lastInboundAt, unread: 1 },
     include: { contact: true },
   });
   // A reply to a message of this chat is shown quoted (a message from before this app, or another chat, isn't)
@@ -122,7 +128,7 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     conversationId: conversation.id,
     actorId: null,
     type: 'message_received',
-    data: { messageId: message.id, preview: m.body.slice(0, 100) },
+    data: { messageId: message.id, preview: previewOf(m.body, 100) },
   });
   // Simple automations (routing, auto-reply); they never stop the message from being saved
   await runAutomations(workspaceId, conversation.id).catch((err) => console.error('[automations] failed', conversation.id, (err as Error).message));

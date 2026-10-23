@@ -27,7 +27,6 @@ import {
   setConversationStatus,
   sendTextMessage,
   simulateIncomingMessage,
-  startConversation,
   snoozeConversation,
   setConversationPinned,
   markConversationUnread,
@@ -55,13 +54,13 @@ import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, Cont
 import { EmojiPicker, FileSendDialog } from './composerExtras';
 import { VoiceRecorder } from './voice';
 import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
-import { TemplatePicker, TemplateSendDialog } from './templates';
+import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
 import { ACCEPT, checkFile, filePreview, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
-import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, stagesChanged } from '@/lib/contacts';
+import { CUSTOM_PROPERTIES_EVENT, type StagesChanged, addRemark, stagesChanged } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { CollaboratorsButton } from './CollaboratorsButton';
@@ -70,7 +69,7 @@ import { type StatusFilter, StatusMenu } from './StatusMenu';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
-import { dayKey, dayLabel, formatTime, listTimestamp } from '@/lib/time';
+import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
@@ -78,8 +77,11 @@ import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
 import { setOpenConversationId } from '@/lib/desktopNotifications';
 import { dismissChatPopups } from '@/lib/messagePopups';
+import { lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
 import { CountryCodeMenu } from './CountryCodeMenu';
+// import { NewChatDialog } from './NewChatDialog';
+import { WHATSAPP_TEXT_MAX, overLimit, tooLongText } from '@/lib/textLimits';
 import {
   type TypingEvent,
   type TypingState,
@@ -113,7 +115,7 @@ type PickerTarget = { conversationId: string | null; anchor: HTMLElement };
 
 
 export default function InboxPage() {
-  return <AppShell>{(me) => <Inbox meName={me.user.name} />}</AppShell>;
+  return <AppShell>{(me) => <Inbox meName={me.user.name} channelPhone={me.workspace.whatsapp?.displayPhone ?? null} defaultCountry={me.workspace.settings?.defaultCountry ?? ''} />}</AppShell>;
 }
 
 type ConversationFilter = { labelId: string | null; assignee: string | null; search: string | null; sort: SortOrder; status: 'open' | 'snoozed' | 'closed' | null; leadStage: string | null } & ReturnType<typeof toServerFilter>;
@@ -216,7 +218,7 @@ function patchAllCachedConversations(fn: (c: Conversation) => Conversation) {
   saveSessionJson(SKEY_CONVOS, cachedConversationsByPath);
 }
 
-function Inbox({ meName }: { meName: string }) {
+function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; channelPhone: string | null; defaultCountry: string }) {
   const pathname = usePathname();
   const mine = pathname === '/my-chats';
   const leads = pathname === '/leads';
@@ -851,6 +853,11 @@ function Inbox({ meName }: { meName: string }) {
       if (e.userId === permissionsRef.current?.userId) return; // yourself in another tab
       setTyping((s) => applyTypingEvent(s, e));
     });
+    // Someone started a chat with a new number: it appears in everyone's list at once
+    socket.on('conversation:started', () => {
+      loadConversations();
+      loadUnassignedCount();
+    });
     socket.on('message:new', ({ conversation, message }: { conversation: Conversation; message: Message }) => {
       if (message.conversationId === activeIdRef.current)
         setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
@@ -1104,6 +1111,7 @@ function Inbox({ meName }: { meName: string }) {
         activeId={activeId}
         onSelect={selectConversation}
         onRefresh={loadConversations}
+        defaultCountry={defaultCountry}
         conversationsError={conversationsError}
         onLoadMore={conversationsCursor ? loadMoreConversations : undefined}
         searchQuery={searchQuery}
@@ -1189,6 +1197,7 @@ function Inbox({ meName }: { meName: string }) {
           profileOpen={profileOpen}
           onToggleProfile={() => setProfileOpen(!profileOpen)}
           onOpenProfile={() => setProfileOpen(true)}
+          channelPhone={channelPhone}
         />
       ) : (
         <EmptyChatState />
@@ -1258,6 +1267,7 @@ function ConversationList({
   activeId,
   onSelect,
   onRefresh,
+  defaultCountry,
   conversationsError,
   onLoadMore,
   searchQuery,
@@ -1298,6 +1308,8 @@ function ConversationList({
   activeId: string | null;
   onSelect: (id: string) => void;
   onRefresh: () => void;
+  // The workspace's default phone country, preselected in New chat
+  defaultCountry: string;
   // Set when the list failed to load and the screen has nothing to show for it; offers Retry instead of the usual
   // empty-state copy
   conversationsError?: string | null;
@@ -1356,16 +1368,14 @@ function ConversationList({
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const presence = usePresence(); // online / away / offline dots next to assignees
-  async function newChat() {
-    const waId = prompt('Customer WhatsApp number with country code (e.g. 919876543210)');
-    if (!waId) return;
-    try {
-      const c = await startConversation(waId.replace(/\D/g, ''));
-      onRefresh();
-      onSelect(c.id);
-    } catch (err) {
-      alert((err as Error).message);
-    }
+  // New chat (dialog): a new number gets a chat; a number that already has one opens it (never a second contact)
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const newChat = () => setNewChatOpen(true);
+  function onNewChat(c: Conversation, startedNow: boolean) {
+    setNewChatOpen(false);
+    onRefresh();
+    onSelect(c.id);
+    if (!startedNow) showToast(`existing:${c.id}:${Date.now()}`, c.id, 'This number already has a chat: opened it.', c.contact.name || `+${c.contact.waId}`);
   }
 
   async function simulate() {
@@ -1379,6 +1389,7 @@ function ConversationList({
 
   return (
     <section className="relative z-30 flex h-full min-h-0 w-72 sm:w-80 shrink-0 flex-col border-r border-line/90 bg-surface">
+      {/* {newChatOpen && <NewChatDialog defaultCountry={defaultCountry} onDone={onNewChat} onClose={() => setNewChatOpen(false)} />} */}
       {/* Top Header Metrics + Refresh Button */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2 text-xs text-muted">
         <StatusMenu value={statusFilter} onChange={onStatusFilterChange} counts={statusCounts} />
@@ -1399,6 +1410,17 @@ function ConversationList({
               </svg>
               {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
             </button>
+            {/* <button
+              type="button"
+              title="New chat"
+              aria-label="New chat"
+              onClick={newChat}
+              className="flex h-6 w-6 items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-primary"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button> */}
             {/* Search: hidden until the icon is clicked (stays open while a search is active) */}
             <button
               type="button"
@@ -1672,6 +1694,7 @@ function ChatPanel({
   profileOpen,
   onToggleProfile,
   onOpenProfile,
+  channelPhone,
 }: {
   conversation: Conversation;
   meName: string; // you: the "My name" quick fill when sending a template
@@ -1705,6 +1728,8 @@ function ChatPanel({
   onToggleProfile: () => void;
   // The customer's name (or picture) in the header: opens that panel
   onOpenProfile: () => void;
+  // The workspace's WhatsApp number replies go out from ("via WhatsApp +971…" above the message box)
+  channelPhone: string | null;
 }) {
   const presence = usePresence(); // online / away / offline dots next to assignees
   const [text, setText] = useState('');
@@ -1718,6 +1743,10 @@ function ChatPanel({
   // Voice note: the recorder replaces the message box while recording / previewing
   const [voiceMode, setVoiceMode] = useState(false);
   useEffect(() => setVoiceMode(false), [conversation.id]);
+  // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
+  // to the customer's Remarks in the profile panel). Each chat opens on Reply.
+  const [mode, setMode] = useState<'reply' | 'note'>('reply');
+  useEffect(() => setMode('reply'), [conversation.id]);
   const [error, setError] = useState('');
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -1745,6 +1774,19 @@ function ChatPanel({
     setMatchPos((p) => (p + dir + matches.length) % matches.length);
   };
   const [editing, setEditing] = useState<Message | null>(null);
+  const noting = mode === 'note' && !editing; // editing a message is always a reply
+  // WhatsApp's 24-hour window: over 24 hours since the customer last wrote (or they never did), only approved
+  // templates can be sent, so the message box gives way to "Send template". A customer message arriving live opens
+  // it again at once; a timer closes it at the exact moment it runs out. The server refuses the rest (WINDOW_CLOSED).
+  const lastCustomerAt = useMemo(() => lastCustomerMessageAt(conversation.lastInboundAt, messages), [conversation.lastInboundAt, messages]);
+  const [, setWindowTick] = useState(0);
+  useEffect(() => {
+    const ms = msUntilClose(lastCustomerAt);
+    if (ms === null) return;
+    const t = setTimeout(() => setWindowTick((n) => n + 1), Math.min(ms + 250, 2_147_483_647));
+    return () => clearTimeout(t);
+  }, [lastCustomerAt]);
+  const windowClosed = !windowOpen(lastCustomerAt);
   // Replying to this message (WhatsApp style): quoted above the message box and above the sent reply
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Forwarding this message to other chats (the Forward dialog)
@@ -1764,6 +1806,7 @@ function ChatPanel({
     setReplyTo(null);
     setConfirmDelete(null);
     setUndo(null);
+    setTemplate(null);
     // Opening a chat puts the cursor in the message box so you can start typing at once (as WhatsApp Web does);
     // not on touch-only devices, where it would pop up the keyboard over the chat
     if (window.matchMedia('(pointer: fine)').matches) requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
@@ -1900,15 +1943,16 @@ function ChatPanel({
   // A chosen or dropped file: checked first (type, size), then the preview window
   function pickFile(f: File | undefined, many = false) {
     if (!f) return;
+    if (windowClosed) return setError('24-hour window closed: only approved templates can be sent until the customer writes again.');
     const r = checkFile(f);
     if ('problem' in r) return setError(r.problem);
     setError(many ? 'One file at a time: sending the first one.' : '');
     setImageFile(f);
   }
   // Files can be sent (and dropped) only where the message box is: an open chat you may reply in
-  const canAttach = !isClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  const canAttach = !isClosed && !windowClosed && !editing && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
   // Reacting follows the reply rules (open chat you may write in); the message must have gone through WhatsApp
-  const canReact = !isClosed && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
+  const canReact = !isClosed && !windowClosed && !(!conversation.assignee && viewer?.role !== 'supervisor' && !viewer?.isAdmin);
   async function react(m: Message, emoji: string | null) {
     setError('');
     const before = m;
@@ -1985,12 +2029,14 @@ function ChatPanel({
     if (action === 'forward') {
       setForwarding(m);
     } else if (action === 'reply') {
+      setMode('reply');
       if (editing) cancelEdit();
       setReplyTo(m);
       requestAnimationFrame(() => inputRef.current?.focus());
     } else if (action === 'copy') {
       navigator.clipboard?.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
     } else if (action === 'edit') {
+      setMode('reply');
       setReplyTo(null);
       setEditing(m);
       setText(m.body);
@@ -2003,6 +2049,22 @@ function ChatPanel({
   function cancelEdit() {
     setEditing(null);
     setText('');
+  }
+
+  // Add note: an internal note on the customer (their Remarks in the profile panel; everyone sees it there live)
+  async function saveNote(body: string) {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await addRemark(conversation.contact.id, body.trim());
+      setText('');
+      showToast(`note:${conversation.id}:${Date.now()}`, conversation.id, 'Note added', "Saved to the customer's Remarks · only your team sees it");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function saveEdit() {
@@ -2164,6 +2226,7 @@ function ChatPanel({
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
     } catch (err) {
       setError((err as Error).message);
+      setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
     }
   }
 
@@ -2195,7 +2258,7 @@ function ChatPanel({
         e.preventDefault();
         dragDepth.current = 0;
         setDragging(false);
-        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : windowClosed ? '24-hour window closed: only approved templates can be sent until the customer writes again.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
         const files = e.dataTransfer.files;
         pickFile(files[0], files.length > 1);
       }}
@@ -2205,7 +2268,7 @@ function ChatPanel({
         const files = [...e.clipboardData.items].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter((f): f is File => !!f);
         if (!files.length) return;
         e.preventDefault();
-        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
+        if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : windowClosed ? '24-hour window closed: only approved templates can be sent until the customer writes again.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
         pickFile(pastedName(files[0]), files.length > 1);
       }}
     >
@@ -2215,7 +2278,7 @@ function ChatPanel({
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
           </svg>
           <p className="mt-2 text-sm font-semibold text-ink">{canAttach ? 'Drop to send' : "Files can't be sent in this chat"}</p>
-          <p className="mt-0.5 text-xs text-muted">{canAttach ? 'JPEG or PNG images up to 5 MB · PDF, Word, Excel, PowerPoint or text up to 100 MB' : isClosed ? 'Reopen the chat first.' : 'Assign it to yourself first.'}</p>
+          <p className="mt-0.5 text-xs text-muted">{canAttach ? 'JPEG or PNG images up to 5 MB · PDF, Word, Excel, PowerPoint or text up to 100 MB' : isClosed ? 'Reopen the chat first.' : windowClosed ? '24-hour window closed: send a template instead.' : 'Assign it to yourself first.'}</p>
         </div>
       )}
       {/* Ambient Doodle Pattern */}
@@ -2493,10 +2556,15 @@ function ChatPanel({
         {error && (
           <div className="mb-2 rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</div>
         )}
+        {!noting && !error && overLimit(text, WHATSAPP_TEXT_MAX) && (
+          <div className="mb-2 rounded-lg bg-danger-soft px-3 py-1.5 text-xs text-danger" role="status">
+            {tooLongText(text, WHATSAPP_TEXT_MAX)}
+          </div>
+        )}
 
         {undo && <UndoToast key={undo.id} busy={busy} onUndo={doUndo} onDone={clearUndo} />}
 
-        {replyTo && !editing && !isClosed && (
+        {replyTo && !editing && !isClosed && !windowClosed && (
           <div className="mb-2 flex items-start gap-2 rounded-lg bg-surface-muted p-1.5" aria-label="Replying to">
             <QuoteBlock
               quote={{
@@ -2574,12 +2642,85 @@ function ChatPanel({
         voiceMode ? (
           <VoiceRecorder onSend={sendVoiceNote} onClose={() => setVoiceMode(false)} />
         ) : (
+        <>
+        {/* Reply / Add note, Template, and the number replies go out from */}
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+          <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
+            {(
+              [
+                { key: 'reply', label: 'Reply', icon: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /> },
+                { key: 'note', label: 'Add note', icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /> },
+              ] as const
+            ).map((t) => {
+              const on = (t.key === 'note') === noting;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={on}
+                  disabled={!!editing && t.key === 'note'}
+                  onClick={() => {
+                    setMode(t.key);
+                    if (t.key === 'note') {
+                      setReplyTo(null);
+                      setTemplate(null);
+                    }
+                    requestAnimationFrame(() => inputRef.current?.focus());
+                  }}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
+                    on ? (t.key === 'note' ? 'bg-warning-soft-hover text-warning shadow-xs' : 'bg-surface text-primary shadow-xs') : 'text-muted hover:text-body'
+                  }`}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    {t.icon}
+                  </svg>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+          {!noting && !(windowClosed && !editing) && <TemplatePicker disabled={!!editing} highlight={false} onPick={setTemplate} />}
+          
+        </div>
+        {template && !noting && !editing ? (
+          // A chosen template: filled in, previewed and sent right here (inside or outside the 24-hour window)
+          <TemplateComposer
+            key={`${conversation.id}:${template.name}:${template.language}`}
+            template={template}
+            conversationId={conversation.id}
+            customer={{ id: conversation.contact.id, name: conversation.contact.name, waId: conversation.contact.waId }}
+            meName={meName}
+            onSent={onSent}
+            onClose={() => {
+              setTemplate(null);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          />
+        ) : windowClosed && !noting && !editing ? (
+          // After 24 hours: no typing or sending, only an approved template (Add note still works: it stays internal)
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning-border bg-warning-soft px-4 py-3 text-xs" role="status">
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-warning">24-hour window closed</p>
+              <p className="mt-0.5 text-body-soft">
+                {lastCustomerAt
+                  ? `The customer last wrote ${formatDateTime(lastCustomerAt)}. `
+                  : "The customer hasn't written yet. "}
+                WhatsApp only allows approved templates until they write again.
+              </p>
+            </div>
+            <TemplatePicker variant="primary" disabled={false} highlight onPick={setTemplate} />
+          </div>
+        ) : (
         <form
           onSubmit={(e) => {
             e.preventDefault();
             typingSender.stop();
+            // Over WhatsApp's limit for one message: kept as typed, nothing sent (the warning above says why)
+            if (!noting && overLimit(text, WHATSAPP_TEXT_MAX)) return setError(tooLongText(text, WHATSAPP_TEXT_MAX));
             if (editing) return void saveEdit();
             if (!text.trim()) return;
+            if (noting) return void saveNote(text);
             send(text);
             setText('');
           }}
@@ -2619,6 +2760,7 @@ function ChatPanel({
               pickFile(f);
             }}
           />
+          {!noting && (
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -2631,9 +2773,7 @@ function ChatPanel({
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           </button>
-
-          {/* WhatsApp templates: the only messages allowed once the 24-hour window has closed */}
-          <TemplatePicker disabled={!!editing || isClosed} highlight={false} onPick={setTemplate} />
+          )}
 
           {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
           <textarea
@@ -2680,12 +2820,17 @@ function ChatPanel({
                 e.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder={editing ? 'Edit message' : 'Type a message, or / for quick replies'}
-            className="flex-1 resize-none rounded-xl border border-line bg-surface-muted/70 px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary"
+            placeholder={editing ? 'Edit message' : noting ? 'Write an internal note for your team…' : 'Type a message, or / for quick replies'}
+            aria-label={noting ? 'Internal note' : 'Message'}
+            className={`flex-1 resize-none rounded-xl border px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition ${
+              noting
+                ? 'border-warning-border bg-warning-soft focus:border-warning focus:ring-1 focus:ring-warning'
+                : 'border-line bg-surface-muted/70 focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary'
+            }`}
           />
 
           {/* Empty message box: microphone to record a voice note (like WhatsApp); otherwise Send */}
-          {!text.trim() && !editing ? (
+          {!text.trim() && !editing && !noting ? (
             <button
               type="button"
               onClick={() => {
@@ -2708,25 +2853,17 @@ function ChatPanel({
             disabled={!text.trim() || busy}
             className="flex h-9 items-center justify-center gap-1.5 rounded-xl bg-primary px-4 text-xs font-semibold text-on-primary shadow-xs hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
-            <span>{editing ? (busy ? 'Saving…' : 'Save') : 'Send'}</span>
+            <span>{editing ? (busy ? 'Saving…' : 'Save') : noting ? (busy ? 'Saving…' : 'Add note') : 'Send'}</span>
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
               <path d="m3.4 20.4 17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
             </svg>
           </button>
           )}
         </form>
+        )}
+        </>
         ))}
         {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
-        {template && (
-          <TemplateSendDialog
-            template={template}
-            conversationId={conversation.id}
-            customer={{ name: conversation.contact.name, waId: conversation.contact.waId }}
-            meName={meName}
-            onSent={onSent}
-            onClose={() => setTemplate(null)}
-          />
-        )}
       </footer>
 
       {menu && (

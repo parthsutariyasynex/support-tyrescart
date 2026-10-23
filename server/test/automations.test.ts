@@ -80,7 +80,7 @@ describe('automation rules', () => {
     const n = vars.nameParts;
     assert.deepEqual(n({ name: 'Alice Patel' }), { first: 'Alice', last: 'Patel' });
     assert.deepEqual(n({ name: '  Maria   de la  Cruz ' }), { first: 'Maria', last: 'de la Cruz' }); // the rest, spaces tidied
-    assert.deepEqual(n({ name: 'Alice' }), { first: 'Alice', last: '' }); // one word: no last name (the follow-up fallback applies)
+    assert.deepEqual(n({ name: 'Alice' }), { first: 'Alice', last: '' }); // one word: no last name
     assert.deepEqual(n({ name: '   ' }), { first: 'there', last: '' });
     assert.deepEqual(n({ name: null }), { first: 'there', last: '' });
     // entered names always win, each on its own

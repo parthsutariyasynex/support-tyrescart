@@ -50,6 +50,7 @@ import { PropertySettings } from './PropertySettings';
 import { useStagesChanged } from './StageMenu';
 import { MediaViewer } from './composerExtras';
 import { downloadFile } from '@/lib/media';
+import { overLimit } from '@/lib/textLimits';
 import { filterDialCountries } from '@/lib/profileOptions';
 import { SearchSelect } from '../SearchSelect';
 
@@ -332,7 +333,7 @@ export function ContactPanel({
         <>
         {error && <p className="mx-5 mt-3 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
 
-        <Remarks contactId={contactId} remarks={remarks} setRemarks={setRemarks} viewer={viewer} maxLength={options?.remarkMaxLength ?? 2000} toastDetail={toastDetail} conversationId={conversation.id} />
+        <Remarks contactId={contactId} remarks={remarks} setRemarks={setRemarks} viewer={viewer} maxLength={options?.remarkMaxLength ?? null} toastDetail={toastDetail} conversationId={conversation.id} />
 
         <Section
           title="Labels"
@@ -446,7 +447,8 @@ export function Remarks({
   remarks: ContactRemark[] | null;
   setRemarks: (r: ContactRemark[] | ((prev: ContactRemark[] | null) => ContactRemark[] | null)) => void;
   viewer: { userId: string; isAdmin: boolean } | null;
-  maxLength: number;
+  // What a remark can hold (the database column), from the server; null until loaded. Never cut: over it, Save waits
+  maxLength: number | null;
   toastDetail: string;
 }) {
   const [adding, setAdding] = useState(false);
@@ -463,7 +465,7 @@ export function Remarks({
 
   async function save() {
     const body = text.trim();
-    if (!body || busy) return;
+    if (!body || busy || overLimit(body, maxLength)) return;
     setBusy(true);
     setError('');
     try {
@@ -497,7 +499,7 @@ export function Remarks({
   }
   async function saveEdit(r: ContactRemark) {
     const body = editText.trim();
-    if (!body || busy) return;
+    if (!body || busy || overLimit(body, maxLength)) return;
     if (body === r.body) return setEditingId(null);
     setBusy(true);
     setError('');
@@ -549,7 +551,6 @@ export function Remarks({
           <textarea
             ref={ref}
             value={text}
-            maxLength={maxLength}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Escape') setAdding(false);
@@ -560,14 +561,16 @@ export function Remarks({
             className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink outline-hidden placeholder:text-faint focus:border-primary focus:ring-1 focus:ring-primary"
           />
           <div className="mt-1.5 flex items-center justify-between">
-            <span className="text-[10px] text-faint">
-              {text.length}/{maxLength}
+            <span className={`text-[10px] ${overLimit(text, maxLength) ? 'font-semibold text-danger' : 'text-faint'}`}>
+              {text.length.toLocaleString('en')}
+              {maxLength != null && `/${maxLength.toLocaleString('en')}`}
+              {overLimit(text, maxLength) && ': too long to save, shorten it'}
             </span>
             <div className="flex gap-1.5">
               <button type="button" onClick={() => setAdding(false)} className="rounded-lg px-2.5 py-1 text-xs text-body-soft hover:bg-surface-strong">
                 Cancel
               </button>
-              <button type="button" disabled={!text.trim() || busy} onClick={save} className="rounded-lg bg-primary px-3 py-1 text-xs font-semibold text-on-primary hover:opacity-90 disabled:opacity-50">
+              <button type="button" disabled={!text.trim() || busy || overLimit(text, maxLength)} onClick={save} className="rounded-lg bg-primary px-3 py-1 text-xs font-semibold text-on-primary hover:opacity-90 disabled:opacity-50">
                 {busy ? 'Saving…' : 'Save'}
               </button>
             </div>
@@ -588,7 +591,6 @@ export function Remarks({
                   <textarea
                     ref={editRef}
                     value={editText}
-                    maxLength={maxLength}
                     onChange={(e) => setEditText(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') setEditingId(null);
@@ -599,8 +601,10 @@ export function Remarks({
                     className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink outline-hidden focus:border-primary focus:ring-1 focus:ring-primary"
                   />
                   <div className="mt-1.5 flex items-center justify-between">
-                    <span className="text-[10px] text-faint">
-                      {editText.length}/{maxLength}
+                    <span className={`text-[10px] ${overLimit(editText, maxLength) ? 'font-semibold text-danger' : 'text-faint'}`}>
+                      {editText.length.toLocaleString('en')}
+                      {maxLength != null && `/${maxLength.toLocaleString('en')}`}
+                      {overLimit(editText, maxLength) && ': too long to save, shorten it'}
                     </span>
                     <div className="flex gap-1.5">
                       <button type="button" onClick={() => setEditingId(null)} className="rounded-lg px-2.5 py-1 text-xs text-body-soft hover:bg-surface-strong">
@@ -608,7 +612,7 @@ export function Remarks({
                       </button>
                       <button
                         type="button"
-                        disabled={!editText.trim() || editText.trim() === r.body || busy}
+                        disabled={!editText.trim() || editText.trim() === r.body || busy || overLimit(editText, maxLength)}
                         onClick={() => saveEdit(r)}
                         className="rounded-lg bg-primary px-3 py-1 text-xs font-semibold text-on-primary hover:opacity-90 disabled:opacity-50"
                       >

@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CAPTION_MAX, checkFile, documentLabel, downloadFile, formatSize, mediaUrl } from '@/lib/media';
+import { overLimit, tooLongText } from '@/lib/textLimits';
 
 // The full Unicode emoji set (emoji-picker-react): search, categories, skin tones and recently used (kept in this
 // browser by the picker). Its data ships with the package, so nothing is fetched from another site; and it's only
@@ -136,6 +137,8 @@ export function FileSendDialog({
   }, [busy, onClose]);
 
   async function send() {
+    // Over WhatsApp's caption limit: kept as typed, not sent until it's shortened
+    if (overLimit(caption, CAPTION_MAX)) return setError(tooLongText(caption, CAPTION_MAX, "WhatsApp allows a caption of up to"));
     setBusy(true);
     setError('');
     try {
@@ -176,7 +179,6 @@ export function FileSendDialog({
         <div className="border-t border-line-soft p-4">
           <textarea
             value={caption}
-            maxLength={CAPTION_MAX}
             onChange={(e) => setCaption(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -191,6 +193,11 @@ export function FileSendDialog({
             className="w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink outline-hidden placeholder:text-faint focus:border-primary focus:ring-1 focus:ring-primary"
           />
           {error && <p className="mt-2 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+          {!error && overLimit(caption, CAPTION_MAX) && (
+            <p className="mt-2 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger" role="status">
+              {tooLongText(caption, CAPTION_MAX, 'WhatsApp allows a caption of up to')}
+            </p>
+          )}
           <div className="mt-3 flex items-center justify-end gap-2">
             <button type="button" disabled={busy} onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-body-soft hover:bg-surface-muted disabled:opacity-50">
               Cancel

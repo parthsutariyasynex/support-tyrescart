@@ -143,7 +143,9 @@ export function renderTemplate(t: TemplateInfo, values: SendValues) {
     t.footer ?? '',
     t.buttons.length ? t.buttons.map((b) => `[${b.text}]`).join(' ') : '',
   ].filter(Boolean);
-  return parts.join('\n\n');
+  // A name the customer doesn't have is sent as an invisible character (WhatsApp refuses empty values); the chat
+  // shows the text without it: "Hello \u200B 👋," → "Hello 👋,"
+  return parts.join('\n\n').replace(/ *\u200B *([,.!?;:])/g, '$1').replace(/ *\u200B */g, ' ');
 }
 
 // --- Creating and editing (Settings → Templates)

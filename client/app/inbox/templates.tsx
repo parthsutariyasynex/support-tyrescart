@@ -3,13 +3,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { Message } from '@/lib/inbox';
-import { type Template, type TemplateValues, fetchApprovedTemplates, missingValues, sendTemplate } from '@/lib/templates';
-import { TemplatePreview } from '../TemplatePreview';
+import { fetchContact } from '@/lib/contacts';
+import { type Template, type TemplateValues, autoFillValues, customerNames, fetchApprovedTemplates, missingValues, nameFor, readableMessage, sendTemplate } from '@/lib/templates';
+import { CONTACT_UPDATED_EVENT } from './ContactPanel';
+import { overLimit } from '@/lib/textLimits';
 
-// Composer button: pick one of the number's approved templates (search by name or text). Templates with values to
-// fill in (variables, a header file, a coupon) open the send dialog; templates are the only messages WhatsApp
-// allows once the 24-hour window has closed.
-export function TemplatePicker({ disabled, highlight, onPick }: { disabled: boolean; highlight: boolean; onPick: (t: Template) => void }) {
+// Composer button: pick one of the number's approved templates (search by name or text); it opens inline above the
+// chat (TemplateComposer) to fill in and send. Templates are the only messages WhatsApp allows once the 24-hour
+// window has closed.
+export function TemplatePicker({
+  disabled,
+  highlight,
+  onPick,
+  variant = 'toolbar',
+}: {
+  disabled: boolean;
+  highlight: boolean;
+  onPick: (t: Template) => void;
+  // toolbar: beside Reply / Add note; primary: the big "Send template" once the 24-hour window has closed
+  variant?: 'toolbar' | 'primary';
+}) {
   const [open, setOpen] = useState(false);
   const [templates, setTemplates] = useState<Template[] | null>(null);
   const [query, setQuery] = useState('');
@@ -50,24 +63,33 @@ export function TemplatePicker({ disabled, highlight, onPick }: { disabled: bool
   const shown = (templates ?? []).filter((t) => !q || t.name.toLowerCase().includes(q) || t.body.toLowerCase().includes(q));
   return (
     <div ref={ref} className="relative">
-      {/* <button
+      {/* "Template" beside Reply / Add note above the message box; stands out once the 24-hour window has closed */}
+      <button
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        title="Send an approved template"
+        title={highlight ? '24-hour window closed: send an approved template' : 'Send an approved template'}
         aria-expanded={open}
-        className={`flex h-9 items-center justify-center rounded-xl px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
-          open || highlight ? 'bg-primary-subtle text-primary' : 'text-faint hover:bg-surface-strong hover:text-body-soft'
-        }`}
+        aria-haspopup="dialog"
+        className={
+          variant === 'primary'
+            ? 'flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs font-semibold text-on-primary shadow-xs transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50'
+            : `flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                open || highlight ? 'border-primary/40 bg-primary-subtle text-primary' : 'border-line text-muted hover:bg-surface-muted hover:text-body'
+              }`
+        }
       >
-        Template
-      </button> */}
+        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h5" />
+        </svg>
+        {variant === 'primary' ? 'Send template' : 'Template'}
+      </button>
 
       {open && (
         <div
           role="dialog"
           aria-label="Approved templates"
-          className="absolute bottom-11 left-0 z-50 flex max-h-[60vh] w-80 max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface text-xs shadow-xl"
+          className={`absolute z-50 flex max-h-[60vh] w-80 ${variant === 'primary' ? 'bottom-11 right-0' : 'bottom-9 left-0'} max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface text-xs shadow-xl`}
         >
           <div className="border-b border-line-soft p-2">
             <input
@@ -116,101 +138,160 @@ export function TemplatePicker({ disabled, highlight, onPick }: { disabled: bool
 
 const ACCEPT: Record<string, string> = { IMAGE: 'image/jpeg,image/png', VIDEO: 'video/mp4', DOCUMENT: '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt' };
 
-// The values a template needs, with a live preview of what the customer gets. Quick fills use the customer's
-// details and your name.
-export function TemplateSendDialog({
+// The chosen template, inline above the chat: just the message, with {{1}} / {{2}} filled with the customer's first
+// and last name from their contact (else their WhatsApp name). No name (a number-only contact): it goes without
+// one ("Hello 👋, …", never "{{1}}" or a made-up name; see NO_NAME). Boxes only for other values (an order
+// number, a header file). Esc or ✕ cancels; nothing is sent until "Send template" → "Yes, Send".
+export function TemplateComposer({
   template: t,
   conversationId,
   customer,
   meName,
-  businessName,
   onSent,
   onClose,
 }: {
   template: Template;
   conversationId: string;
-  customer: { name: string | null; waId: string };
+  customer: { id: string; name: string | null; waId: string };
   meName: string;
-  businessName?: string;
   onSent: (m: Message) => void;
   onClose: () => void;
 }) {
-  const [values, setValues] = useState<TemplateValues>({ header: {}, body: {}, buttons: {} });
+  const [names, setNames] = useState(() => customerNames({ name: customer.name }));
+  const [values, setValues] = useState<TemplateValues>(() => autoFillValues(t, customerNames({ name: customer.name })));
+  const touched = useRef(new Set<string>()); // fields the agent typed in: never overwritten by the auto-fill
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // "Send template" asks first: the confirmation (with its own request id) is open; nothing is sent until "Yes, Send"
+  const [confirm, setConfirm] = useState<{ requestId: string } | null>(null);
+  const [contactVersion, setContactVersion] = useState(0);
+
+  // The saved first / last name (the chat list only has the WhatsApp name); re-fills what the agent hasn't touched
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose();
+    let cancelled = false;
+    fetchContact(customer.id)
+      .then((c) => {
+        if (cancelled) return;
+        const n = customerNames(c);
+        setNames(n);
+        const auto = autoFillValues(t, n);
+        setValues((v) => {
+          const body = { ...v.body };
+          for (const k of t.bodyVariables) if (!touched.current.has(`body-${k}`) && nameFor(k)) body[k] = auto.body[k] ?? '';
+          return { ...v, body };
+        });
+      })
+      .catch(() => {}); // keeps the WhatsApp-name fill
+    return () => {
+      cancelled = true;
+    };
+  }, [customer.id, t, contactVersion]);
+  // A name added or changed in the profile (by anyone) shows here at once
+  useEffect(() => {
+    const on = (e: Event) => (e as CustomEvent<{ id?: string }>).detail?.id === customer.id && setContactVersion((n) => n + 1);
+    window.addEventListener(CONTACT_UPDATED_EVENT, on);
+    return () => window.removeEventListener(CONTACT_UPDATED_EVENT, on);
+  }, [customer.id]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && !confirm && onClose();
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [busy, onClose]);
+  }, [busy, confirm, onClose]);
 
-  const set = (part: keyof TemplateValues, key: string, value: string) => setValues((v) => ({ ...v, [part]: { ...v[part], [key]: value } }));
+  const set = (part: keyof TemplateValues, key: string, value: string) => {
+    touched.current.add(`${part}-${key}`);
+    setValues((v) => ({ ...v, [part]: { ...v[part], [key]: value } }));
+  };
   const missing = missingValues(t, values, file);
-  const firstName = (customer.name ?? '').trim().split(/\s+/)[0] ?? '';
+  const message = [t.header?.format === 'TEXT' ? readableMessage(t.header.text ?? '', values.header) : '', readableMessage(t.body, values.body), t.footer ?? '']
+    .filter(Boolean)
+    .join('\n\n');
   const quick = [
-    customer.name ? { label: 'Customer name', value: customer.name } : null,
-    firstName && firstName !== customer.name ? { label: 'First name', value: firstName } : null,
+    names.first ? { label: 'First name', value: names.first } : null,
+    names.last ? { label: 'Last name', value: names.last } : null,
     { label: 'Phone', value: `+${customer.waId}` },
     { label: 'My name', value: meName },
   ].filter((x): x is { label: string; value: string } => !!x && !!x.value);
 
-  async function send() {
+  // "Send template": check everything is filled in, then ask (one request id per confirmation)
+  function askToSend() {
     if (missing.length) return setError(`Fill in: ${missing.join(', ')}`);
-    setBusy(true);
+    if (tooLong.length) return setError(`Too long for WhatsApp: ${tooLong.join(', ')}. Shorten it to send.`);
     setError('');
+    setConfirm({ requestId: crypto.randomUUID() });
+  }
+  // "Yes, Send": the only place a template is sent; ignored while a send is already running
+  async function send() {
+    if (!confirm || busy) return;
+    setBusy(true);
     try {
-      onSent(await sendTemplate(conversationId, t, values, file));
+      onSent(await sendTemplate(conversationId, t, values, file, confirm.requestId));
       onClose();
     } catch (err) {
       setError((err as Error).message);
+      setConfirm(null);
       setBusy(false);
     }
   }
 
-  const field = (part: keyof TemplateValues, key: string, label: string, hint?: string, maxLength = 1024) => (
-    <div key={`${part}-${key}`}>
-      <label htmlFor={`tv-${part}-${key}`} className="mb-1 block text-[11px] font-semibold text-muted">
-        {label}
-      </label>
-      {hint && <p className="mb-1 break-all text-[11px] text-faint">{hint}</p>}
-      <input
-        id={`tv-${part}-${key}`}
-        value={values[part][key] ?? ''}
-        onChange={(e) => set(part, key, e.target.value)}
-        maxLength={maxLength}
-        className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-hidden focus:border-primary focus:ring-1 focus:ring-primary"
-      />
-      {part !== 'buttons' && (
-        <div className="mt-1 flex flex-wrap gap-1">
-          {quick.map((q) => (
-            <button key={q.label} type="button" onClick={() => set(part, key, q.value)} className="rounded-full bg-surface-strong px-2 py-0.5 text-[10px] text-body-soft hover:text-ink">
-              {q.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  // Values over Meta's limit for that place (header 60, body 1024, …): kept as typed, Send waits (filled while rendering)
+  const tooLong: string[] = [];
+  const field = (part: keyof TemplateValues, key: string, label: string, hint?: string, maxLength = 1024) => {
+    if (part === 'body' && nameFor(key)) return null; // names come only from the contact
+    const value = values[part][key] ?? '';
+    const over = overLimit(value, maxLength);
+    if (over) tooLong.push(label);
+    return (
+      <div key={`${part}-${key}`}>
+        <label htmlFor={`tv-${part}-${key}`} className="mb-1 block text-[11px] font-semibold text-muted">
+          {label}
+        </label>
+        {hint && <p className="mb-1 break-all text-[11px] text-faint">{hint}</p>}
+        {over && <p className="mb-1 text-[11px] font-semibold text-danger">{value.length.toLocaleString('en')} / {maxLength.toLocaleString('en')} characters: WhatsApp allows up to {maxLength.toLocaleString('en')} here</p>}
+        <input
+          id={`tv-${part}-${key}`}
+          value={value}
+          onChange={(e) => set(part, key, e.target.value)}
+          className={`w-full rounded-lg border bg-surface px-3 py-1.5 text-[13px] text-ink outline-hidden focus:border-primary focus:ring-1 focus:ring-primary ${
+            !value.trim() ? 'border-warning-border' : 'border-line'
+          }`}
+        />
+        {part !== 'buttons' && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {quick.map((q) => (
+              <button key={q.label} type="button" onClick={() => set(part, key, q.value)} className="rounded-full bg-surface-strong px-2 py-0.5 text-[10px] text-body-soft hover:text-ink">
+                {q.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
   const mediaFormat = t.header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(t.header.format) ? t.header.format : null;
 
-  if (typeof document === 'undefined') return null;
-  return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-ink/50 p-4" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div role="dialog" aria-label="Send template" className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-surface shadow-2xl">
-        <div className="flex items-center justify-between border-b border-line-soft px-5 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold text-ink">Send template · {t.name}</h2>
-            <p className="text-[11px] text-muted">
-              {t.category.charAt(0) + t.category.slice(1).toLowerCase()} · {t.language}
-            </p>
-          </div>
-          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="rounded-lg px-2 py-1 text-body-soft hover:bg-surface-muted">
-            ✕
-          </button>
+  return (
+    <div role="dialog" aria-label="Send template" className="flex max-h-[55vh] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-xs">
+      <div className="flex items-center justify-between gap-3 border-b border-line-soft px-3.5 py-2">
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <svg className="h-4 w-4 shrink-0 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h5" />
+          </svg>
+          <span className="truncate font-semibold text-ink">{t.name}</span>
+          <span className="shrink-0 rounded bg-surface-strong px-1 text-[10px] text-muted">{t.language}</span>
+          <span className="shrink-0 text-[10px] text-faint">{t.category.charAt(0) + t.category.slice(1).toLowerCase()}</span>
         </div>
-        <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto p-5 md:grid-cols-[1fr_320px]">
-          <div className="space-y-4">
+        <button type="button" onClick={onClose} disabled={busy} aria-label="Cancel template" title="Cancel (Esc)" className="rounded-md px-1.5 py-0.5 text-faint hover:bg-surface-muted hover:text-body">
+          ✕
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5">
+        <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink" aria-label="Message">
+          {message}
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 empty:hidden">
             {mediaFormat && (
               <div>
                 <p className="mb-1 text-[11px] font-semibold text-muted">Header {mediaFormat.toLowerCase()}</p>
@@ -235,32 +316,86 @@ export function TemplateSendDialog({
                   ? field('buttons', String(i), 'Coupon code', 'Shown with the “Copy code” button', 15)
                   : null,
             )}
-            {!t.needsParameters && <p className="text-[13px] text-body-soft">This template has nothing to fill in. Check the preview and send.</p>}
-            {error && <p className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
-          </div>
-          <TemplatePreview
-            headerFormat={t.header?.format}
-            headerText={t.header?.text}
-            headerValues={values.header}
-            headerFile={file}
-            body={t.body}
-            bodyValues={values.body}
-            footer={t.footer}
-            buttons={t.buttons}
-            businessName={businessName}
-          />
         </div>
-        <div className="flex items-center justify-end gap-2 border-t border-line-soft px-5 py-3">
-          {missing.length > 0 && <span className="mr-auto text-[11px] text-faint">Still to fill in: {missing.join(', ')}</span>}
-          <button type="button" disabled={busy} onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-body-soft hover:bg-surface-muted disabled:opacity-50">
+        {error && <p className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+      </div>
+      <div className="flex items-center justify-end gap-2 border-t border-line-soft px-3.5 py-2">
+        {missing.length > 0 && <span className="mr-auto text-[11px] text-warning">Still to fill in: {missing.join(', ')}</span>}
+        <button type="button" disabled={busy} onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-body-soft hover:bg-surface-muted disabled:opacity-50">
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={busy || missing.length > 0}
+          onClick={askToSend}
+          className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-on-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {busy ? 'Sending…' : 'Send template'}
+          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="m3.4 20.4 17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+          </svg>
+        </button>
+      </div>
+      {confirm &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <ConfirmTemplateSend template={t} message={message} busy={busy} onYes={send} onCancel={() => !busy && setConfirm(null)} />,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+// "Send this template?": its name and exactly what the customer will get (read-only, as approved by Meta), then
+// Yes, Send or Cancel. Esc, Cancel or a click outside send nothing.
+function ConfirmTemplateSend({
+  template: t,
+  message,
+  busy,
+  onYes,
+  onCancel,
+}: {
+  template: Template;
+  message: string;
+  busy: boolean;
+  onYes: () => void;
+  onCancel: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCancel();
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onCancel]);
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end justify-center bg-shadow/40 p-4 sm:items-center" onClick={onCancel}>
+      <div role="alertdialog" aria-modal="true" aria-label="Send this template?" onClick={(e) => e.stopPropagation()} className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-surface shadow-xl">
+        <div className="px-5 pt-5">
+          <h2 className="text-sm font-bold text-ink">Send this template?</h2>
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-muted">
+            <span className="font-semibold text-body">{t.name}</span>
+            <span className="rounded bg-surface-strong px-1 text-[10px]">{t.language}</span>
+            <span className="text-[10px] text-faint">{t.category.charAt(0) + t.category.slice(1).toLowerCase()}</span>
+          </p>
+        </div>
+        <p className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-5 py-4 text-[13px] leading-relaxed text-ink" aria-label="Message">
+          {message}
+        </p>
+        <div className="flex justify-end gap-2 border-t border-line-soft px-5 py-3">
+          <button ref={cancelRef} type="button" disabled={busy} onClick={onCancel} className="rounded-lg px-3 py-1.5 text-xs font-medium text-body-soft hover:bg-surface-strong disabled:opacity-50">
             Cancel
           </button>
-          <button type="button" disabled={busy} onClick={send} className="rounded-lg bg-primary px-5 py-1.5 text-xs font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-60">
-            {busy ? 'Sending…' : 'Send template'}
+          <button type="button" disabled={busy} onClick={onYes} className="rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-60">
+            {busy ? 'Sending…' : 'Yes, Send'}
           </button>
         </div>
       </div>
-    </div>,
-    document.body,
+    </div>
   );
 }

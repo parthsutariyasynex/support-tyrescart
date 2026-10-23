@@ -87,6 +87,8 @@ export const typeDefs = /* GraphQL */ `
 
   type Conversation {
     id: ID!
+    "Only on startConversation: true when this started a new chat, false when the number already had one (reused)"
+    startedNow: Boolean
     contact: Contact!
     unread: Int!
     lastMessageAt: DateTime!
@@ -167,6 +169,10 @@ export const typeDefs = /* GraphQL */ `
     language: String
     "JSON: { header: { var: value }, body: { var: value }, buttons: { index: value } } (variables by name or number)"
     values: String
+    "Must be true: the agent confirmed this send in the chat (Yes, Send). Templates are never sent without it"
+    confirmed: Boolean
+    "Made once per confirmation (8-100 letters, digits, - or _): the same id again returns the first send instead of sending twice"
+    requestId: String
   }
 
   "An approved WhatsApp template (one per name + language)"
@@ -372,13 +378,15 @@ export const resolvers = {
     sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string; replyToId?: string | null } }, { workspaceId, userId }) =>
       sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body, replyToId: input.replyToId }, userId),
     ),
-    sendTemplateMessage: authed(async ({ input }: { input: { conversationId: string; name: string; language?: string | null; values?: string | null } }, auth) =>
+    sendTemplateMessage: authed(async ({ input }: { input: { conversationId: string; name: string; language?: string | null; values?: string | null; confirmed?: boolean | null; requestId?: string | null } }, auth) =>
       withSender(
         await sendTemplateMessage(auth, {
           conversationId: input.conversationId,
           name: input.name,
           language: input.language ?? undefined,
           values: input.values ? jsonInput(input.values) : undefined,
+          confirmed: input.confirmed ?? undefined,
+          requestId: input.requestId ?? undefined,
         }),
       ),
     ),

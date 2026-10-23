@@ -57,6 +57,14 @@ async function toActivity(row: Row) {
 
 const include = { conversation: { select: { contact: true } } } as const;
 
+// A short version of a message for activity lists (the bell, the contact's activity): the message itself is always
+// stored in full; a shortened preview ends with "…", so it's never silently cut. Cut between whole characters, never
+// inside an emoji (half an emoji is invalid text the database refuses, and the activity would be lost).
+export function previewOf(text: string, max: number) {
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max - 1).join('').trimEnd()}…` : text;
+}
+
 export async function recordActivity(e: {
   workspaceId: string;
   conversationId: string;

@@ -12,8 +12,8 @@ import { listLeadStages } from './leadStages.js';
 export type Variable = { key: string; label: string };
 
 // First and last name: what's entered on the contact; when empty, taken from the WhatsApp profile name ("Alice
-// Patel" → Alice, Patel). A one-word profile name has no last name (''), so a follow-up's fallback still applies;
-// first name ends with "there" when nothing is known.
+// Patel" → Alice, Patel). A one-word profile name has no last name (''); first name ends with "there" when nothing
+// is known.
 export function nameParts(c: { firstName?: string | null; lastName?: string | null; name?: string | null }) {
   const words = c.name?.trim().split(/\s+/).filter(Boolean) ?? [];
   return { first: c.firstName?.trim() || words[0] || 'there', last: c.lastName?.trim() || words.slice(1).join(' ') };

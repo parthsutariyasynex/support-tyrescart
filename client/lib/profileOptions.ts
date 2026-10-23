@@ -1,4 +1,4 @@
-import { type CountryCode, getCountries, getCountryCallingCode, parsePhoneNumberFromString } from 'libphonenumber-js';
+import { type CountryCode, getCountries, getCountryCallingCode, isValidPhoneNumber, parsePhoneNumberFromString } from 'libphonenumber-js';
 
 // Settings → General: the country picker beside "Phone number" and the "Your time zone" list. Both come from the
 // platform (libphonenumber's country list, the browser's own country and time zone names), nothing hand-written.
@@ -52,6 +52,15 @@ export function joinPhone(country: CountryCode, national: string) {
   if (national.trim().startsWith('+')) return `+${national.replace(/[^\d]/g, '')}`;
   const digits = national.replace(/[^\d]/g, '').replace(/^0+/, '');
   return digits ? `+${getCountryCallingCode(country)}${digits}` : '';
+}
+
+// New chat: the number typed (with the chosen country, or a full +international one pasted) as WhatsApp's id (digits
+// with country code, as the server stores it), or why it isn't a real number. The server checks it again.
+export function newChatNumber(country: CountryCode, typed: string): { waId: string } | { problem: string } {
+  const e164 = joinPhone(country, typed);
+  if (!e164) return { problem: 'Enter the WhatsApp number' };
+  if (!isValidPhoneNumber(e164)) return { problem: `${e164} isn't a valid number. Check the country code and the number.` };
+  return { waId: e164.slice(1) };
 }
 
 export type TimeZoneOption = { value: string; label: string; offsetMinutes: number };
