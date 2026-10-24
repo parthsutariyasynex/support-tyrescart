@@ -7,6 +7,7 @@ import { disconnectUser } from '../realtime.js';
 import { prisma } from '../prisma.js';
 import { AppError } from './errors.js';
 import { readJoinLink } from './joinLinks.js';
+import { logEvent } from './logging.js';
 import { DEFAULT_ROLE } from './roles.js';
 import { parse } from './validate.js';
 
@@ -96,13 +97,23 @@ export async function findOrphanAccount(email: string) {
   return user && user._count.members === 0 ? { id: user.id } : null;
 }
 
+// Sign-ins are logged with the email and IP (never the password): refusals as WARNING with the reason
+const logLoginRefused = (reason: string, code: string, data: Record<string, unknown>, userId?: string) =>
+  void logEvent({ level: 'WARNING', category: 'auth', event: 'login.failed', message: `Sign-in refused: ${reason}`, errorCode: code, userId, data });
+
 export async function login(input: unknown, ip: string) {
-  checkRateLimit(ip);
+  try {
+    checkRateLimit(ip);
+  } catch (err) {
+    logLoginRefused('too many failed attempts from this IP', 'RATE_LIMITED', { ip });
+    throw err;
+  }
   const { email, password, workspaceId } = parse(loginSchema, input);
   const user = await prisma.user.findUnique({ where: { email }, include: { members: { orderBy: { id: 'asc' } } } });
   const ok = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
   if (!user || !ok) {
     recordFailure(ip);
+    logLoginRefused(user ? 'wrong password' : 'no account with this email', 'INVALID_CREDENTIALS', { email, ip }, user?.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
   failures.delete(ip);
@@ -111,10 +122,14 @@ export async function login(input: unknown, ip: string) {
   const active = user.members.filter((m) => m.active);
   const member = active.find((m) => m.workspaceId === workspaceId) ?? active[0];
   if (!member) {
-    if (user.members.length)
+    if (user.members.length) {
+      logLoginRefused('account deactivated', 'ACCOUNT_INACTIVE', { email, ip }, user.id);
       throw new AppError('This account has been deactivated. Ask an admin to reactivate it.', 403, 'ACCOUNT_INACTIVE');
+    }
+    logLoginRefused('account has no workspace', 'NO_WORKSPACE', { email, ip }, user.id);
     throw new AppError('This account has no workspace', 403, 'NO_WORKSPACE');
   }
+  void logEvent({ level: 'SUCCESS', category: 'auth', event: 'login.success', message: 'Signed in', userId: user.id, workspaceId: member.workspaceId, data: { email, ip } });
   return { token: signToken({ userId: user.id, workspaceId: member.workspaceId }), userId: user.id };
 }
 

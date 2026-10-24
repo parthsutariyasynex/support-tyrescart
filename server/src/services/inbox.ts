@@ -17,6 +17,7 @@ import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './inc
 import { withSender } from './senders.js';
 import { defaultStageValue } from './leadStages.js';
 import { parse } from './validate.js';
+import { logMessageSend } from './logging.js';
 
 export const MAX_PAGE_SIZE = 100;
 
@@ -376,6 +377,7 @@ export async function sendMediaMessage(
   await prisma.message.update({ where: { id: message.id }, data: { mediaPath: relative } });
 
   let saved;
+  let sendError: unknown;
   try {
     const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
     const wamid =
@@ -387,7 +389,9 @@ export async function sendMediaMessage(
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
+    sendError = err;
   }
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: kind, userId: sentById, error: sendError });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   const label = kind === 'image' ? '[Photo]' : kind === 'voice' ? '[Voice message]' : `[Document] ${fileName}`;
@@ -447,6 +451,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   });
 
   let saved;
+  let sendError: unknown;
   try {
     const wamid = await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId);
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
@@ -455,7 +460,9 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
       where: { id: message.id },
       data: { status: 'failed', error: (err as Error).message },
     });
+    sendError = err;
   }
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: input.type, userId: sentById, error: sendError });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   // Contact details page activity log: "Message sent by …" (not the chat timeline or the bell; the chat shows the bubble)

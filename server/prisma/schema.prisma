@@ -666,3 +666,34 @@ model ContactPropertyView {
 
   @@id([userId, workspaceId])
 }
+
+// Backend log (services/logging.ts): one row per notable event - sign-ins, permission refusals, GraphQL mutations,
+// changing REST requests and HTTP errors, WhatsApp/Meta API calls, webhooks, message sends and delivery statuses.
+// Append-only and written by the server only. No relations on purpose: a log row must never block (or be removed
+// by) deleting the workspace, user or message it mentions. Values are sanitized first (no passwords, tokens or
+// secrets); customer numbers and message text are never logged. When the database can't be written, the same
+// entry goes to the terminal instead.
+model LogEntry {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  // SUCCESS | WARNING | ERROR
+  level       String   @db.VarChar(10)
+  // http | graphql | auth | permission | whatsapp | webhook | message | system
+  category    String   @db.VarChar(20)
+  // What happened, e.g. login.failed, whatsapp.send, message.status
+  event       String   @db.VarChar(100)
+  message     String   @db.Text
+  // The request it belongs to (X-Request-Id), to follow one request through every event it caused
+  requestId   String?  @db.VarChar(64)
+  workspaceId String?
+  userId      String?
+  // AppError/GraphQL code (e.g. FORBIDDEN) or Meta's numeric error code (e.g. 131049)
+  errorCode   String?  @db.VarChar(50)
+  durationMs  Int?
+  data        Json?
+
+  @@index([createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([level, createdAt])
+  @@index([requestId])
+}

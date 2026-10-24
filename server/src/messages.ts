@@ -7,6 +7,7 @@ import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/inc
 import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
+import { logEvent } from './services/logging.js';
 
 type Incoming = {
   waId: string;
@@ -143,6 +144,23 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
 
 const STATUS_RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3, failed: 4 };
 
+// Meta's delivery failures that come later in a status webhook (the send itself was accepted), explained for the logs
+const KNOWN_FAILURES: Record<number, string> = {
+  131047: 'More than 24 hours since the customer last wrote: only an approved template can be sent',
+  131049: 'Meta chose not to deliver this message to maintain healthy ecosystem engagement (per-customer marketing limit); retrying right away will fail again',
+  131026: "The customer's number can't receive it (not on WhatsApp, old app version, or hasn't accepted the terms)",
+  131050: 'The customer stopped marketing messages from this business',
+};
+
+// Meta's error on a status update: its numeric code, title and details (only for failed statuses)
+export function statusError(s: any): { code: number | null; title: string | null; details: string | null } | null {
+  const e = s?.errors?.[0];
+  if (!e) return null;
+  const code = Number.isFinite(Number(e.code)) && e.code !== '' && e.code !== null ? Number(e.code) : null;
+  const details = e.error_data?.details ?? e.message ?? null;
+  return { code, title: typeof e.title === 'string' ? e.title : null, details: typeof details === 'string' ? details : null };
+}
+
 export async function applyStatus(workspaceId: string, s: any) {
   const message = await prisma.message.findUnique({ where: { waMessageId: s.id } });
   // Statuses can arrive out of order; never downgrade read -> delivered
@@ -152,4 +170,25 @@ export async function applyStatus(workspaceId: string, s: any) {
     data: { status: s.status, error: s.errors?.[0]?.title },
   });
   emitToWorkspace(workspaceId, 'message:status', await withSender(updated));
+  logStatus(workspaceId, message, s);
+}
+
+// One entry per status change of an outgoing message (sent → delivered → read, or failed with Meta's code)
+function logStatus(workspaceId: string, message: { id: string; conversationId: string; status: string; type: string }, s: any) {
+  const error = statusError(s);
+  const data = { messageId: message.id, conversationId: message.conversationId, type: message.type, from: message.status, to: s.status };
+  if (s.status !== 'failed') {
+    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.status', message: `Message ${message.status} → ${s.status}`, workspaceId, data });
+    return;
+  }
+  const known = error?.code !== null && error?.code !== undefined ? KNOWN_FAILURES[error.code] : undefined;
+  void logEvent({
+    level: 'ERROR',
+    category: 'message',
+    event: 'message.status',
+    message: `WhatsApp didn't deliver a message: ${error?.title ?? 'no reason given'}${error?.code ? ` (${error.code})` : ''}${known ? `. ${known}` : ''}`,
+    workspaceId,
+    errorCode: error?.code ?? null,
+    data: { ...data, title: error?.title, details: error?.details },
+  });
 }

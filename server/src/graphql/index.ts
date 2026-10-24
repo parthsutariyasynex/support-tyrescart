@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { createSchema, createYoga } from 'graphql-yoga';
 import { verifyCurrentToken, type AuthPayload } from '../auth.js';
 import { env } from '../env.js';
+import { setRequestUser } from '../services/logging.js';
 import * as activity from './activity.js';
 import * as assign from './assign.js';
 import * as automations from './automations.js';
@@ -40,6 +41,7 @@ export const yoga = createYoga<ServerContext, Context>({
         // invalid, expired, or issued before a password reset: treat as logged out
       }
     }
+    setRequestUser(auth); // later log entries of this request name the person and workspace
     return { auth, ip: req.ip ?? req.socket.remoteAddress ?? 'unknown' };
   },
 });

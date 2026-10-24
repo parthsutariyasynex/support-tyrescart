@@ -4,6 +4,7 @@ import { env } from '../env.js';
 import { applyStatus, isCustomerMessage, parseWebhookMessage, saveIncoming } from '../messages.js';
 import { applyCustomerReaction } from '../services/reactions.js';
 import { prisma } from '../prisma.js';
+import { logEvent } from '../services/logging.js';
 
 export const webhookRouter = Router();
 
@@ -48,6 +49,13 @@ webhookRouter.post('/', async (req, res) => {
       hasBody: !!rawBody,
       bodyBytes: rawBody?.length ?? 0,
     });
+    void logEvent({
+      level: 'WARNING',
+      category: 'webhook',
+      event: 'webhook.invalid_signature',
+      message: `Rejected a webhook: ${signatureFailureReason(rawBody, signatureHeader, env.metaAppSecret, env.isProd)}`,
+      data: { hasHeader: !!signatureHeader, hasBody: !!rawBody, bodyBytes: rawBody?.length ?? 0 },
+    });
     return res.sendStatus(401);
   }
   res.sendStatus(200); // answer fast; Meta retries slow/failed webhooks
@@ -56,6 +64,9 @@ webhookRouter.post('/', async (req, res) => {
   // processed in its own try/catch: since the 200 above already told Meta "received", a failure on one item
   // must never take the rest of the batch down with it - a single malformed message would otherwise silently
   // drop every message/status that happened to be listed after it, with no retry.
+  // Counted for one summary entry per webhook (the request id ties it to the entries of each message and status)
+  const counts = { messages: 0, statuses: 0, failed: 0 };
+  const workspaceIds = new Set<string>();
   try {
     for (const entry of req.body.entry ?? []) {
       for (const change of entry.changes ?? []) {
@@ -66,11 +77,14 @@ webhookRouter.post('/', async (req, res) => {
         const account = await prisma.whatsAppAccount.findUnique({ where: { phoneNumberId } });
         if (!account) {
           console.warn(`[Webhook] No WhatsAppAccount found for phoneNumberId: ${phoneNumberId}`);
+          void logEvent({ level: 'WARNING', category: 'webhook', event: 'webhook.unknown_number', message: 'Webhook for a WhatsApp number not connected to any workspace, ignored', data: { phoneNumberId } });
           continue;
         }
+        workspaceIds.add(account.workspaceId);
 
         for (const msg of value.messages ?? []) {
           console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type });
+          counts.messages++;
           try {
             // A reaction belongs to the message it's on (not a new message in the chat)
             if (msg?.type === 'reaction') {
@@ -86,6 +100,15 @@ webhookRouter.post('/', async (req, res) => {
             await saveIncoming(account.workspaceId, parseWebhookMessage(msg, value.contacts));
           } catch (err) {
             console.error('[Webhook] Failed to save incoming message, skipping it (rest of the batch continues):', { id: msg?.id, type: msg?.type }, err);
+            counts.failed++;
+            void logEvent({
+              level: 'ERROR',
+              category: 'webhook',
+              event: 'webhook.message_failed',
+              message: `Couldn't save an incoming message: ${(err as Error)?.message ?? String(err)}`,
+              workspaceId: account.workspaceId,
+              data: { waMessageId: msg?.id, type: msg?.type, error: err },
+            });
           }
         }
         for (const status of value.statuses ?? []) {
@@ -94,15 +117,36 @@ webhookRouter.post('/', async (req, res) => {
             status: status?.status,
             errors: status?.errors?.map((e: any) => ({ code: e.code, title: e.title })),
           });
+          counts.statuses++;
           try {
             await applyStatus(account.workspaceId, status);
           } catch (err) {
             console.error('[Webhook] Failed to apply status update, skipping it (rest of the batch continues):', { id: status?.id, status: status?.status }, err);
+            counts.failed++;
+            void logEvent({
+              level: 'ERROR',
+              category: 'webhook',
+              event: 'webhook.status_failed',
+              message: `Couldn't apply a status update: ${(err as Error)?.message ?? String(err)}`,
+              workspaceId: account.workspaceId,
+              data: { waMessageId: status?.id, status: status?.status, error: err },
+            });
           }
         }
       }
     }
   } catch (err) {
     console.error('[Webhook] Webhook processing failed', err);
+    void logEvent({ level: 'ERROR', category: 'webhook', event: 'webhook.failed', message: `Webhook processing failed: ${(err as Error)?.message ?? String(err)}`, data: { ...counts, error: err } });
+    return;
   }
+  if (counts.messages || counts.statuses)
+    void logEvent({
+      level: counts.failed ? 'WARNING' : 'SUCCESS',
+      category: 'webhook',
+      event: 'webhook.received',
+      message: `Webhook: ${counts.messages} message(s), ${counts.statuses} status update(s)${counts.failed ? `, ${counts.failed} failed` : ''}`,
+      workspaceId: workspaceIds.size === 1 ? [...workspaceIds][0] : null,
+      data: counts,
+    });
 });

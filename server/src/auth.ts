@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { env } from './env.js';
 import { prisma } from './prisma.js';
+import { setRequestUser } from './services/logging.js';
 
 export type AuthPayload = { userId: string; workspaceId: string };
 
@@ -47,6 +48,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
   try {
     req.auth = await verifyCurrentToken(token);
+    setRequestUser(req.auth); // later log entries of this request name the person and workspace
   } catch {
     return res.status(401).json({ error: 'Unauthorized' });
   }

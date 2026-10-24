@@ -8,12 +8,15 @@ import { after, before, describe, test } from 'node:test';
 
 const sent: { to: string; body: string }[] = [];
 const failFor = new Set<string>(); // recipients the mock WhatsApp refuses (send failures)
+// Runs while a send to that recipient is "in flight" (before the mock answers), e.g. to delete the chat meanwhile
+const whileSending = new Map<string, () => Promise<unknown>>();
 const mock = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
-  req.on('end', () => {
+  req.on('end', async () => {
     if (req.method === 'POST' && req.url?.endsWith('/messages')) {
       const j = JSON.parse(body || '{}');
+      await whileSending.get(j.to)?.();
       if (failFor.has(j.to)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: { message: 'mock: recipient not reachable', code: 131026 } }));
@@ -369,5 +372,51 @@ describe('auto-reply through the webhook', () => {
     assert.equal((await autoReplies(convF.id)).length, 0);
 
     await new Promise<void>((r) => server.close(() => r()));
+  });
+});
+
+// The chat, or the whole workspace, deleted while WhatsApp is still answering the auto-reply: the reply's message row
+// goes with it (cascade). That used to throw "No record was found for an update" from message.update; now the
+// auto-reply finishes quietly, reports it was discarded, and nothing is left behind or shown.
+describe('auto-reply when the chat is deleted mid-send', () => {
+  test('chat deleted while the send succeeds, or workspace deleted while it fails: no error, logged as discarded', async () => {
+    const reg = `mutation($i: RegisterInput!) { register(input: $i) { token user { id } workspace { id } } }`;
+    const logging = await import('../src/services/logging.js');
+    const logs: import('../src/services/logging.js').LogRecord[] = [];
+    const errors: string[] = [];
+    const consoleError = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a.map(String).join(' '));
+    logging.setLogWriter(async (r) => logs.push(r));
+    try {
+      for (const [i, variant] of (['chat', 'workspace'] as const).entries()) {
+        const o = (await gql(reg, { i: { name: 'Owner', email: `e2e-race-${variant}-${run}@example.com`, password: 'password123', workspaceName: `Race ${variant} ${run}` } })).register;
+        const ws = o.workspace.id;
+        await prisma.whatsAppAccount.create({ data: { workspaceId: ws, wabaId: `waba-race-${i}-${run}`, phoneNumberId: `pn-race-${i}-${run}`, displayPhone: '+1 555 000 7777', accessToken: 'mock-token' } });
+        await auto.updateAutomationSettings({ userId: o.user.id, workspaceId: ws }, { enabled: true, workingDays: [0, 1, 2, 3, 4, 5, 6], workStart: '00:00', workEnd: '23:59', replyInHoursEnabled: true, replyInHours: 'Thanks, we will reply soon' });
+        const waId = `97150559990${i}`;
+        if (variant === 'workspace') failFor.add(waId); // the send fails, then the "failed" update finds nothing
+        whileSending.set(waId, () =>
+          variant === 'chat' ? prisma.conversation.deleteMany({ where: { workspaceId: ws, contact: { waId } } }) : prisma.workspace.delete({ where: { id: ws } }),
+        );
+        const sentBefore = sent.length;
+        await messages.saveIncoming(ws, { waId, name: 'Race', type: 'text', body: 'Hi', waMessageId: `wamid.race-${i}-${run}` });
+        whileSending.delete(waId);
+        failFor.delete(waId);
+
+        assert.equal(sent.length, sentBefore + (variant === 'chat' ? 1 : 0), 'WhatsApp was asked to send it');
+        assert.equal(await prisma.message.count({ where: { conversation: { workspaceId: ws }, automation: 'auto_reply' } }), 0, 'nothing left behind');
+        await new Promise((r) => setImmediate(r));
+        const discarded = logs.filter((l) => l.event === 'automation.auto_reply_discarded' && l.workspaceId === ws);
+        assert.equal(discarded.length, 1);
+        assert.equal(discarded[0].level, 'WARNING');
+        assert.match(discarded[0].message, variant === 'chat' ? /WhatsApp accepted it/ : /WhatsApp refused it/);
+        assert.ok(logs.some((l) => l.workspaceId === ws && l.event === (variant === 'chat' ? 'message.sent' : 'message.send_failed')), 'the send itself is still logged');
+        if (variant === 'chat') await prisma.workspace.delete({ where: { id: ws } });
+      }
+      assert.deepEqual(errors.filter((e) => e.includes('auto-reply failed')), [], 'no "auto-reply failed" error');
+    } finally {
+      console.error = consoleError;
+      logging.setLogWriter();
+    }
   });
 });

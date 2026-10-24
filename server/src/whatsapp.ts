@@ -1,9 +1,59 @@
 import { env } from './env.js';
+import { errorCodeOf, logEvent } from './services/logging.js';
 import { type TemplateInfo, parseTemplate } from './services/templateModel.js';
 
 type Account = { phoneNumberId: string; accessToken: string };
 
-async function graphPost(account: Account, payload: object) {
+// A refusal from Meta's Graph API. The message is exactly what callers showed before; Meta's numeric error code
+// (e.g. 131047 window closed, 131049 not delivered for healthy ecosystem engagement), its subcode and trace id are
+// kept for the logs.
+export class GraphApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code: number | null = null,
+    public subcode: number | null = null,
+    public fbtraceId: string | null = null,
+  ) {
+    super(message);
+    this.name = 'GraphApiError';
+  }
+}
+
+const numberOrNull = (v: unknown) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+
+export function graphError(status: number, data: any, message: string) {
+  const e = data?.error ?? {};
+  return new GraphApiError(message, status, numberOrNull(e.code), numberOrNull(e.error_subcode), typeof e.fbtrace_id === 'string' ? e.fbtrace_id : null);
+}
+
+// Every Graph API call is logged: which call, how long it took and, when Meta refused it, its error code. Never the
+// access token, the customer's number or the message text.
+async function logged<T>(call: string, details: Record<string, unknown>, fn: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  try {
+    const result = await fn();
+    void logEvent({ level: 'SUCCESS', category: 'whatsapp', event: `whatsapp.${call}`, message: `Meta API ${call} succeeded`, durationMs: Date.now() - started, data: details });
+    return result;
+  } catch (err) {
+    void logEvent({
+      level: 'ERROR',
+      category: 'whatsapp',
+      event: `whatsapp.${call}`,
+      message: `Meta API ${call} failed: ${(err as Error)?.message ?? String(err)}`,
+      errorCode: errorCodeOf(err),
+      durationMs: Date.now() - started,
+      data: { ...details, ...(err instanceof GraphApiError ? { httpStatus: err.status, subcode: err.subcode, fbtraceId: err.fbtraceId } : {}) },
+    });
+    throw err;
+  }
+}
+
+function graphPost(account: Account, payload: { type: string; [key: string]: unknown }) {
+  return logged('send', { type: payload.type }, () => graphPostOnce(account, payload));
+}
+
+async function graphPostOnce(account: Account, payload: object) {
   const res = await fetch(
     `${env.graphBase}/${env.graphVersion}/${account.phoneNumberId}/messages`,
     {
@@ -16,7 +66,7 @@ async function graphPost(account: Account, payload: object) {
     },
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message ?? `Graph API error ${res.status}`);
+  if (!res.ok) throw graphError(res.status, data, data?.error?.message ?? `Graph API error ${res.status}`);
   return data.messages[0].id as string; // wamid
 }
 
@@ -34,7 +84,11 @@ export function sendReaction(account: Account, to: string, messageId: string, em
 }
 
 // Uploads an image or document to WhatsApp and returns its media id (used to send it right after)
-export async function uploadMedia(account: Account, bytes: Buffer, mime: string, fileName: string) {
+export function uploadMedia(account: Account, bytes: Buffer, mime: string, fileName: string) {
+  return logged('upload_media', { mime, bytes: bytes.length }, () => uploadMediaOnce(account, bytes, mime, fileName));
+}
+
+async function uploadMediaOnce(account: Account, bytes: Buffer, mime: string, fileName: string) {
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
   form.append('type', mime);
@@ -45,7 +99,7 @@ export async function uploadMedia(account: Account, bytes: Buffer, mime: string,
     body: form,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data?.id) throw new Error(data?.error?.message ?? `Graph API error ${res.status}`);
+  if (!res.ok || !data?.id) throw graphError(res.status, data, data?.error?.message ?? `Graph API error ${res.status}`);
   return data.id as string;
 }
 
@@ -61,11 +115,15 @@ export function sendDocument(account: Account, to: string, mediaId: string, file
 
 // Downloads media a customer sent: WhatsApp gives a short-lived URL for the media id, then the file itself (both need
 // the access token). Refuses anything over maxBytes. fetchImpl is replaceable for tests.
-export async function downloadMedia(account: Account, mediaId: string, maxBytes: number, fetchImpl: typeof fetch = fetch) {
+export function downloadMedia(account: Account, mediaId: string, maxBytes: number, fetchImpl: typeof fetch = fetch) {
+  return logged('download_media', { mediaId }, () => downloadMediaOnce(account, mediaId, maxBytes, fetchImpl));
+}
+
+async function downloadMediaOnce(account: Account, mediaId: string, maxBytes: number, fetchImpl: typeof fetch) {
   const auth = { Authorization: `Bearer ${account.accessToken}` };
   const infoRes = await fetchImpl(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(mediaId)}`, { headers: auth });
   const info = await infoRes.json().catch(() => ({}));
-  if (!infoRes.ok || typeof info?.url !== 'string') throw new Error(info?.error?.message ?? `Graph API error ${infoRes.status}`);
+  if (!infoRes.ok || typeof info?.url !== 'string') throw graphError(infoRes.status, info, info?.error?.message ?? `Graph API error ${infoRes.status}`);
   if (Number(info.file_size) > maxBytes) throw new Error('The file is too large to download');
   const fileRes = await fetchImpl(info.url, { headers: auth });
   if (!fileRes.ok) throw new Error(`Media download failed (${fileRes.status})`);
@@ -94,12 +152,16 @@ async function graphJson(url: string, token: string, init: RequestInit = {}) {
     headers: { Authorization: `Bearer ${token}`, ...(typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...((init.headers as Record<string, string>) ?? {}) },
   });
   const data: any = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.error_user_msg || data?.error?.message || `Graph API error ${res.status}`);
+  if (!res.ok) throw graphError(res.status, data, data?.error?.error_user_msg || data?.error?.message || `Graph API error ${res.status}`);
   return data;
 }
 
 // Every template of the account (each name + language is its own template), any status unless approvedOnly
-export async function listTemplates(account: Waba, approvedOnly = false): Promise<TemplateInfo[]> {
+export function listTemplates(account: Waba, approvedOnly = false): Promise<TemplateInfo[]> {
+  return logged('list_templates', { approvedOnly }, () => listTemplatesOnce(account, approvedOnly));
+}
+
+async function listTemplatesOnce(account: Waba, approvedOnly: boolean): Promise<TemplateInfo[]> {
   const out: TemplateInfo[] = [];
   let url: string | undefined =
     `${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates` +
@@ -136,26 +198,34 @@ export function sendTemplateWithValues(account: Account, to: string, name: strin
 
 // Settings → Templates: submit a new template for Meta's review; returns its id and status (usually PENDING)
 export async function createTemplate(account: Waba, payload: { name: string; language: string; category: string; components: object[] }) {
-  const data = await graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates`, account.accessToken, {
+  const data = await logged('create_template', { name: payload.name, language: payload.language, category: payload.category }, () => graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates`, account.accessToken, {
     method: 'POST',
     body: JSON.stringify({ ...payload, allow_category_change: true }),
-  });
+  }));
   return { id: String(data.id ?? ''), status: String(data.status ?? 'PENDING'), category: String(data.category ?? payload.category) };
 }
 
 // Edit an existing template (Meta reviews it again)
 export async function editTemplate(account: Waba, templateId: string, payload: { category?: string; components: object[] }) {
-  await graphJson(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(templateId)}`, account.accessToken, { method: 'POST', body: JSON.stringify(payload) });
+  await logged('edit_template', { templateId }, () =>
+    graphJson(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(templateId)}`, account.accessToken, { method: 'POST', body: JSON.stringify(payload) }),
+  );
 }
 
 // Delete a template: with its id only that language; without, every language of the name
 export async function deleteTemplate(account: Waba, name: string, templateId?: string) {
   const q = new URLSearchParams({ name, ...(templateId ? { hsm_id: templateId } : {}) });
-  await graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates?${q}`, account.accessToken, { method: 'DELETE' });
+  await logged('delete_template', { name, templateId: templateId ?? null }, () =>
+    graphJson(`${env.graphBase}/${env.graphVersion}/${account.wabaId}/message_templates?${q}`, account.accessToken, { method: 'DELETE' }),
+  );
 }
 
 // A sample file for a media header (Resumable Upload API of the Meta app): returns the handle Meta wants
-export async function uploadTemplateSample(appId: string, token: string, bytes: Buffer, mime: string, fileName: string) {
+export function uploadTemplateSample(appId: string, token: string, bytes: Buffer, mime: string, fileName: string) {
+  return logged('upload_template_sample', { mime, bytes: bytes.length }, () => uploadTemplateSampleOnce(appId, token, bytes, mime, fileName));
+}
+
+async function uploadTemplateSampleOnce(appId: string, token: string, bytes: Buffer, mime: string, fileName: string) {
   const q = new URLSearchParams({ file_name: fileName, file_length: String(bytes.length), file_type: mime });
   const session = await graphJson(`${env.graphBase}/${env.graphVersion}/${encodeURIComponent(appId)}/uploads?${q}`, token, { method: 'POST' });
   const res = await fetch(`${env.graphBase}/${env.graphVersion}/${session.id}`, {
@@ -164,6 +234,6 @@ export async function uploadTemplateSample(appId: string, token: string, bytes: 
     body: new Uint8Array(bytes),
   });
   const data: any = await res.json().catch(() => ({}));
-  if (!res.ok || typeof data?.h !== 'string') throw new Error(data?.error?.message ?? `Couldn't upload the sample file (${res.status})`);
+  if (!res.ok || typeof data?.h !== 'string') throw graphError(res.status, data, data?.error?.message ?? `Couldn't upload the sample file (${res.status})`);
   return data.h as string;
 }

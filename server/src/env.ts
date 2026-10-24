@@ -34,4 +34,11 @@ export const env = {
   allowWorkspaceCreation: process.env.ALLOW_WORKSPACE_CREATION
     ? process.env.ALLOW_WORKSPACE_CREATION === 'true'
     : process.env.NODE_ENV !== 'production',
+  // Backend logs (LogEntry): days they are kept, and what the daily clean-up does with older ones: dry-run (default,
+  // only counts them), delete, or off. Checked in services/logRetention.ts.
+  logRetentionDays: process.env.LOG_RETENTION_DAYS,
+  logRetentionMode: process.env.LOG_RETENTION_MODE,
+  // The daily log files (logs/app-YYYY-MM-DD.log): their folder, and LOG_TO_FILE=false to not write them
+  logDir: path.resolve(process.env.LOG_DIR || 'logs'),
+  logToFile: process.env.LOG_TO_FILE !== 'false',
 };
