@@ -19,6 +19,13 @@ describe('files before sending', () => {
     assert.match((checkFile({ name: 'a.txt', type: 'text/plain', size: 0 }) as any).problem, /empty/);
     assert.equal(fileType({ name: 'sheet.xlsx', type: 'application/octet-stream' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   });
+  test('videos: MP4/3GP up to 16 MB in the chat only (not a note file)', () => {
+    assert.deepEqual(checkFile({ name: 'clip.mp4', type: 'video/mp4', size: 1000 }, { video: true }), { kind: 'video', type: 'video/mp4' });
+    assert.deepEqual(checkFile({ name: 'clip.3GP', type: '', size: 1000 }, { video: true }), { kind: 'video', type: 'video/3gpp' });
+    assert.match((checkFile({ name: 'clip.mp4', type: 'video/mp4', size: 17 * MB }, { video: true }) as any).problem, /17\.0 MB.*up to 16 MB/);
+    assert.match((checkFile({ name: 'clip.mov', type: 'video/quicktime', size: 1000 }, { video: true }) as any).problem, /MP4 video/);
+    assert.match((checkFile({ name: 'clip.mp4', type: 'video/mp4', size: 1000 }) as any).problem, /can't be sent/);
+  });
   test('labels and sizes', () => {
     assert.equal(documentLabel('application/pdf', 'a.pdf'), 'PDF');
     assert.equal(documentLabel(null, 'notes.txt'), 'TXT');

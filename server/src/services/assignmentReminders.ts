@@ -2,6 +2,7 @@ import { env } from '../env.js';
 import { settingsOf } from './workspaceSettings.js';
 import { prisma } from '../prisma.js';
 import { emitToUser } from '../realtime.js';
+import { logFailure } from './logging.js';
 
 // Reminders for chats waiting for attention, sent as assignment:reminder to each person (their own Socket.IO room):
 //   assigned   - the assignee hasn't opened it since it was assigned, or it has unread customer messages
@@ -150,7 +151,10 @@ export function startAssignmentReminders(minutes = env.assignmentReminderMinutes
         if (n && !env.isProd) console.log(`[reminders] ${n} ${n === 1 ? 'person' : 'people'} reminded`);
         onTick?.(n);
       })
-      .catch((err) => console.error('[reminders] check failed', err));
+      .catch((err) => {
+        console.error('[reminders] check failed', err);
+        void logFailure('job.reminders_failed', 'Assignment reminders check failed', err);
+      });
   const timer = setInterval(tick, Math.min(CHECK_EVERY_MS, ms));
   timer.unref(); // never keeps the process alive on its own
   return () => clearInterval(timer);

@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { logFailure } from './services/logging.js';
 
 // Outgoing email over SMTP. Configure in server/.env:
 //   SMTP_HOST, SMTP_PORT (587 or 465), SMTP_USER, SMTP_PASS, MAIL_FROM ("support-tyrescart <no-reply@yourdomain.com>")
@@ -21,6 +22,7 @@ export async function sendMail(mail: { to: string; subject: string; text: string
   }
   if (isProduction) {
     console.error(`[mail] SMTP is not configured; could not send "${mail.subject}" to ${mail.to}`);
+    void logFailure('email.not_sent', `Email "${mail.subject}" not sent`, new Error('SMTP is not configured'), { data: { subject: mail.subject } });
     return;
   }
   console.log(`\n[mail] SMTP not configured (dev): email to ${mail.to}\nSubject: ${mail.subject}\n${mail.text}\n`);

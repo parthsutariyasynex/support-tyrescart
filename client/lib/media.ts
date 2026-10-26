@@ -1,12 +1,15 @@
 import { API_URL, getToken } from './api';
 import type { Message } from './inbox';
 import { clockKey, dayKey } from './time';
+import { locationPreview } from './location';
 
-// Sending images (JPEG/PNG up to 5 MB) and documents (PDF, Word, Excel, PowerPoint, text up to 100 MB) from the
-// chat: WhatsApp's limits. The server checks every file again, from the file itself.
+// Sending images (JPEG/PNG up to 5 MB), videos (MP4/3GP up to 16 MB) and documents (PDF, Word, Excel, PowerPoint, text
+// up to 100 MB) from the chat: WhatsApp's limits. The server checks every file again, from the file itself.
 export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+export const VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 export const DOCUMENT_MAX_BYTES = 100 * 1024 * 1024;
 export const IMAGE_TYPES = ['image/jpeg', 'image/png'];
+export const VIDEO_TYPES: Record<string, string> = { 'video/mp4': 'mp4', 'video/3gpp': '3gp' };
 export const CAPTION_MAX = 1024;
 // type -> extension; also used to recognise a file by its extension when the browser doesn't report a type
 export const DOCUMENT_TYPES: Record<string, string> = {
@@ -19,28 +22,39 @@ export const DOCUMENT_TYPES: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
   'text/plain': 'txt',
 };
-// For the file chooser
+// For the file chooser: ACCEPT for a note's files (images and documents), CHAT_ACCEPT for the chat (videos too)
 export const ACCEPT = [...IMAGE_TYPES, ...Object.keys(DOCUMENT_TYPES), ...Object.values(DOCUMENT_TYPES).map((e) => `.${e}`)].join(',');
+export const CHAT_ACCEPT = [ACCEPT, ...Object.keys(VIDEO_TYPES), ...Object.values(VIDEO_TYPES).map((e) => `.${e}`)].join(',');
 
-export type FileKind = 'image' | 'document';
+export type FileKind = 'image' | 'video' | 'document';
 
 // The file's type: what the browser says, or worked out from the extension (some systems report none for .docx etc.)
 export function fileType(file: { name: string; type: string }) {
-  if (file.type && (IMAGE_TYPES.includes(file.type) || DOCUMENT_TYPES[file.type])) return file.type;
+  if (file.type && (IMAGE_TYPES.includes(file.type) || VIDEO_TYPES[file.type] || DOCUMENT_TYPES[file.type])) return file.type;
   const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
   if (ext === 'png') return 'image/png';
+  if (ext === 'mp4' || ext === 'm4v') return 'video/mp4';
+  if (ext === '3gp') return 'video/3gpp';
   return Object.entries(DOCUMENT_TYPES).find(([, e]) => e === ext)?.[0] ?? file.type;
 }
 
-// What a file can be sent as, or why it can't (checked before upload)
-export function checkFile(file: { name: string; type: string; size: number }): { kind: FileKind; type: string } | { problem: string } {
+const LIMITS: Record<FileKind, [number, string]> = {
+  image: [IMAGE_MAX_BYTES, 'Images can be up to 5 MB'],
+  video: [VIDEO_MAX_BYTES, 'Videos can be up to 16 MB'],
+  document: [DOCUMENT_MAX_BYTES, 'Documents can be up to 100 MB'],
+};
+
+// What a file can be sent as, or why it can't (checked before upload). Videos only with video: true (the chat; a
+// note's files are images and documents)
+export function checkFile(file: { name: string; type: string; size: number }, { video = false } = {}): { kind: FileKind; type: string } | { problem: string } {
   const type = fileType(file);
-  const kind: FileKind | null = IMAGE_TYPES.includes(type) ? 'image' : DOCUMENT_TYPES[type] ? 'document' : null;
-  if (!kind) return { problem: 'This file type can\'t be sent. Send a JPEG or PNG image, or a PDF, Word, Excel, PowerPoint or text file.' };
+  const kind: FileKind | null = IMAGE_TYPES.includes(type) ? 'image' : video && VIDEO_TYPES[type] ? 'video' : DOCUMENT_TYPES[type] ? 'document' : null;
+  if (!kind)
+    return { problem: `This file type can't be sent. Send a JPEG or PNG image, ${video ? 'an MP4 video, ' : ''}or a PDF, Word, Excel, PowerPoint or text file.` };
   if (file.size === 0) return { problem: 'That file is empty.' };
-  const max = kind === 'image' ? IMAGE_MAX_BYTES : DOCUMENT_MAX_BYTES;
-  if (file.size > max) return { problem: `That ${kind} is ${formatSize(file.size)}. ${kind === 'image' ? 'Images can be up to 5 MB' : 'Documents can be up to 100 MB'}.` };
+  const [max, limit] = LIMITS[kind];
+  if (file.size > max) return { problem: `That ${kind} is ${formatSize(file.size)}. ${limit}.` };
   return { kind, type };
 }
 // Kept for images-only callers
@@ -62,13 +76,13 @@ export function documentLabel(mime: string | null | undefined, name?: string | n
 }
 
 export async function sendFile(conversationId: string, file: File, caption: string, replyToId?: string | null): Promise<Message> {
-  const r = checkFile(file);
+  const r = checkFile(file, { video: true });
   if ('problem' in r) throw new Error(r.problem);
   const q = new URLSearchParams();
   if (caption.trim()) q.set('caption', caption.trim());
   if (r.kind === 'document') q.set('name', file.name);
   if (replyToId) q.set('replyTo', replyToId);
-  const route = r.kind === 'image' ? 'images' : 'documents';
+  const route = r.kind === 'image' ? 'images' : r.kind === 'video' ? 'videos' : 'documents';
   const res = await fetch(`${API_URL}/inbox/conversations/${encodeURIComponent(conversationId)}/${route}${q.size ? `?${q}` : ''}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${getToken() ?? ''}`, 'Content-Type': r.type },
@@ -110,7 +124,7 @@ export async function downloadFile(messageId: string, name: string) {
 // "[image]", "[video]"…: the text WhatsApp media arrives with when there's no caption (not shown under the file)
 export const isMediaPlaceholder = (body: string) => /^\[(image|video|audio|document|sticker)\]$/.test(body.trim());
 
-// Chat list preview for a file message: "📷 caption" / "📷 Photo", "🎥 Video", "🎤 Voice message"…
+// Chat list preview for a file (or location) message: "📷 caption" / "📷 Photo", "🎥 Video", "🎤 Voice message"…
 export function filePreview(m: { type: string; body: string; mediaName?: string | null }) {
   const text = m.body && !isMediaPlaceholder(m.body) ? m.body : '';
   switch (m.type) {
@@ -126,6 +140,9 @@ export function filePreview(m: { type: string; body: string; mediaName?: string 
       return '🎵 Audio';
     case 'document':
       return `📄 ${m.mediaName || text || 'Document'}`;
+    case 'location':
+    case 'live_location':
+      return locationPreview(m);
     default:
       return null;
   }

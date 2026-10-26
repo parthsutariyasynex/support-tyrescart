@@ -3,7 +3,8 @@ import { verifyToken } from '../auth.js';
 import { changePassword, getMe, login, register } from '../services/auth.js';
 import { requestPasswordReset, resetPassword } from '../services/passwordReset.js';
 import { createWorkspace, listWorkspaces, renameWorkspace, switchWorkspace } from '../services/workspaces.js';
-import { authed, run, type Context } from './shared.js';
+import type { GraphQLResolveInfo } from 'graphql';
+import { authed, operationOf, run, type Context } from './shared.js';
 
 export const typeDefs = /* GraphQL */ `
   type User {
@@ -110,12 +111,14 @@ export const resolvers = {
     workspaces: authed((_args, auth) => listWorkspaces(auth)),
   },
   Mutation: {
-    register: (_: unknown, { input }: { input: unknown }) => run(async () => withMe(await register(input))),
-    login: (_: unknown, { input }: { input: unknown }, ctx: Context) =>
-      run(async () => withMe(await login(input, ctx.ip))),
-    requestPasswordReset: (_: unknown, { email }: { email: string }, ctx: Context) =>
-      run(() => requestPasswordReset({ email }, ctx.ip)),
-    resetPassword: (_: unknown, { input }: { input: unknown }) => run(() => resetPassword(input)),
+    register: (_: unknown, { input }: { input: unknown }, _ctx: Context, info: GraphQLResolveInfo) =>
+      run(async () => withMe(await register(input)), operationOf(info)),
+    login: (_: unknown, { input }: { input: unknown }, ctx: Context, info: GraphQLResolveInfo) =>
+      run(async () => withMe(await login(input, ctx.ip)), operationOf(info)),
+    requestPasswordReset: (_: unknown, { email }: { email: string }, ctx: Context, info: GraphQLResolveInfo) =>
+      run(() => requestPasswordReset({ email }, ctx.ip), operationOf(info)),
+    resetPassword: (_: unknown, { input }: { input: unknown }, _ctx: Context, info: GraphQLResolveInfo) =>
+      run(() => resetPassword(input), operationOf(info)),
     createWorkspace: authed(async ({ name }: { name: string }, auth) => withMe(await createWorkspace(auth, { name }))),
     switchWorkspace: authed(async ({ id }: { id: string }, auth) => withMe(await switchWorkspace(auth, id))),
     renameWorkspace: authed(async ({ name }: { name: string }, auth) => (await renameWorkspace(auth, { name })).name),

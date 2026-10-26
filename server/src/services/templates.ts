@@ -22,6 +22,7 @@ import { getPermissions, requireAdmin } from './permissions.js';
 import { withSender } from './senders.js';
 import { type TemplateInfo, type TemplateSpec, buildCreateComponents, buildSendComponents, renderTemplate, sendValuesSchema, templateSpecSchema } from './templateModel.js';
 import { parse } from './validate.js';
+import { logMessageSend, withMessageTrace } from './logging.js';
 
 // WhatsApp templates: sending one with its values from a chat (any member who may write there), and managing the
 // number's templates in Settings → Templates (owners/admins). Templates live at Meta; nothing is stored here
@@ -145,13 +146,18 @@ async function sendApprovedTemplate(auth: AuthPayload, rawInput: unknown, file?:
     await prisma.message.update({ where: { id: message.id }, data: { mediaPath: relative } });
   }
   let saved;
+  let sendError: unknown;
   try {
-    const media = header ? { id: await uploadMedia(account, file!.bytes!, header.mime, fileName ?? `${message.id}.${header.ext}`), ...(fileName ? { filename: fileName } : {}) } : undefined;
-    const wamid = await sendTemplateWithValues(account, conversation.contact.waId, t.name, t.language, buildSendComponents(t, input.values, media));
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId: conversation.id }, async () => {
+      const media = header ? { id: await uploadMedia(account, file!.bytes!, header.mime, fileName ?? `${message.id}.${header.ext}`), ...(fileName ? { filename: fileName } : {}) } : undefined;
+      return sendTemplateWithValues(account, conversation.contact.waId, t.name, t.language, buildSendComponents(t, input.values, media), { secret: t.category === 'AUTHENTICATION' });
+    });
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
+    sendError = err;
   }
+  logMessageSend({ workspaceId: auth.workspaceId, conversationId: conversation.id, messageId: message.id, type: 'template', userId: auth.userId, error: sendError, waMessageId: saved.waMessageId, content: t.category === 'AUTHENTICATION' ? null : message.body });
   await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date(), updatedBy: auth.userId } });
   emitToWorkspace(auth.workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   await recordActivity({

@@ -1,10 +1,14 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
-import { API_URL, errorCode, getToken, isNetworkError } from '@/lib/api';
+import { API_URL, describeError, errorCode, getToken, isNetworkError, newRequestId } from '@/lib/api';
+import { reportClient } from '@/lib/clientLog';
+import { FormattedText } from './FormattedText';
+import { pendingIn, pendingLabel, pendingReducer } from '@/lib/pendingSends';
 import {
   type Conversation,
   type ConversationStatus,
@@ -23,6 +27,7 @@ import {
   needsAttention,
   newerMessage,
   clearConversation,
+  deleteConversationForMe,
   restoreMessage,
   setConversationStatus,
   sendTextMessage,
@@ -52,13 +57,17 @@ import { AppShell, OPEN_CHAT_EVENT } from '../AppShell';
 import { pinText, showToast } from '@/lib/toasts';
 import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, ContactPanel } from './ContactPanel';
 import { EmojiPicker, FileSendDialog } from './composerExtras';
+import { FormatToolbar } from './FormatToolbar';
+import { ComposerHighlight } from './ComposerHighlight';
+import { resumeMyLiveLocations, setLive, startWatching, stopSharing, useMyActiveLives } from '@/lib/liveSharing';
+import type { LiveLocation } from '@/lib/location';
 import { VoiceRecorder } from './voice';
 import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
 import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
+import { ACCEPT, CHAT_ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
 import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
@@ -69,9 +78,12 @@ import { type StatusFilter, StatusMenu } from './StatusMenu';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
+import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInline, toggleLines } from '@/lib/formatting';
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
-import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
+import { type ChatOption, ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, DeleteIcon, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
+import { ConfirmDialog } from '../ConfirmDialog';
+import { NO_DELETE, createDeleteChat, deleteChatText, withoutChat } from '@/lib/deleteChat';
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
@@ -79,7 +91,6 @@ import { setOpenConversationId } from '@/lib/desktopNotifications';
 import { dismissChatPopups } from '@/lib/messagePopups';
 import { isWindowClosedError, lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
-import { CountryCodeMenu } from './CountryCodeMenu';
 import { NewChatDialog } from './NewChatDialog';
 import { NoteBubble } from './NoteBubble';
 import { type MentionMember, MentionMenu } from './MentionMenu';
@@ -106,6 +117,12 @@ import {
   messageActions,
 } from './messages';
 import { ForwardDialog } from './ForwardDialog';
+
+// How long a reply may take to be answered (the server gives Meta 30 s) before it's shown as not confirmed
+const SEND_TIMEOUT_MS = 60_000;
+
+// The Location screen (📎 → Location): its map library loads only when it's opened
+const LocationDialog = dynamic(() => import('./LocationDialog').then((m) => m.LocationDialog), { ssr: false });
 
 const byLatest = (a: Conversation, b: Conversation) =>
   b.lastMessageAt.localeCompare(a.lastMessageAt) || b.id.localeCompare(a.id);
@@ -260,20 +277,11 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   });
   // Tell the app shell which chat is on screen, so a desktop notification is skipped only for this one (every
   // other chat still alerts even while this page has focus); cleared when this page is left entirely.
-  // TEMPORARY: console.debug logging while verifying the real-message notification flow end to end - remove once
-  // confirmed working (matching logs in AppShell.tsx and inbox/notifications.tsx).
   useEffect(() => {
     setOpenConversationId(activeId);
     if (activeId) dismissChatPopups(activeId); // its new-message pop-up has been seen
-    console.debug('[notify-debug] openConversationId set to', activeId, 'on', pathname);
-  }, [activeId, pathname]);
-  useEffect(
-    () => () => {
-      console.debug('[notify-debug] inbox page unmounting, clearing openConversationId');
-      setOpenConversationId(null);
-    },
-    [],
-  );
+  }, [activeId]);
+  useEffect(() => () => setOpenConversationId(null), []);
 
   const [messages, setMessages] = useState<Message[]>(() => {
     const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
@@ -620,6 +628,40 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     [patchConversations],
   );
 
+  // Leave the open chat (Close chat, Delete chat): back to the list, and a reload doesn't open it again
+  const leaveChat = useCallback(() => {
+    cachedActiveIdByPath[pathname] = null;
+    saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('chat')) {
+        url.searchParams.delete('chat');
+        window.history.replaceState(null, '', url.toString());
+      }
+    }
+    setActiveId(null);
+  }, [pathname]);
+
+  // "Delete chat" (for this user only), here or in another of their tabs: out of the list until a newer message
+  const onChatDeleted = useCallback(
+    (conversationId: string) => {
+      messagesCache.delete(conversationId);
+      saveSessionMessages(messagesCache);
+      setConversations((prev) => withoutChat(prev, conversationId));
+      if (lastActiveRef.current?.id === conversationId) lastActiveRef.current = null;
+      if (activeIdRef.current === conversationId) leaveChat();
+    },
+    [leaveChat],
+  );
+  const onChatDeletedRef = useRef(onChatDeleted);
+  onChatDeletedRef.current = onChatDeleted;
+  // Delete chat asks first (lib/deleteChat.ts): nothing is sent until Delete is pressed in the dialog
+  const [deleteState, setDeleteState] = useState(NO_DELETE);
+  const deleteFlow = useMemo(
+    () => createDeleteChat({ remove: deleteConversationForMe, onDeleted: (id) => onChatDeletedRef.current(id), onChange: setDeleteState }),
+    [],
+  );
+
   // Clicking a closed chat in the list reopens it (there's no separate "Reopen chat" button)
   const [reopenError, setReopenError] = useState<{ id: string; message: string } | null>(null);
   const selectConversation = useCallback(
@@ -902,6 +944,12 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('conversation:cleared', ({ conversationId, userId }: { conversationId: string; userId: string }) => {
       if (userId === permissionsRef.current?.userId) onCleared(conversationId);
     });
+    // Deleted in another of your tabs (sent to you only)
+    socket.on('conversation:deleted', ({ conversationId }: { conversationId: string }) => onChatDeletedRef.current(conversationId));
+    // A live location started, moved, stopped or ended: its card and the "you're sharing" bar follow
+    socket.on('live:changed', (live: LiveLocation) => setLive(live));
+    // Live locations you were sharing before a reload carry on from this tab
+    void resumeMyLiveLocations();
     socket.on('message:status', (updated: Message) =>
       setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m))),
     );
@@ -1115,6 +1163,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       {/* Left Conversations List Panel */}
       <ConversationList
         conversations={filteredConversations}
+        onDeleteChat={(id) => deleteFlow.ask(id)}
         sortOrder={sortOrder}
         onSortChange={onSortOrderChange}
         statusFilter={statusFilter}
@@ -1192,19 +1241,9 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
             patchConversations((c) => (c.id === id ? { ...c, unread } : c));
             loadUnreadTotal();
           }}
-          onClosed={() => {
-            cachedActiveIdByPath[pathname] = null;
-            saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
-            if (typeof window !== 'undefined') {
-              const url = new URL(window.location.href);
-              if (url.searchParams.has('chat')) {
-                url.searchParams.delete('chat');
-                window.history.replaceState(null, '', url.toString());
-              }
-            }
-            setActiveId(null);
-          }}
+          onClosed={leaveChat}
           onCleared={() => onCleared(active.id)}
+          onDelete={() => deleteFlow.ask(active.id)}
           onClaim={() => claim(active.id)}
           claimError={claimError?.id === active.id ? claimError.message : null}
           reopenError={reopenError?.id === active.id ? reopenError.message : null}
@@ -1275,8 +1314,35 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
         />
       )}
 
+      {deleteState.conversationId && (
+        <DeleteChatDialog
+          conversation={conversations.find((c) => c.id === deleteState.conversationId) ?? (active?.id === deleteState.conversationId ? active : undefined)}
+          busy={deleteState.busy}
+          error={deleteState.error}
+          onConfirm={() => void deleteFlow.confirm()}
+          onCancel={() => deleteFlow.cancel()}
+        />
+      )}
     </div>
   );
+}
+
+// Delete chat confirmation: Cancel (or Esc, or clicking outside) changes nothing
+function DeleteChatDialog({
+  conversation,
+  busy,
+  error,
+  onConfirm,
+  onCancel,
+}: {
+  conversation: Conversation | undefined;
+  busy: boolean;
+  error: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const text = deleteChatText(conversation ? contactDisplayName(conversation.contact) : 'this customer');
+  return <ConfirmDialog title={text.title} body={text.body} yes={busy ? 'Deleting…' : 'Delete'} no="Cancel" error={error} danger busy={busy} onYes={onConfirm} onNo={onCancel} />;
 }
 
 function ConversationList({
@@ -1315,7 +1381,10 @@ function ConversationList({
   meId,
   unassignedCount,
   stageBar,
+  onDeleteChat,
 }: {
+  // Delete chat from the row's ⋮ menu (asks first)
+  onDeleteChat: (conversationId: string) => void;
   stageBar?: React.ReactNode; // the lifecycle stage being shown (left menu), with a way back to all chats
   conversations: Conversation[];
   totalCount: number;
@@ -1658,7 +1727,14 @@ function ConversationList({
                       )}
                     </span>
                   </button>
-                  
+                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens) */}
+                  <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
+                    <ChatOptionsMenu
+                      small
+                      label={`Chat options for ${contactName}`}
+                      options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
+                    />
+                  </div>
                 </li>
               );
             })}
@@ -1705,6 +1781,7 @@ function ChatPanel({
   onMarkedUnread,
   onClosed,
   onCleared,
+  onDelete,
   onClaim,
   claimError,
   reopenError,
@@ -1734,6 +1811,8 @@ function ChatPanel({
   onMarkedUnread: (id: string, unread: number) => void;
   // "Clear chat" succeeded (for this user only)
   onCleared: () => void;
+  // "Delete chat" chosen (the confirmation is shown first)
+  onDelete: () => void;
   // "Assign to Me" for an unassigned chat (New Lead), and why it failed if it did
   onClaim: () => void;
   claimError: string | null;
@@ -1760,6 +1839,22 @@ function ChatPanel({
   // Emoji picker and image sending
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null); // the image or document about to be sent
+  const [attachOpen, setAttachOpen] = useState(false); // 📎 menu: Photo, video or document / Location
+  const [locationOpen, setLocationOpen] = useState(false);
+  const attachRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!attachOpen) return;
+    const onDown = (e: MouseEvent) => attachRef.current && !attachRef.current.contains(e.target as Node) && setAttachOpen(false);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setAttachOpen(false);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [attachOpen]);
+  // Your live locations in this chat (the bar above the message box, with Stop sharing)
+  const myLives = useMyActiveLives(viewer?.userId).filter((l) => l.conversationId === conversation.id);
   const [template, setTemplate] = useState<Template | null>(null); // the template about to be sent (values to fill in)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -1903,6 +1998,9 @@ function ChatPanel({
     if (mode === 'note' && members === null) fetchWorkspaceMembers().then(setMembers, () => setMembers([]));
   }, [mode, members]);
   const [caret, setCaret] = useState(0);
+  // WhatsApp formatting: shown as you type (*bold*…); the small format bar appears while text in the box is selected
+  const highlightRef = useRef<HTMLDivElement>(null);
+  const [selecting, setSelecting] = useState(false);
   const [mentionClosed, setMentionClosed] = useState(false); // Esc: hidden until the text changes
   const mention = noting && !mentionClosed ? mentionAt(text, caret) : null;
   const mentionItems = useMemo(
@@ -1949,6 +2047,8 @@ function ChatPanel({
   // The message box grows with multi-line text (up to ~8 lines, then scrolls)
   useEffect(() => {
     if (inputRef.current) fitHeight(inputRef.current, 160);
+    // The formatted text under the box scrolls with it
+    if (inputRef.current && highlightRef.current) highlightRef.current.scrollTop = inputRef.current.scrollTop;
   }, [text]);
   function insertQuickReply(reply: QuickReply) {
     const next = reply.description ?? '';
@@ -1987,6 +2087,23 @@ function ChatPanel({
     }
   }
 
+  // The ⋮ menu's options while the chat isn't closed
+  const chatMenuOptions = (): ChatOption[] => [
+    { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
+    { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
+    { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
+    { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
+    ...(conversation.status === 'snoozed'
+      ? [{ label: 'Unsnooze', icon: SnoozeIcon, onSelect: () => changeStatus('open') }]
+      : [
+          {
+            label: 'Snooze',
+            icon: SnoozeIcon,
+            children: snoozeChoices().map((s) => ({ label: s.label, hint: snoozedUntilText(s.until.toISOString()), onSelect: () => changeStatus('snoozed', s.until) })),
+          },
+        ]),
+  ];
+
   async function togglePin() {
     setError('');
     try {
@@ -2010,6 +2127,42 @@ function ChatPanel({
       setError((err as Error).message);
     }
   }
+
+  // A formatting change (toolbar or Ctrl/⌘+B, I, Shift+X, Shift+M), made as typing so Ctrl/⌘+Z undoes it: only the
+  // part that changed is replaced, then the new selection is set. Falls back to setting the text directly.
+  function applyFormat(next: Edit) {
+    const el = inputRef.current;
+    if (!el) return;
+    const old = el.value;
+    let a = 0;
+    while (a < old.length && a < next.text.length && old[a] === next.text[a]) a++;
+    let b = 0;
+    while (b < old.length - a && b < next.text.length - a && old[old.length - 1 - b] === next.text[next.text.length - 1 - b]) b++;
+    const insert = next.text.slice(a, next.text.length - b);
+    el.focus();
+    el.setSelectionRange(a, old.length - b);
+    let done = false;
+    try {
+      done = insert ? document.execCommand('insertText', false, insert) : a < old.length - b ? document.execCommand('delete') : true;
+    } catch {
+      done = false;
+    }
+    if (!done || el.value !== next.text) setText(next.text);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(next.start, next.end);
+      setCaret(next.start);
+      setSelecting(next.start !== next.end);
+    });
+  }
+  const formatInline = (style: InlineStyle) => {
+    const el = inputRef.current;
+    if (el) applyFormat(toggleInline(el.value, el.selectionStart, el.selectionEnd, style));
+  };
+  const formatLines = (style: LineStyle) => {
+    const el = inputRef.current;
+    if (el) applyFormat(toggleLines(el.value, el.selectionStart, el.selectionEnd, style));
+  };
 
   // Emoji goes in at the cursor (or replaces the selection); the picker stays open for more
   function insertEmoji(emoji: string) {
@@ -2047,7 +2200,7 @@ function ChatPanel({
   function pickFile(f: File | undefined, many = false) {
     if (!f) return;
     if (windowClosed) return setError('24-hour window closed: only approved templates can be sent until the customer writes again.');
-    const r = checkFile(f);
+    const r = checkFile(f, { video: true });
     if ('problem' in r) return setError(r.problem);
     setError(many ? 'One file at a time: sending the first one.' : '');
     setImageFile(f);
@@ -2331,16 +2484,40 @@ function ChatPanel({
     onLoadOlder?.();
   };
 
+  // Replies on their way: "Sending…" at once, then the saved message, or the failure with its reason
+  const [pending, dispatchPending] = useReducer(pendingReducer, []);
+
+  // Each step is reported to the server's logs under one request id, which the send itself also carries
+  // (X-Request-Id): the browser's steps, the API's handling, the call to Meta and the saved message all share it
   async function send(body: string) {
     setError('');
     const quoted = replyTo;
+    const conversationId = conversation.id;
+    const requestId = newRequestId();
+    const started = Date.now();
+    dispatchPending({ type: 'start', send: { requestId, conversationId, body, startedAt: started } });
+    void reportClient({ event: 'send_started', requestId, conversationId, content: body, replyToId: quoted?.id ?? null });
     try {
-      onSent(await sendTextMessage(conversation.id, body, quoted?.id));
+      const m = await sendTextMessage(conversationId, body, quoted?.id, { requestId, timeoutMs: SEND_TIMEOUT_MS, reported: true });
+      dispatchPending({ type: 'done', requestId });
+      onSent(m);
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
+      const durationMs = Date.now() - started;
+      // Saved, but WhatsApp may have refused it: the message comes back failed, with WhatsApp's reason
+      void reportClient(
+        m.status === 'failed'
+          ? { event: 'send_failed', requestId, conversationId, messageId: m.id, status: m.status, durationMs, error: { message: m.error || 'WhatsApp refused it without a reason', kind: 'whatsapp' } }
+          : { event: 'send_succeeded', requestId, conversationId, messageId: m.id, status: m.status, durationMs },
+      );
     } catch (err) {
-      setError((err as Error).message);
+      const e = describeError(err);
+      // No answer in time: it may have gone through, so the text isn't put back to be sent twice
+      const unknown = e.kind === 'timeout';
+      dispatchPending({ type: 'fail', requestId, error: e.message, unknown });
+      void reportClient({ event: 'send_failed', requestId, conversationId, durationMs: Date.now() - started, error: e });
+      setError(e.message);
       noteRefusal(err);
-      setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
+      if (!unknown) setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
     }
   }
 
@@ -2350,7 +2527,7 @@ function ChatPanel({
   return (
     <section
       className="relative z-10 flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-chat-bg"
-      // Drag a photo or document onto the chat to send it (same checks and preview as the paperclip)
+      // Drag a photo, video or document onto the chat to send it (same checks and preview as the paperclip)
       onDragEnter={(e) => {
         if (!e.dataTransfer.types.includes('Files')) return;
         e.preventDefault();
@@ -2479,7 +2656,6 @@ function ChatPanel({
               <path d="m21 21-4.3-4.3" />
             </svg>
           </button>
-          <CountryCodeMenu contactId={conversation.contact.id} country={conversation.contact.country} waId={conversation.contact.waId} />
           <button
             onClick={(e) => onOpenLabels(e.currentTarget)}
             title="Label chat"
@@ -2501,27 +2677,15 @@ function ChatPanel({
               <path d="M12 16v-4M12 8h.01" />
             </svg>
           </button>
-          {!isClosed && (
-            <ChatOptionsMenu
-              disabled={statusBusy}
-              busy={statusBusy}
-              options={[
-                { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
-                { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
-                { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
-                { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
-                ...(conversation.status === 'snoozed'
-                  ? [{ label: 'Unsnooze', icon: SnoozeIcon, onSelect: () => changeStatus('open') }]
-                  : [
-                      {
-                        label: 'Snooze',
-                        icon: SnoozeIcon,
-                        children: snoozeChoices().map((s) => ({ label: s.label, hint: snoozedUntilText(s.until.toISOString()), onSelect: () => changeStatus('snoozed', s.until) })),
-                      },
-                    ]),
-              ]}
-            />
-          )}
+          {/* A closed chat offers only Delete chat (the rest needs it open) */}
+          <ChatOptionsMenu
+            disabled={statusBusy}
+            busy={statusBusy}
+            options={[
+              ...(isClosed ? [] : chatMenuOptions()),
+              { label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: onDelete },
+            ]}
+          />
           {/* {process.env.NODE_ENV !== 'production' && (
             <button
               onClick={async () => {
@@ -2649,6 +2813,7 @@ function ChatPanel({
                 highlighted={menu?.message.id === m.id || editing?.id === m.id || replyTo?.id === m.id || flashId === m.id}
                 onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
                 onJumpTo={jumpTo}
+                viewer={viewer}
                 highlightTerm={searchOpen ? searchText : ''}
                 currentMatch={searchOpen && m.id === currentMatchId}
                 onReact={canReact && !m.deletedAt && m.status !== 'failed' && m.status !== 'pending' ? (emoji) => react(m, emoji) : undefined}
@@ -2656,6 +2821,29 @@ function ChatPanel({
             </Fragment>
           );
         })}
+        {/* Replies on their way (or that failed before being saved), after the saved messages */}
+        {pendingIn(pending, conversation.id).map((p) => (
+          <div key={p.requestId} className="flex justify-end" data-pending-send={p.state}>
+            <div
+              className={`max-w-[72%] rounded-2xl rounded-tr-xs px-3.5 py-2 text-xs shadow-xs ${
+                p.state === 'sending' ? 'bg-bubble-out text-ink opacity-70' : 'border border-danger/40 bg-danger-soft text-ink'
+              }`}
+            >
+              <FormattedText text={p.body} className="pr-3 text-[13px] leading-relaxed" />
+              <div className="mt-1 flex items-center justify-end gap-2 text-[10px]">
+                <span role="status" className={p.state === 'sending' ? 'text-faint' : 'text-danger'}>
+                  {p.state === 'sending' ? '🕓 ' : '⚠ '}
+                  {pendingLabel(p)}
+                </span>
+                {p.state !== 'sending' && (
+                  <button type="button" onClick={() => dispatchPending({ type: 'dismiss', requestId: p.requestId })} className="text-faint hover:text-ink" aria-label="Dismiss" title="Dismiss">
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
         {unseen > 0 && (
           <div className="pointer-events-none sticky bottom-1 z-20 flex justify-center">
             <button
@@ -2778,6 +2966,22 @@ function ChatPanel({
           <VoiceRecorder onSend={sendVoiceNote} onClose={() => setVoiceMode(false)} />
         ) : (
         <>
+        {/* Your live location in this chat: until when, and Stop sharing */}
+        {myLives.map((l) => (
+          <div key={l.messageId} className="mb-2 flex items-center gap-2 rounded-lg border border-success/30 bg-success-soft px-3 py-1.5 text-xs text-ink" role="status">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#22c55e]" aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate">
+              You&apos;re sharing your live location until {formatTime(l.until)}. Keep this app open so it keeps updating.
+            </span>
+            <button
+              type="button"
+              onClick={() => stopSharing(l.messageId).catch((err) => setError((err as Error).message))}
+              className="shrink-0 rounded-md bg-danger px-2.5 py-1 font-semibold text-white hover:opacity-90"
+            >
+              Stop sharing
+            </button>
+          </div>
+        ))}
         {/* Reply / Add note, Template, and the number replies go out from */}
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
           <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
@@ -2869,6 +3073,8 @@ function ChatPanel({
             <TemplatePicker variant="primary" disabled={false} highlight onPick={setTemplate} />
           </div>
         ) : (
+        <>
+        {selecting && <FormatToolbar onInline={formatInline} onLines={formatLines} />}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -2904,11 +3110,11 @@ function ChatPanel({
           </button>
           </div>
 
-          {/* Attach an image (JPEG/PNG up to 5 MB): preview + caption, then send */}
+          {/* Attach a photo, video or document: preview + caption, then send */}
           <input
             ref={fileInputRef}
             type="file"
-            accept={ACCEPT}
+            accept={CHAT_ACCEPT}
             className="hidden"
             aria-label="Choose a file"
             onChange={(e) => {
@@ -2946,25 +3152,75 @@ function ChatPanel({
             </>
           )}
           {!noting && (
+          <div className="relative" ref={attachRef}>
+          {/* 📎: a photo, video or document (or drag a file onto the chat), or a location */}
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setAttachOpen((o) => !o)}
             disabled={!!editing}
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-faint hover:bg-surface-strong hover:text-body-soft transition disabled:opacity-40"
-            title="Send an image or document (or drag a file onto the chat)"
-            aria-label="Send an image or document"
+            aria-haspopup="menu"
+            aria-expanded={attachOpen}
+            className={`flex h-9 w-9 items-center justify-center rounded-xl transition hover:bg-surface-strong disabled:opacity-40 ${attachOpen ? 'text-primary' : 'text-faint hover:text-body-soft'}`}
+            title="Attach: photo, video, document or location"
+            aria-label="Attach"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           </button>
+          {attachOpen && (
+            <div role="menu" aria-label="Attach" className="absolute bottom-11 left-0 z-30 w-52 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-lg">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAttachOpen(false);
+                  fileInputRef.current?.click();
+                }}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] text-ink hover:bg-surface-muted"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#7c4dff] text-white" aria-hidden="true">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /></svg>
+                </span>
+                Photo, video or document
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAttachOpen(false);
+                  setError('');
+                  setLocationOpen(true);
+                }}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] text-ink hover:bg-surface-muted"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#22a06b] text-white" aria-hidden="true">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z" /></svg>
+                </span>
+                Location
+              </button>
+            </div>
+          )}
+          </div>
           )}
 
-          {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
+          {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks).
+              Its text is drawn by ComposerHighlight underneath, formatted as you type (*bold*, _italic_…), like
+              WhatsApp; the box itself keeps the cursor, selection and placeholder. */}
+          <div
+            className={`relative min-w-0 flex-1 rounded-xl transition ${
+              noting ? 'bg-warning-soft' : 'bg-surface-muted/70 focus-within:bg-surface'
+            }`}
+          >
+          {/* Same box, font and spacing as the text box; no kerning in either, so slanted words keep their places */}
+          <ComposerHighlight ref={highlightRef} text={text} className="border border-transparent px-4 py-2.5 text-xs leading-relaxed text-ink [font-kerning:none] [font-variant-ligatures:none]" />
           <textarea
             ref={inputRef}
             rows={1}
             value={text}
+            onScroll={(e) => {
+              if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
+            }}
             onChange={(e) => {
               setText(e.target.value);
               setCaret(e.target.selectionStart);
@@ -2972,9 +3228,21 @@ function ChatPanel({
               setMentionClosed(false);
               typingSender.onInput(e.target.value);
             }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-            onBlur={typingSender.stop}
+            onSelect={(e) => {
+              setCaret(e.currentTarget.selectionStart);
+              setSelecting(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd);
+            }}
+            onBlur={() => {
+              typingSender.stop();
+              setSelecting(false);
+            }}
             onKeyDown={(e) => {
+              // WhatsApp Desktop shortcuts: Ctrl/⌘+B bold, +I italic, +Shift+X strikethrough, +Shift+M monospace
+              const style = shortcutStyle(e);
+              if (style) {
+                e.preventDefault();
+                return formatInline(style);
+              }
               if (mention) {
                 const count = mentionItems.length;
                 if (e.key === 'ArrowDown' && count) {
@@ -3029,12 +3297,13 @@ function ChatPanel({
             }}
             placeholder={editing ? 'Edit message' : noting ? 'Write an internal note for your team…' : 'Type a message, or / for quick replies'}
             aria-label={noting ? 'Internal note' : 'Message'}
-            className={`flex-1 resize-none rounded-xl border px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition ${
+            className={`relative block w-full resize-none rounded-xl border bg-transparent px-4 py-2.5 text-xs leading-relaxed text-transparent caret-ink [font-kerning:none] [font-variant-ligatures:none] placeholder:text-faint outline-hidden transition selection:bg-primary/25 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
               noting
-                ? 'border-warning-border bg-warning-soft focus:border-warning focus:ring-1 focus:ring-warning'
-                : 'border-line bg-surface-muted/70 focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary'
+                ? 'border-warning-border focus:border-warning focus:ring-1 focus:ring-warning'
+                : 'border-line focus:border-primary focus:ring-1 focus:ring-primary'
             }`}
           />
+          </div>
 
           {/* Empty message box: microphone to record a voice note (like WhatsApp); otherwise Send */}
           {!text.trim() && !editing && !noting ? (
@@ -3067,10 +3336,29 @@ function ChatPanel({
           </button>
           )}
         </form>
+        </>
         )}
         </>
         ))}
         {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
+        {locationOpen && (
+          <LocationDialog
+            conversationId={conversation.id}
+            replyToId={replyTo?.id}
+            onClose={() => setLocationOpen(false)}
+            onSent={(m) => {
+              onSent(m);
+              setReplyTo(null);
+              setLocationOpen(false);
+            }}
+            onLiveStarted={(m, live) => {
+              onSent(m);
+              setLive(live);
+              startWatching(live, setError); // this tab sends your position until it ends or you stop
+              setLocationOpen(false);
+            }}
+          />
+        )}
       </footer>
 
       {menu && (

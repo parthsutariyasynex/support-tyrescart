@@ -30,8 +30,9 @@ export type AssignmentParty = { id: string; user: { id: string; name: string } }
 
 // Adds one row. Called inside the same transaction as the chat's assignedToId change, so the record exists
 // exactly when the assignment does. Rows are never updated or deleted by the app.
+// tx: the transaction (any client that can create an assignment record)
 export function recordAssignment(
-  tx: Prisma.TransactionClient,
+  tx: { assignmentRecord: { create(args: { data: Prisma.AssignmentRecordUncheckedCreateInput }): Promise<unknown> } },
   data: {
     workspaceId: string;
     conversationId: string;

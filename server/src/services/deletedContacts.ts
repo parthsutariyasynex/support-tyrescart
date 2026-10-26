@@ -7,6 +7,7 @@ import { emitToWorkspace } from '../realtime.js';
 import { AppError, notFound } from './errors.js';
 import { requireAdmin } from './permissions.js';
 import { DEFAULTS, settingsOf } from './workspaceSettings.js';
+import { logFailure } from './logging.js';
 
 // Deleting a contact (admins): it and its chat leave the app at once but are kept for RETENTION_DAYS in Settings →
 // Recently deleted contacts, where an admin can restore them. After that they are removed for good, with the chat,
@@ -72,13 +73,18 @@ export async function purgeDeletedContacts(now = new Date()) {
   const { count } = await prisma.contact.deleteMany({ where: { id: { in: ids } } }); // chat, messages, remarks… go with it
   for (const f of files) {
     const full = path.resolve(env.uploadsDir, f.mediaPath!);
-    if (full.startsWith(env.uploadsDir + path.sep)) await rm(full, { force: true }).catch(() => {});
+    if (full.startsWith(env.uploadsDir + path.sep))
+      await rm(full, { force: true }).catch((err) => logFailure('file.remove_failed', "Couldn't remove a purged chat's file", err, { level: 'WARNING', data: { path: f.mediaPath } }));
   }
   return count;
 }
 
 export function startDeletedContactsPurge(intervalMs = 60 * 60_000) {
-  const run = () => purgeDeletedContacts().catch((err) => console.error('[contacts] purge failed', err));
+  const run = () =>
+    purgeDeletedContacts().catch((err) => {
+      console.error('[contacts] purge failed', err);
+      void logFailure('job.purge_failed', 'Purging deleted contacts failed', err);
+    });
   run();
   const timer = setInterval(run, intervalMs);
   timer.unref?.();

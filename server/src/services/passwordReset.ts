@@ -8,6 +8,7 @@ import { disconnectUser } from '../realtime.js';
 import { registerSchema } from './auth.js';
 import { AppError } from './errors.js';
 import { parse } from './validate.js';
+import { logFailure } from './logging.js';
 
 // "Forgot password": email a single-use link that expires after 30 minutes.
 // The response never says whether the email has an account.
@@ -66,6 +67,7 @@ export async function requestPasswordReset(rawInput: unknown, ip: string) {
     });
   } catch (err) {
     console.error('[mail] password reset email failed', err);
+    void logFailure('email.failed', 'Password reset email failed', err, { data: { kind: 'password_reset' } });
     throw new AppError("We couldn't send the email right now. Try again in a few minutes.", 502, 'EMAIL_FAILED');
   }
   return true;
@@ -98,6 +100,7 @@ export async function sendInvite(user: { id: string; name: string; email: string
     return true;
   } catch (err) {
     console.error('[mail] invite email failed', err);
+    void logFailure('email.failed', 'Invite email failed', err, { data: { kind: 'invite' } });
     return false;
   }
 }
@@ -129,6 +132,7 @@ export async function sendAccountReady(
     return true;
   } catch (err) {
     console.error('[mail] account email failed', err);
+    void logFailure('email.failed', 'Account email failed', err, { data: { kind: 'account' } });
     return false;
   }
 }

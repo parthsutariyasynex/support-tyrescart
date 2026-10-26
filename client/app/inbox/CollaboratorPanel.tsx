@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { type Assignee, type WorkspaceMember, fetchWorkspaceMembers } from '@/lib/assignees';
 import { toggle } from '@/lib/chatFilters';
 
-// "Collaborator" in the Filter menu: search, then pick one or more people (the chat's assignee); Clear below.
+// "Assign" in the Filter menu: search, then pick one or more people the chats are assigned to; Clear below.
 // Names and colours come from the assignee list, emails from the live member list.
 export function CollaboratorPanel({
   assignees,
@@ -50,7 +50,7 @@ export function CollaboratorPanel({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            aria-label="Search collaborators"
+            aria-label="Search assignees"
             className="w-full bg-transparent text-[13px] text-ink placeholder:text-faint outline-none"
           />
         </div>

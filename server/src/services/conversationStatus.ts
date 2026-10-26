@@ -4,6 +4,7 @@ import { emitToWorkspace } from '../realtime.js';
 import { recordActivity } from './activity.js';
 import { AppError } from './errors.js';
 import { NEW_LEAD_WHERE, requireConversation } from './inbox.js';
+import { logEvent, logFailure } from './logging.js';
 
 // Close / snooze / reopen a chat (WhatsApp Business-style). Only the status changes: messages, labels, assignee
 // and customer details stay. Any member of the workspace can do it. A snoozed chat comes back to open at
@@ -36,6 +37,21 @@ async function setStatus(auth: AuthPayload, conversationId: string, status: Conv
     });
   }
   const conversation = await requireConversation(auth.workspaceId, conversationId);
+  const verb = status === 'closed' ? 'closed' : status === 'snoozed' ? `snoozed until ${snoozedUntil!.toISOString()}` : 'reopened';
+  void logEvent({
+    level: 'SUCCESS',
+    category: 'system',
+    event: 'conversation.status_changed',
+    message: changed ? `Chat ${verb} (was ${current.status})` : `Chat already ${current.status}: nothing changed`,
+    reason: `A teammate ${verb} the chat`,
+    outcome: changed ? 'changed' : 'unchanged',
+    previousStatus: current.status,
+    newStatus: conversation.status,
+    workspaceId: auth.workspaceId,
+    userId: auth.userId,
+    conversationId,
+    data: status === 'snoozed' ? { snoozedUntil: snoozedUntil!.toISOString() } : undefined,
+  });
   if (changed) {
     emitToWorkspace(auth.workspaceId, 'conversation:status', statusEvent(conversation));
     await recordActivity({
@@ -68,6 +84,18 @@ async function wake(conversationId: string, workspaceId: string, reason: 'snooze
     data: { status: 'open', snoozedUntil: null },
   });
   if (!count) return false;
+  void logEvent({
+    level: 'SUCCESS',
+    category: 'system',
+    event: 'conversation.woken',
+    message: 'Snoozed chat reopened',
+    reason: reason === 'snooze_ended' ? 'The time the chat was snoozed until has come' : 'The customer wrote while the chat was snoozed',
+    outcome: 'changed',
+    previousStatus: 'snoozed',
+    newStatus: 'open',
+    workspaceId,
+    conversationId,
+  });
   const conversation = await requireConversation(workspaceId, conversationId);
   emitToWorkspace(workspaceId, 'conversation:status', statusEvent(conversation));
   await recordActivity({ workspaceId, conversationId, actorId: null, type: 'conversation_reopened', data: { reason } });
@@ -86,7 +114,14 @@ export const wakeOnCustomerMessage = (conversationId: string, workspaceId: strin
 
 // Checks every 30 seconds; returns a stop function
 export function startSnoozeWaker(intervalMs = 30_000) {
-  const timer = setInterval(() => wakeSnoozedConversations().catch((err) => console.error('[snooze] wake failed', err)), intervalMs);
+  const timer = setInterval(
+    () =>
+      wakeSnoozedConversations().catch((err) => {
+        console.error('[snooze] wake failed', err);
+        void logFailure('job.snooze_failed', 'Waking snoozed chats failed', err);
+      }),
+    intervalMs,
+  );
   timer.unref();
   return () => clearInterval(timer);
 }

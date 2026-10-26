@@ -42,6 +42,8 @@ import { type MessageEvent, appInBackground, customerMessageNotice, shouldSuppre
 import { alertsYou, clearMessagePopups, showMessagePopup, soundEnabled } from '@/lib/messagePopups';
 import { fetchConversation } from '@/lib/inbox';
 import { MessagePopups } from './inbox/MessagePopups';
+// Reports this page's uncaught errors and failed changes to the server's logs (installs its listeners on load)
+import '@/lib/clientLog';
 
 // Customer messages already notified in this tab (the same message can arrive twice, e.g. after a reconnect)
 const seenMessages = new Set<string>();
@@ -159,11 +161,6 @@ export function AppShell({
     const open = (id: string) => openChatRef.current(id);
     // The notification sound, unless turned off in Settings → Notifications
     const ping = () => soundEnabled() && playPing();
-    // TEMPORARY debug instrumentation for the real-message notification flow - remove once confirmed working
-    // end to end (matching logs in inbox/page.tsx and inbox/notifications.tsx).
-    socket.on('connect', () => console.debug('[notify-debug] AppShell socket connected', socket.id));
-    socket.on('connect_error', (err) => console.debug('[notify-debug] AppShell socket connect_error', err.message));
-    socket.on('disconnect', (reason) => console.debug('[notify-debug] AppShell socket disconnected', reason));
     // Toast only for new chats, reminders and collaborators. Assigned to you / removed from you keep the sound and
     // desktop pop-up they already had while the tab is in the background (unchanged)
     const alertHidden = (title: string, body: string, tag: string, conversationId: string) => {
@@ -176,15 +173,8 @@ export function AppShell({
     // tab or window. Clicking it opens the chat. One per message; never for our own messages; only for chats you may
     // work on (alertsYou).
     socket.on('message:new', async (e: MessageEvent) => {
-      console.debug('[notify-debug] message:new received', { messageId: e?.message?.id, conversationId: e?.message?.conversationId, direction: e?.message?.direction, deletedAt: e?.message?.deletedAt });
       const n = customerMessageNotice(e, seenMessages);
-      if (!n) {
-        console.debug('[notify-debug] customerMessageNotice returned null (not incoming, deleted, or already seen) - stopping here');
-        return;
-      }
-      const suppressed = shouldSuppressNotification(n.conversationId);
-      console.debug('[notify-debug] notice built, checking suppression', { conversationId: n.conversationId, suppressed });
-      if (suppressed) return;
+      if (!n || shouldSuppressNotification(n.conversationId)) return;
       const isAdmin = isAdminRole(roleRef.current ?? '');
       if (!isAdmin && e.conversation?.assignedToId) {
         // Someone's chat: alert only its assignee and collaborators (the event goes to the whole workspace)

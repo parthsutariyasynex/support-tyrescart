@@ -7,7 +7,7 @@ import { withSender } from '../services/senders.js';
 import { prisma } from '../prisma.js';
 import { toAssigneeRef } from '../services/assign.js';
 import { conversationLabels } from '../services/labels.js';
-import { clearConversation, clearedAt } from '../services/conversationClear.js';
+import { clearConversation, clearedAt, deleteConversationForUser } from '../services/conversationClear.js';
 import { closeConversation, conversationCounts, reopenConversation, snoozeConversation } from '../services/conversationStatus.js';
 import { markConversationUnread, pinConversation, pinnedIds, unpinConversation } from '../services/conversationPins.js';
 import { addCollaborators, listCollaborators, removeCollaborator } from '../services/collaborators.js';
@@ -293,6 +293,8 @@ export const typeDefs = /* GraphQL */ `
     simulateIncomingMessage(input: SimulateIncomingInput): Boolean!
     "Clear chat for yourself only (like WhatsApp): hides everything so far from your view; nothing is deleted"
     clearConversation(id: ID!): DateTime!
+    "Delete chat for yourself only (like WhatsApp): leaves your chat list until a newer message; nothing is deleted from the database"
+    deleteConversationForMe(id: ID!): Boolean!
     "Mark the chat closed/resolved. Keeps messages, labels and the assignee."
     closeConversation(id: ID!): Conversation!
     reopenConversation(id: ID!): Conversation!
@@ -403,6 +405,7 @@ export const resolvers = {
       deleteMessage(auth, messageId, version == null ? {} : { version }),
     ),
     clearConversation: authed(({ id }: { id: string }, auth) => clearConversation(auth, id)),
+    deleteConversationForMe: authed(({ id }: { id: string }, auth) => deleteConversationForUser(auth, id)),
     closeConversation: authed(({ id }: { id: string }, auth) => closeConversation(auth, id)),
     reopenConversation: authed(({ id }: { id: string }, auth) => reopenConversation(auth, id)),
     snoozeConversation: authed(({ id, until }: { id: string; until: Date }, auth) => snoozeConversation(auth, id, until)),

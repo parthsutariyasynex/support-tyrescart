@@ -1,4 +1,4 @@
-import { gql } from './api';
+import { gql, type GqlOptions } from './api';
 import type { Assignee } from './assignees';
 import type { Label } from './labels';
 
@@ -82,7 +82,7 @@ export const PAGE_SIZE = 50;
 
 const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
 // Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
-const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
+export const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
 const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
@@ -157,9 +157,11 @@ export async function markConversationRead(id: string) {
 }
 
 // replyToId: send it as a reply to that message of the chat (quoted above it, in the app and in WhatsApp)
-export async function sendTextMessage(conversationId: string, body: string, replyToId?: string | null) {
+// options: the send's request id (the server's logs carry it), a time limit, and whether the caller reports the
+// outcome itself (see lib/api.ts)
+export async function sendTextMessage(conversationId: string, body: string, replyToId?: string | null, options?: GqlOptions) {
   const query = `mutation SendText($input: SendTextInput!) { sendTextMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
-  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } })).sendTextMessage;
+  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } }, options)).sendTextMessage;
 }
 
 
@@ -255,4 +257,9 @@ export async function snoozeConversation(id: string, until: Date) {
 // Clear chat for yourself only (like WhatsApp); nothing is deleted and teammates still see everything
 export async function clearConversation(id: string) {
   await gql(`mutation ClearChat($id: ID!) { clearConversation(id: $id) }`, { id });
+}
+
+// Delete chat for yourself only (like WhatsApp): it leaves your list until a newer message; nothing is deleted
+export async function deleteConversationForMe(id: string) {
+  await gql(`mutation DeleteChat($id: ID!) { deleteConversationForMe(id: $id) }`, { id });
 }

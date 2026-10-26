@@ -45,6 +45,16 @@ inboxRouter.post(
   },
 );
 
+// Send a video (MP4 or 3GP, up to 16 MB): the body is the video itself; `caption` and `replyTo` as for images
+inboxRouter.post(
+  '/conversations/:id/videos',
+  express.raw({ type: () => true, limit: '16mb' }),
+  async (req, res) => {
+    const body = Buffer.isBuffer(req.body) ? req.body : undefined;
+    res.json(await sendMediaMessage('video', req.auth!.workspaceId, req.params.id, body, req.headers['content-type'], req.query.caption, null, req.auth!.userId, req.query.replyTo));
+  },
+);
+
 // Send a document (PDF, Word, Excel, PowerPoint or text, up to 100 MB): the body is the file itself; `name` (its
 // file name), `caption` and `replyTo` (a message id, to send it as a reply) are query parameters
 inboxRouter.post(

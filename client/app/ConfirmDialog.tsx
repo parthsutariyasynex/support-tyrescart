@@ -3,12 +3,14 @@
 import { useEffect, useId, useRef } from 'react';
 
 // Yes / No confirmation shown inside the page (same look as the Clear chat dialog), used instead of the browser's
-// confirm() popup. Esc or clicking outside = No. Shared by the Teams page (activate/deactivate, remove) and the
-// Assign box (unassign).
+// confirm() popup. Esc or clicking outside = No. Shared by the Teams page (activate/deactivate, remove), the
+// Assign box (unassign) and Delete chat (with Cancel / Delete as the buttons).
 export function ConfirmDialog({
   title,
   body,
   yes,
+  no = 'No',
+  error,
   danger,
   busy,
   onYes,
@@ -17,6 +19,8 @@ export function ConfirmDialog({
   title: string;
   body: string;
   yes: string;
+  no?: string;
+  error?: string; // why the last try failed (shown above the buttons)
   danger: boolean;
   busy: boolean;
   onYes: () => void;
@@ -37,9 +41,14 @@ export function ConfirmDialog({
           {title}
         </h2>
         <p className="mt-2 text-xs leading-relaxed text-muted">{body}</p>
+        {error && (
+          <p role="alert" className="mt-3 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">
+            {error}
+          </p>
+        )}
         <div className="mt-5 flex justify-end gap-2">
           <button ref={noRef} type="button" disabled={busy} onClick={onNo} className="rounded-lg px-3 py-1.5 text-xs font-medium text-body-soft hover:bg-surface-strong disabled:opacity-50">
-            No
+            {no}
           </button>
           <button
             type="button"

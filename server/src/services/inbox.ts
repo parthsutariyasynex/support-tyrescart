@@ -6,17 +6,19 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isSupervisorOrAbove } from './roles.js';
 import { emitToWorkspace } from '../realtime.js';
-import { type ApprovedTemplate, listApprovedTemplates, sendAudio, sendDocument, sendImage, sendText, uploadMedia } from '../whatsapp.js';
+import { type ApprovedTemplate, listApprovedTemplates, sendAudio, sendDocument, sendImage, sendText, sendVideo, uploadMedia } from '../whatsapp.js';
 import { windowOpen } from './messagingWindow.js';
 import { prepareVoice } from './voice.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AppError, notFound } from './errors.js';
 import { previewOf, recordActivity } from './activity.js';
+import { deletedConversationIds } from './conversationClear.js';
 import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './incomingMedia.js';
 import { withSender } from './senders.js';
 import { defaultStageValue } from './leadStages.js';
 import { parse } from './validate.js';
+import { logEvent, logFailure, logMessageSend, withMessageTrace } from './logging.js';
 
 export const MAX_PAGE_SIZE = 100;
 
@@ -121,8 +123,11 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   const pins = viewerId
     ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
     : [];
+  // Chats the viewer deleted for themselves ("Delete chat"), until a newer message brings them back
+  const deleted = viewerId ? await deletedConversationIds(viewerId, workspaceId) : [];
   const where: Prisma.ConversationWhereInput = {
       workspaceId,
+      ...(deleted.length ? { id: { notIn: deleted } } : {}),
       contact: { deletedAt: null, ...(leadStage ? { leadStage } : {}) },
       ...(labelId ? { labels: { some: { labelId } } } : {}),
       ...(assignee === 'collaborating'
@@ -297,17 +302,22 @@ export async function checkCanSend(workspaceId: string, conversationId: string, 
   return { conversation, account };
 }
 
-// --- Images and documents
+// --- Images, videos and documents
 
 export const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // WhatsApp's limit for images
+export const VIDEO_MAX_BYTES = 16 * 1024 * 1024; // WhatsApp's limit for video
 export const DOCUMENT_MAX_BYTES = 100 * 1024 * 1024; // WhatsApp's limit for documents
 export const CAPTION_MAX = 1024;
 const OLE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]; // old Office files (.doc .xls .ppt)
 const ZIP = [0x50, 0x4b, 0x03, 0x04]; // new Office files (.docx .xlsx .pptx) are zip files
 // What can be sent, checked from the file's first bytes (not just the type the browser reports)
-const FILE_TYPES: Record<string, { kind: 'image' | 'document'; ext: string; magic: number[] | 'text' }> = {
+type FileKind = 'image' | 'video' | 'document';
+const FILE_TYPES: Record<string, { kind: FileKind; ext: string; magic: number[] | 'text' | 'ftyp' }> = {
   'image/jpeg': { kind: 'image', ext: 'jpg', magic: [0xff, 0xd8, 0xff] },
   'image/png': { kind: 'image', ext: 'png', magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  // MP4 and 3GP share the ISO media layout: "ftyp" at byte 4. WhatsApp plays H.264 video with AAC audio.
+  'video/mp4': { kind: 'video', ext: 'mp4', magic: 'ftyp' },
+  'video/3gpp': { kind: 'video', ext: '3gp', magic: 'ftyp' },
   'application/pdf': { kind: 'document', ext: 'pdf', magic: [0x25, 0x50, 0x44, 0x46, 0x2d] }, // %PDF-
   'application/msword': { kind: 'document', ext: 'doc', magic: OLE },
   'application/vnd.ms-excel': { kind: 'document', ext: 'xls', magic: OLE },
@@ -319,18 +329,24 @@ const FILE_TYPES: Record<string, { kind: 'image' | 'document'; ext: string; magi
 };
 
 // The bytes must really be the kind of file they claim to be. Returns the type, its kind and extension.
-export function checkFile(bytes: Buffer | undefined, mime: string | undefined, kind: 'image' | 'document') {
+const KIND_RULES: Record<FileKind, { max: number; tooLarge: string; unsupported: string }> = {
+  image: { max: IMAGE_MAX_BYTES, tooLarge: 'Images can be up to 5 MB', unsupported: 'Only JPEG and PNG images can be sent' },
+  video: { max: VIDEO_MAX_BYTES, tooLarge: 'Videos can be up to 16 MB', unsupported: 'Only MP4 and 3GP videos can be sent' },
+  document: { max: DOCUMENT_MAX_BYTES, tooLarge: 'Documents can be up to 100 MB', unsupported: 'Only PDF, Word, Excel, PowerPoint and text files can be sent' },
+};
+export function checkFile(bytes: Buffer | undefined, mime: string | undefined, kind: FileKind) {
   const type = (mime ?? '').toLowerCase().split(';')[0].trim();
   const spec = FILE_TYPES[type];
-  if (!spec || spec.kind !== kind)
-    throw new AppError(kind === 'image' ? 'Only JPEG and PNG images can be sent' : 'Only PDF, Word, Excel, PowerPoint and text files can be sent', 415, 'UNSUPPORTED_MEDIA');
+  const rules = KIND_RULES[kind];
+  if (!spec || spec.kind !== kind) throw new AppError(rules.unsupported, 415, 'UNSUPPORTED_MEDIA');
   if (!bytes?.length) throw new AppError('The file is empty', 400, 'BAD_USER_INPUT');
-  const max = kind === 'image' ? IMAGE_MAX_BYTES : DOCUMENT_MAX_BYTES;
-  if (bytes.length > max) throw new AppError(kind === 'image' ? 'Images can be up to 5 MB' : 'Documents can be up to 100 MB', 413, 'TOO_LARGE');
+  if (bytes.length > rules.max) throw new AppError(rules.tooLarge, 413, 'TOO_LARGE');
   const valid =
     spec.magic === 'text'
       ? !bytes.subarray(0, 8192).includes(0) // plain text has no NUL bytes
-      : spec.magic.every((b, i) => bytes[i] === b);
+      : spec.magic === 'ftyp'
+        ? bytes.subarray(4, 8).toString('latin1') === 'ftyp'
+        : spec.magic.every((b, i) => bytes[i] === b);
   if (!valid) throw new AppError(`That file isn't a valid ${spec.ext.toUpperCase()} file`, 415, 'UNSUPPORTED_MEDIA');
   return { mime: type, ext: spec.ext };
 }
@@ -344,10 +360,10 @@ export function cleanFileName(raw: unknown, ext: string) {
   return name.toLowerCase().endsWith(`.${ext}`) ? name : `${name}.${ext}`;
 }
 
-// Sends an image or a document (optional caption): a copy is kept on the server so the app can show or download it,
+// Sends an image, a video or a document (optional caption): a copy is kept on the server so the app can show or download it,
 // then it's uploaded to WhatsApp and sent. A WhatsApp failure is kept as a failed message (like text), not lost.
 export async function sendMediaMessage(
-  kind: 'image' | 'document' | 'voice',
+  kind: FileKind | 'voice',
   workspaceId: string,
   conversationId: string,
   bytes: Buffer | undefined,
@@ -357,9 +373,9 @@ export async function sendMediaMessage(
   sentById?: string,
   replyToId?: unknown,
 ) {
-  // Voice notes are checked (and WebM repackaged to OGG/Opus) by prepareVoice; images and documents by checkFile
+  // Voice notes are checked (and WebM repackaged to OGG/Opus) by prepareVoice; everything else by checkFile
   const voice = kind === 'voice' ? prepareVoice(bytes, mime) : null;
-  const file = voice ?? checkFile(bytes, mime, kind as 'image' | 'document');
+  const file = voice ?? checkFile(bytes, mime, kind as FileKind);
   const data = voice ? voice.bytes : bytes!;
   const caption = kind === 'voice' ? '' : typeof rawCaption === 'string' ? rawCaption.trim() : '';
   if (caption.length > CAPTION_MAX) throw new AppError(`Caption is too long (max ${CAPTION_MAX} characters)`, 400, 'BAD_USER_INPUT');
@@ -376,21 +392,28 @@ export async function sendMediaMessage(
   await prisma.message.update({ where: { id: message.id }, data: { mediaPath: relative } });
 
   let saved;
+  let sendError: unknown;
   try {
-    const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
-    const wamid =
-      kind === 'image'
-        ? await sendImage(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
-        : kind === 'voice'
-          ? await sendAudio(account, conversation.contact.waId, mediaId, quoted?.waMessageId)
-          : await sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined, quoted?.waMessageId);
+    // The upload and the send both name this message in the logs
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId }, async () => {
+      const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
+      return kind === 'image'
+        ? sendImage(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
+        : kind === 'video'
+          ? sendVideo(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
+          : kind === 'voice'
+            ? sendAudio(account, conversation.contact.waId, mediaId, quoted?.waMessageId)
+            : sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined, quoted?.waMessageId);
+    });
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
+    sendError = err;
   }
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: kind, userId: sentById, error: sendError, waMessageId: saved.waMessageId, content: caption || null });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
-  const label = kind === 'image' ? '[Photo]' : kind === 'voice' ? '[Voice message]' : `[Document] ${fileName}`;
+  const label = kind === 'image' ? '[Photo]' : kind === 'video' ? '[Video]' : kind === 'voice' ? '[Voice message]' : `[Document] ${fileName}`;
   await recordActivity({
     workspaceId,
     conversationId,
@@ -427,13 +450,31 @@ export async function readMessageMedia(workspaceId: string, messageId: string) {
   if (!full.startsWith(env.uploadsDir + path.sep)) throw notFound('File'); // never outside the uploads folder
   try {
     return { bytes: await readFile(full), mime: message.mediaMime, name: message.mediaName };
-  } catch {
+  } catch (err) {
+    void logFailure('file.missing', "A message's file is missing on the server", err, { level: 'WARNING', workspaceId, messageId });
     throw notFound('File');
   }
 }
 
 // `sentById` is the agent sending it; it decides who may edit or delete the message later
 export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
+  // First step on the API's side, before any check: a refusal below (not assigned, window closed…) is logged by the
+  // GraphQL layer with the same request id, so the reply's text and chat are in the logs either way
+  const raw = rawInput as { body?: unknown; type?: unknown; replyToId?: unknown } | null;
+  void logEvent({
+    level: 'SUCCESS',
+    category: 'message',
+    event: 'message.send_requested',
+    message: `Reply received by the API (${typeof raw?.type === 'string' ? raw.type : 'text'}), checking it can be sent`,
+    direction: 'out',
+    outcome: 'received',
+    newStatus: 'requested',
+    workspaceId,
+    userId: sentById,
+    conversationId,
+    content: typeof raw?.body === 'string' ? raw.body : null,
+    data: { type: typeof raw?.type === 'string' ? raw.type : null, replyToId: typeof raw?.replyToId === 'string' ? raw.replyToId : null },
+  });
   const input = parse(sendSchema, rawInput);
   // Templates go only through sendTemplateMessage (the chat's "Yes, Send" confirmation), never through here
   if (input.type === 'template')
@@ -447,15 +488,18 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   });
 
   let saved;
+  let sendError: unknown;
   try {
-    const wamid = await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId);
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId }, () => sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId));
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({
       where: { id: message.id },
       data: { status: 'failed', error: (err as Error).message },
     });
+    sendError = err;
   }
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: input.type, userId: sentById, error: sendError, waMessageId: saved.waMessageId, content: body });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   // Contact details page activity log: "Message sent by …" (not the chat timeline or the bell; the chat shows the bubble)

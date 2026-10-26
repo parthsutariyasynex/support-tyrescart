@@ -3,30 +3,19 @@
 import { useEffect, useState } from 'react';
 import { type ContactRemark, type RemarkFile, downloadRemarkFile, remarkFileUrl } from '@/lib/contacts';
 import { documentLabel, formatSize } from '@/lib/media';
-import { mentionPieces } from '@/lib/mentions';
 import { formatTime } from '@/lib/time';
+import { FormattedText } from './FormattedText';
 
 // An internal note in the chat (SleekFlow style): a yellow bubble on the team's side, marked "Internal note" with
-// who wrote it, @mentions highlighted. Only the team ever sees it; notes are never sent to WhatsApp or the customer
+// who wrote it, @mentions highlighted, WhatsApp formatting shown. Only the team ever sees it; notes are never sent to WhatsApp or the customer
 // (they are the customer's remarks: edited or deleted in the profile panel, Remarks).
 export function NoteBubble({ note, teammateNames }: { note: ContactRemark; teammateNames: string[] }) {
   return (
     <div className="flex justify-end" role="note" aria-label={`Internal note${note.authorName ? ` by ${note.authorName}` : ''}`}>
       <div className="max-w-[75%]">
         <div className="rounded-xl rounded-tr-sm border border-dashed border-warning-border bg-warning-soft px-3 py-2 text-[13px] leading-relaxed text-ink shadow-2xs">
-          {note.body && (
-          <p className="whitespace-pre-wrap break-words">
-            {mentionPieces(note.body, teammateNames).map((p, i) =>
-              p.mention ? (
-                <span key={i} className="font-semibold text-primary">
-                  {p.text}
-                </span>
-              ) : (
-                <span key={i}>{p.text}</span>
-              ),
-            )}
-          </p>
-          )}
+          {/* WhatsApp formatting shown as in messages; @mentions highlighted */}
+          {note.body && <FormattedText text={note.body} mentionNames={teammateNames} />}
           <NoteFiles files={note.files} className={note.body ? 'mt-2' : ''} />
           <p className="mt-0.5 text-right text-[10px] text-faint">
             {note.editedAt && 'edited · '}

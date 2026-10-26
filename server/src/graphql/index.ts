@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { createSchema, createYoga } from 'graphql-yoga';
 import { verifyCurrentToken, type AuthPayload } from '../auth.js';
 import { env } from '../env.js';
+import { setRequestUser } from '../services/logging.js';
 import * as activity from './activity.js';
 import * as assign from './assign.js';
 import * as automations from './automations.js';
@@ -9,6 +10,7 @@ import * as auth from './auth.js';
 import * as contacts from './contacts.js';
 import * as inbox from './inbox.js';
 import * as labels from './labels.js';
+import * as location from './location.js';
 import * as members from './members.js';
 import * as quickReplies from './quickReplies.js';
 import * as permissions from './permissions.js';
@@ -20,7 +22,7 @@ import type { Context } from './shared.js';
 
 type ServerContext = { req: Request; res: Response };
 
-const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations];
+const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations, location];
 
 export const yoga = createYoga<ServerContext, Context>({
   schema: createSchema<ServerContext & Context>({
@@ -40,6 +42,7 @@ export const yoga = createYoga<ServerContext, Context>({
         // invalid, expired, or issued before a password reset: treat as logged out
       }
     }
+    setRequestUser(auth); // later log entries of this request name the person and workspace
     return { auth, ip: req.ip ?? req.socket.remoteAddress ?? 'unknown' };
   },
 });

@@ -61,6 +61,10 @@ const nextConfig: NextConfig = {
         destination: `${API}/inbox/conversations/:id/images`,
       },
       {
+        source: '/inbox/conversations/:id/videos',
+        destination: `${API}/inbox/conversations/:id/videos`,
+      },
+      {
         source: '/inbox/conversations/:id/documents',
         destination: `${API}/inbox/conversations/:id/documents`,
       },
@@ -100,8 +104,18 @@ const nextConfig: NextConfig = {
         destination: `${API}/me/avatar`,
       },
       {
+        // The web app's own reports (sending a reply, failed API calls, browser errors) for the logs
+        source: '/client-log',
+        destination: `${API}/client-log`,
+      },
+      {
         source: '/health',
         destination: `${API}/health`,
+      },
+      {
+        // Live location links customers open (served by the API; public, the token in the link is the key)
+        source: '/live/:path*',
+        destination: `${API}/live/:path*`,
       },
       {
         // Report exports (e.g. /reports/assignments.csv). ':path+' needs at least one segment, so the

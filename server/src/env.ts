@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import os from 'node:os';
 import path from 'node:path';
 
 function required(name: string): string {
@@ -34,4 +35,32 @@ export const env = {
   allowWorkspaceCreation: process.env.ALLOW_WORKSPACE_CREATION
     ? process.env.ALLOW_WORKSPACE_CREATION === 'true'
     : process.env.NODE_ENV !== 'production',
+  // Backend logs (LogEntry): days they are kept, and what the daily clean-up does with older ones: dry-run (default,
+  // only counts them), delete, or off. Checked in services/logRetention.ts.
+  logRetentionDays: process.env.LOG_RETENTION_DAYS,
+  logRetentionMode: process.env.LOG_RETENTION_MODE,
+  // The daily log files (logs/YYYY-MM-DD.log, JSON lines): their folder, and LOG_TO_FILE=false to not write them
+  // Test runs (node --test) never write to the real logs/ folder: a temporary one unless LOG_DIR is set
+  logDir: path.resolve(process.env.LOG_DIR || (process.env.NODE_TEST_CONTEXT ? path.join(os.tmpdir(), 'support-tyrescart-test-logs') : 'logs')),
+  logToFile: process.env.LOG_TO_FILE !== 'false',
+  // Customer data in the logs (default on): message text, the customer's number and name, WhatsApp's ids (wamid) and
+  // the full payloads sent to and received from Meta, so every message can be traced exactly. LOG_CUSTOMER_DATA=false
+  // logs ids, statuses and errors only (numbers masked, wamids as one-way references). Secrets are redacted either way.
+  logCustomerData: process.env.LOG_CUSTOMER_DATA !== 'false',
+  // How long a call to Meta may take before it is given up and logged as a timeout: sends and other JSON calls, and
+  // file uploads (large documents take longer)
+  metaTimeoutMs: Number(process.env.META_TIMEOUT_MS) > 0 ? Number(process.env.META_TIMEOUT_MS) : 30_000,
+  metaUploadTimeoutMs: Number(process.env.META_UPLOAD_TIMEOUT_MS) > 0 ? Number(process.env.META_UPLOAD_TIMEOUT_MS) : 300_000,
+  // Address search and "what's here" for the Location screen (services/geocoding.ts): an OpenStreetMap Nominatim
+  // server. Default: the free public one (1 request a second, no search-as-you-type; its usage policy applies).
+  // Set to your own or a hosted Nominatim, or "off" to turn search off.
+  geocoderUrl: (process.env.GEOCODER_URL || 'https://nominatim.openstreetmap.org').replace(/\/$/, ''),
+  // A contact email or URL sent with those requests (the public server asks every app to identify itself)
+  geocoderContact: process.env.GEOCODER_CONTACT || '',
+  // The address customers use to open the web app: links in messages (live location pages) start with it
+  publicAppUrl: (process.env.PUBLIC_APP_URL || process.env.WEB_ORIGIN || 'http://localhost:4000').replace(/\/$/, ''),
+  // Map pictures on the public live location page: a {z}/{x}/{y} tile server (default: OpenStreetMap's, which needs
+  // the attribution shown and allows light use only)
+  mapTileUrl: process.env.MAP_TILE_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  mapAttribution: process.env.MAP_ATTRIBUTION || '© OpenStreetMap contributors',
 };

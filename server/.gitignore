@@ -11,3 +11,6 @@ backups/
 
 # Images sent from the app (kept per workspace; never commit customer media)
 uploads/
+
+# Backend log files (logs/app-YYYY-MM-DD.log): kept on the server, never committed
+logs/
