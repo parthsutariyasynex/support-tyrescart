@@ -40,6 +40,7 @@ let messages: typeof import('../src/messages.js');
 let inbox: typeof import('../src/services/inbox.js');
 let prisma: typeof import('../src/prisma.js')['prisma'];
 let env: typeof import('../src/env.js')['env'];
+let waRef: typeof import('../src/services/logging.js')['waRef'];
 let dir = '';
 const workspaces: string[] = [];
 
@@ -54,6 +55,7 @@ before(async () => {
   await new Promise<void>((r) => graph.listen(0, '127.0.0.1', r));
   process.env.GRAPH_API_BASE = `http://127.0.0.1:${(graph.address() as AddressInfo).port}`; // read when env.ts loads
   env = (await import('../src/env.js')).env;
+  waRef = (await import('../src/services/logging.js')).waRef;
   logFile = await import('../src/services/logFile.js');
   messages = await import('../src/messages.js');
   inbox = await import('../src/services/inbox.js');
@@ -90,16 +92,18 @@ describe('a message, followed through the logs', () => {
     conversationId = saved!.conversationId;
     assert.equal(await messages.saveIncoming(ws, messages.parseWebhookMessage(incoming)), null);
     const all = await lines();
-    const received = all.find((l) => l.event === 'message.received' && l.waMessageId === incoming.id)!;
+    const received = all.find((l) => l.event === 'message.received' && l.waMessageRef === waRef(incoming.id))!;
     assert.deepEqual([received.direction, received.previousStatus, received.newStatus, received.outcome, received.messageId, received.conversationId, received.workspaceId], ['in', null, 'received', 'saved', saved!.id, conversationId, ws]);
     // Why and where: a new customer's first message, saved by messages.ts
     assert.equal(received.action, 'Save an incoming WhatsApp message');
     assert.equal(received.reason, "Meta's webhook delivered a message from a new customer (a new chat was created)");
     assert.match(received.source, /^src\/messages\.ts:\d+ saveIncoming$/);
-    const dup = all.find((l) => l.event === 'message.duplicate' && l.waMessageId === incoming.id)!;
+    const dup = all.find((l) => l.event === 'message.duplicate' && l.waMessageRef === waRef(incoming.id))!;
     assert.deepEqual([dup.direction, dup.outcome, dup.messageId], ['in', 'duplicate', saved!.id]);
     assert.match(dup.reason, /already saved/);
-    assert.doesNotMatch(JSON.stringify(all), /secret customer text|971505557777/, "never the customer's text or number");
+    // With LOG_CUSTOMER_DATA (the default): the customer's words, number and the wamid itself, for an exact trace
+    assert.deepEqual([received.content, received.data.from, received.waMessageId], ['secret customer text', waId, incoming.id]);
+    assert.equal(all.filter((l) => l.event === 'message.received' && l.waMessageRef === waRef(incoming.id)).length, 1, 'logged once (the repeat is message.duplicate)');
   });
 
   test('sent (out) → delivered → read: every step found by the same WhatsApp id, with Meta’s answer and the time it took', async () => {
@@ -108,7 +112,7 @@ describe('a message, followed through the logs', () => {
     await messages.applyStatus(ws, { id: wamid, status: 'delivered', timestamp: '1793000000' });
     await messages.applyStatus(ws, { id: wamid, status: 'read', timestamp: '1793000005' });
     await messages.applyStatus(ws, { id: wamid, status: 'delivered', timestamp: '1793000001' }); // late, out of order
-    const trail = (await lines()).filter((l) => l.waMessageId === wamid);
+    const trail = (await lines()).filter((l) => l.waMessageRef === waRef(wamid));
     // Each step: what it was, and the status before → after
     const steps = trail.map((l) => `${l.event} ${l.outcome} ${l.previousStatus ?? '-'}→${l.newStatus ?? '-'}`);
     for (const step of ['whatsapp.send accepted -→-', 'message.sent sent pending→sent', 'message.status updated sent→delivered', 'message.status updated delivered→read', 'message.status_stale skipped read→read'])
@@ -121,11 +125,13 @@ describe('a message, followed through the logs', () => {
     assert.equal(trail.find((l) => l.event === 'message.sent')!.reason, 'A teammate sent a message from the chat');
     assert.equal(trail.find((l) => l.event === 'message.status_stale')!.reason, 'Meta reported "delivered" after the message was already "read" (statuses arrive out of order; a status never goes back)');
     const call = trail.find((l) => l.event === 'whatsapp.send')!;
-    assert.deepEqual([call.direction, call.response?.ok, call.response?.waMessageId, typeof call.durationMs], ['out', true, wamid, 'number']);
+    assert.deepEqual([call.direction, call.response?.ok, call.response?.waMessageId, typeof call.durationMs, call.messageId], ['out', true, waRef(wamid), 'number', m.id]);
     const sent = trail.find((l) => l.event === 'message.sent')!;
-    assert.deepEqual([sent.direction, sent.messageId, sent.conversationId], ['out', m.id, conversationId]);
+    assert.deepEqual([sent.direction, sent.messageId, sent.conversationId, sent.messageSent, sent.customerReceived, sent.deliveryStatus], ['out', m.id, conversationId, 1, null, 'sent']);
     const read = trail.find((l) => l.event === 'message.status' && l.newStatus === 'read')!;
-    assert.deepEqual([read.messageId, read.data.from, read.data.to, read.data.metaTimestamp], [m.id, 'delivered', 'read', 1793000005]);
+    assert.deepEqual([read.messageId, read.data.fromStatus, read.data.toStatus, read.data.metaTimestamp, read.data.metaTime, read.customerReceived], [m.id, 'delivered', 'read', 1793000005, '2026-10-26T07:33:25.000Z', 1]);
+    // Numbered in the order written
+    assert.ok(trail.every((l, i) => i === 0 || l.logId > trail[i - 1].logId));
     // The team was told (Socket.IO), with the same message id and never the text
     const emits = (await lines()).filter((l) => l.event === 'socket.emit' && l.messageId === m.id);
     assert.ok(emits.some((l) => l.data.socketEvent === 'message:new') && emits.some((l) => l.data.socketEvent === 'message:status'));
@@ -138,18 +144,20 @@ describe('a message, followed through the logs', () => {
     assert.equal(m.status, 'failed');
     const all = await lines();
     const call = all.find((l) => l.event === 'whatsapp.send' && l.outcome === 'refused' && l.response?.fbtraceId === 'TrAcE1')!;
-    assert.equal(call.reason, 'Deliver a text message to the customer through Meta; Meta answered HTTP 400');
+    assert.equal(call.reason, 'Deliver a text message to the customer through Meta');
+    assert.match(call.message, /Meta refused it \(HTTP 400, code 131047\/2494010\).*Meta documents code 131047 as/);
+    assert.deepEqual([call.messageId, call.messageSent], [m.id, 0]);
     assert.deepEqual([call.direction, call.errorCode, call.response.httpStatus, call.response.subcode], ['out', 131047, 400, 2494010]);
     assert.equal(call.errorDetails, 'Re-engagement message: More than 24 hours have passed since the customer last replied.');
     const failed = all.find((l) => l.event === 'message.send_failed' && l.messageId === m.id)!;
-    assert.deepEqual([failed.level, failed.outcome, failed.previousStatus, failed.newStatus, failed.errorCode, failed.conversationId], ['ERROR', 'failed', 'pending', 'failed', 131047, conversationId]);
+    assert.deepEqual([failed.level, failed.outcome, failed.previousStatus, failed.newStatus, failed.errorCode, failed.conversationId, failed.messageSent, failed.customerReceived], ['ERROR', 'refused', 'pending', 'failed', 131047, conversationId, 0, 0]);
   });
 
   test('a status for a message the app doesn’t know is recorded (WARNING), not dropped', async () => {
     await messages.applyStatus(ws, { id: `wamid.unknown-${run}`, status: 'delivered', timestamp: '1793000009' });
-    const l = (await lines()).find((x) => x.event === 'message.status_unmatched' && x.waMessageId === `wamid.unknown-${run}`)!;
+    const l = (await lines()).find((x) => x.event === 'message.status_unmatched' && x.waMessageRef === waRef(`wamid.unknown-${run}`))!;
     assert.deepEqual([l.level, l.direction, l.outcome, l.newStatus], ['WARNING', 'out', 'ignored', 'delivered']);
-    assert.match(l.reason, /isn't in this app/);
+    assert.match(l.reason, /has no record of/);
   });
 });
 

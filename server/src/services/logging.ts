@@ -10,14 +10,25 @@
 // below); call sites add specifics.
 // Every entry is sanitized first (passwords, tokens and secrets redacted, long values cut), and carries the id of
 // the request that caused it, so one request can be followed through every event it led to.
+// Customer data (LOG_CUSTOMER_DATA, default on): message text, the customer's number and name, WhatsApp's ids
+// (wamid) and the full payloads exchanged with Meta are logged, so a message can be traced exactly. With
+// LOG_CUSTOMER_DATA=false they stay out: numbers masked, text left out, wamids only as a one-way reference (waRef; a
+// wamid holds the customer's number). Every entry about a message carries waRef either way. Secrets (passwords,
+// tokens, signatures, one-time codes) are always redacted.
+// Each entry gets a sequential logId (logFile.ts). An outgoing message can be followed from the send to Meta's answer
+// to each delivery status: messageSent (1 Meta accepted it, 0 it was not sent, null unknown), customerReceived (1
+// delivered or read, 0 confirmed failed, null not confirmed yet) and deliveryStatus (sent, delivered, read, failed),
+// only ever set from what Meta actually answered or reported.
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { env } from '../env.js';
 import { type DbError, prisma, setDbErrorReporter } from '../prisma.js';
-import { writeLogLine, writeLogLineSync } from './logFile.js';
+import { nextLogId, writeLogLine, writeLogLineSync } from './logFile.js';
+import { explainMetaError } from './metaErrors.js';
 
 export type LogLevel = 'SUCCESS' | 'WARNING' | 'ERROR';
-export type LogCategory = 'http' | 'graphql' | 'auth' | 'permission' | 'whatsapp' | 'webhook' | 'message' | 'system' | 'socket' | 'database';
+export type LogCategory = 'http' | 'graphql' | 'auth' | 'permission' | 'whatsapp' | 'webhook' | 'message' | 'system' | 'socket' | 'database' | 'client';
 export type Direction = 'in' | 'out';
 
 export type LogInput = {
@@ -33,10 +44,22 @@ export type LogInput = {
   durationMs?: number | null;
   // in: arriving (a customer's message, a webhook, a client's request); out: going out (to WhatsApp)
   direction?: Direction | null;
-  // Our message id, WhatsApp's (wamid), and the chat
+  // Our message id, WhatsApp's (wamid: logged only as its waRef), and the chat. Inside withMessageTrace, the traced
+  // message's ids are used when these are left out.
   messageId?: string | null;
   waMessageId?: string | null;
   conversationId?: string | null;
+  // Outgoing messages, from what Meta answered or reported (never assumed): 1 Meta accepted it / 0 not sent / null
+  // unknown (e.g. a timeout)
+  messageSent?: 0 | 1 | null;
+  // 1 delivered or read, 0 confirmed failed, null not confirmed (yet)
+  customerReceived?: 0 | 1 | null;
+  // sent | delivered | read | failed: the latest status Meta gave for it
+  deliveryStatus?: string | null;
+  // The message's text (only with LOG_CUSTOMER_DATA)
+  content?: string | null;
+  // What was sent to the other side (sanitized): the payload sent to Meta, or the webhook Meta sent us
+  request?: unknown;
   // The status after the event (sent, delivered, read, failed, received, 200, closed…); same as newStatus
   status?: string | number | null;
   newStatus?: string | number | null;
@@ -59,6 +82,8 @@ export type LogInput = {
 };
 
 export type LogRecord = {
+  // Sequential number of the entry (set when it is written; logFile.ts)
+  logId: number | null;
   level: LogLevel;
   category: LogCategory;
   event: string;
@@ -71,8 +96,15 @@ export type LogRecord = {
   durationMs: number | null;
   direction: Direction | null;
   messageId: string | null;
+  // WhatsApp's message id (wamid) itself: only with LOG_CUSTOMER_DATA
   waMessageId: string | null;
+  // Its one-way reference (waRef): always, so entries match whichever way they were written
+  waMessageRef: string | null;
   conversationId: string | null;
+  messageSent: 0 | 1 | null;
+  customerReceived: 0 | 1 | null;
+  deliveryStatus: string | null;
+  content: string | null;
   // Text (sent, open…) or a number (an HTTP status)
   previousStatus: string | number | null;
   newStatus: string | number | null;
@@ -80,6 +112,7 @@ export type LogRecord = {
   reason: string;
   outcome: string;
   source: string | null;
+  request: unknown;
   response: unknown;
   errorDetails: string | null;
   data: unknown;
@@ -103,6 +136,16 @@ export function runWithRequest<T>(requestId: string, fn: () => T): T {
 
 export const currentRequestId = () => requestContext.getStore()?.requestId;
 
+// --- The message being sent: Meta API calls made inside withMessageTrace name it, so a send's entries (upload,
+// Meta's answer, a database error) all carry the message's own ids ---
+
+type MessageTrace = { messageId: string; conversationId?: string | null };
+const messageTrace = new AsyncLocalStorage<MessageTrace>();
+
+export function withMessageTrace<T>(trace: MessageTrace, fn: () => T): T {
+  return messageTrace.run(trace, fn);
+}
+
 // Once the token is checked: later entries of this request name the person and workspace
 export function setRequestUser(auth: { userId: string; workspaceId: string } | null | undefined) {
   const store = requestContext.getStore();
@@ -115,16 +158,49 @@ const MAX_STRING = 500;
 const MAX_MESSAGE = 1000;
 const MAX_ITEMS = 20;
 const MAX_DEPTH = 4;
+// Limits for whole payloads (a webhook, a send to Meta): deep enough for Meta's nesting and a full message text
+export type SanitizeLimits = { maxString: number; maxItems: number; maxDepth: number };
+const ENTRY_LIMITS: SanitizeLimits = { maxString: MAX_STRING, maxItems: MAX_ITEMS, maxDepth: MAX_DEPTH };
+export const PAYLOAD_LIMITS: SanitizeLimits = { maxString: 5000, maxItems: 100, maxDepth: 12 };
+const customerData = () => env.logCustomerData;
 const SENSITIVE_KEY = /pass(word)?|secret|token|authorization|cookie|api[-_]?key|signature|credential|otp|hash/i;
+// The customer's number, name and words, under the names Meta and this app give them
+const CUSTOMER_KEY = /^(wa_?id|recipient(_?id)?|to|from|phone|phone_?number|display_phone_number|msisdn|contacts|profile|body|text|caption|content|sender_?name|filename|file_?name)$/i;
+// WhatsApp's own ids: kept as a one-way reference (waRef), so entries about the same message still match
+const WHATSAPP_ID_KEY = /^(wa_?message_?id|reaction_?wa_?message_?id|reply_?to_?wa_?message_?id|wamid|media_?id|phone_?number_?id|waba_?id)$/i;
 const REDACTED = '[REDACTED]';
+const PHONE = '[phone]';
+
+// A one-way reference for one of WhatsApp's ids ("wa:" + 16 hex characters of its SHA-256): the same id always gives
+// the same reference, but the id (a wamid holds the customer's number) can't be read back from it. The trace tool
+// (npm run logs:trace) computes it from a wamid to find that message's entries.
+export function waRef(id: string) {
+  return id.startsWith('wa:') ? id : `wa:${createHash('sha256').update(id).digest('hex').slice(0, 16)}`;
+}
 
 function cleanString(s: string, max = MAX_STRING) {
   const redacted = s
     // A credential is long; ordinary words after "OAuth" (e.g. Meta's "Invalid OAuth access token") stay readable
     .replace(/\b(Bearer|OAuth|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, `$1 ${REDACTED}`)
-    .replace(/\b((?:access_)?token|password|secret|signature|key)=([^&\s"']+)/gi, `$1=${REDACTED}`);
+    .replace(/\b((?:access_)?token|password|secret|signature|key)=([^&\s"']+)/gi, `$1=${REDACTED}`)
+    // A live location link's token is the key to the customer's page (the link is in the message sent to them)
+    .replace(/\/live\/[A-Za-z0-9_-]{16,}/g, '/live/[token]');
+  return cut(customerData() ? redacted : maskCustomer(redacted), max);
+}
+
+// Without customer data: a wamid in text (e.g. in an error) becomes its reference, and phone numbers (10 to 15
+// digits, optionally with +, not digits that are part of an id or a version) are masked
+function maskCustomer(s: string) {
+  return s.replace(/\bwamid\.[A-Za-z0-9+/=_-]{8,}/g, (id) => waRef(id)).replace(/(?<![\w.:/-])\+?\d{10,15}(?![\w])/g, PHONE);
+}
+
+function cut(redacted: string, max: number) {
   return redacted.length > max ? `${redacted.slice(0, max)}… (+${redacted.length - max} chars)` : redacted;
 }
+
+// Any text with the same redaction as logged values (tokens always; wamids and numbers too without customer data),
+// not cut: for printing log lines, including older ones written under other rules
+export const redactText = (text: string) => cleanString(String(text ?? ''), Number.MAX_SAFE_INTEGER);
 
 // Text cut to fit a column of max characters, with the same redaction as every logged value. Never longer than max
 // (counted as the database counts: whole characters, so an emoji is never split); a cut one ends in "…".
@@ -135,10 +211,10 @@ export function fitText(text: string, max = MAX_STRING) {
 
 // A copy that is safe to store and print: sensitive keys redacted, bearer tokens in text removed, long strings and
 // arrays cut, nesting and cycles limited. Never throws.
-export function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+export function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>(), limits: SanitizeLimits = ENTRY_LIMITS): unknown {
   try {
     if (value === null || value === undefined) return value ?? null;
-    if (typeof value === 'string') return cleanString(value);
+    if (typeof value === 'string') return cleanString(value, limits.maxString);
     if (typeof value === 'number' || typeof value === 'boolean') return value;
     // Numeric ids (e.g. imported BigInt user ids) stay numbers when JSON can hold them exactly
     if (typeof value === 'bigint') return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
@@ -146,18 +222,23 @@ export function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>()
     if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
     if (Buffer.isBuffer(value)) return `[${value.length} bytes]`;
     if (value instanceof Error)
-      return sanitize({ name: value.name, message: value.message, ...('code' in value ? { code: (value as any).code } : {}) }, depth, seen);
+      return sanitize({ name: value.name, message: value.message, ...('code' in value ? { code: (value as any).code } : {}) }, depth, seen, limits);
     if (typeof value !== 'object') return String(value);
     if (seen.has(value)) return '[Circular]';
-    if (depth >= MAX_DEPTH) return '[Truncated]';
+    if (depth >= limits.maxDepth) return '[Truncated]';
     seen.add(value);
     if (Array.isArray(value)) {
-      const items = value.slice(0, MAX_ITEMS).map((v) => sanitize(v, depth + 1, seen) ?? null);
-      return value.length > MAX_ITEMS ? [...items, `… (+${value.length - MAX_ITEMS} more)`] : items;
+      const items = value.slice(0, limits.maxItems).map((v) => sanitize(v, depth + 1, seen, limits) ?? null);
+      return value.length > limits.maxItems ? [...items, `… (+${value.length - limits.maxItems} more)`] : items;
     }
     const out: Record<string, unknown> = {};
+    const withCustomer = customerData();
     for (const [key, v] of Object.entries(value)) {
-      const clean = SENSITIVE_KEY.test(key) ? REDACTED : sanitize(v, depth + 1, seen);
+      const clean = SENSITIVE_KEY.test(key) || (!withCustomer && CUSTOMER_KEY.test(key))
+        ? v === null || v === undefined ? null : REDACTED
+        : !withCustomer && WHATSAPP_ID_KEY.test(key) && (typeof v === 'string' || typeof v === 'number')
+          ? waRef(String(v))
+          : sanitize(v, depth + 1, seen, limits);
       if (clean !== undefined) out[key] = clean;
     }
     return out;
@@ -174,6 +255,8 @@ export function outcomeForStatus(status: number): LogLevel {
 // --- Writing ---
 
 const idOrNull = (v: unknown) => (typeof v === 'string' && v ? v.slice(0, 191) : null);
+const refOrNull = (v: unknown) => (typeof v === 'string' && v ? waRef(v) : null);
+const flagOrNull = (v: unknown) => (v === 1 || v === 0 ? v : null);
 const statusOrNull = (v: unknown) => (v === null || v === undefined || v === '' ? null : typeof v === 'number' && Number.isFinite(v) ? v : String(v).slice(0, 50));
 // Numeric codes stay numbers (Meta's 131049, an HTTP status); anything else is text (P2002, FORBIDDEN)
 const codeOrNull = (v: unknown) => {
@@ -200,6 +283,7 @@ export const EVENTS: Record<string, EventInfo> = {
   'message.received': { action: 'Save an incoming WhatsApp message', reason: "Meta's webhook delivered a customer's message" },
   'message.duplicate': { action: 'Save an incoming WhatsApp message', reason: 'Meta sent a message again that was already saved (webhooks are retried)' },
   'message.media_failed': { action: "Download a customer's file from WhatsApp", reason: 'A customer sent a file and fetching it from Meta failed' },
+  'message.send_requested': { action: 'Send a message to the customer on WhatsApp', reason: 'A teammate pressed Send in the chat and the API received it' },
   'message.sent': { action: 'Send a message to the customer on WhatsApp', reason: 'A message was sent from the chat' },
   'message.send_failed': { action: 'Send a message to the customer on WhatsApp', reason: 'A message was sent from the chat and WhatsApp refused it' },
   'message.status': { action: "Update a sent message's delivery status", reason: "Meta's webhook reported the message's new status" },
@@ -223,6 +307,11 @@ export const EVENTS: Record<string, EventInfo> = {
   'webhook.reaction': { action: "Apply a customer's emoji reaction", reason: 'A customer reacted to (or un-reacted) one of the messages' },
   'webhook.reaction_unmatched': { action: "Apply a customer's emoji reaction", reason: "A customer reacted to a message this workspace doesn't have" },
   'webhook.notice': { action: "Process one of Meta's webhooks", reason: "Meta sent a notice that isn't a customer's message (not saved)" },
+  'client.send_started': { action: 'Send a reply from the inbox (browser)', reason: 'A teammate pressed Send; the browser is sending it to the API' },
+  'client.send_succeeded': { action: 'Send a reply from the inbox (browser)', reason: "The API answered the browser's send with the saved message" },
+  'client.send_failed': { action: 'Send a reply from the inbox (browser)', reason: "The browser's send failed: refused by the API, no answer, or WhatsApp refused it" },
+  'client.api_error': { action: 'Call the API from the web app', reason: 'A change made in the web app failed (the API refused it or could not be reached)' },
+  'client.error': { action: 'Run the web app', reason: 'An error nobody caught happened in the browser' },
   'socket.connected': { action: 'Open a live connection', reason: "A teammate's browser connected for live updates" },
   'socket.disconnected': { action: 'Close a live connection', reason: "A teammate's browser left, reloaded or lost its connection" },
   'socket.unauthorized': { action: 'Open a live connection', reason: 'A browser tried to connect without a valid sign-in' },
@@ -269,10 +358,14 @@ export function callerSource(stack = new Error().stack ?? '') {
 
 export function toRecord(input: LogInput): LogRecord {
   const ctx = requestContext.getStore();
+  const trace = messageTrace.getStore();
   const data = input.data === undefined ? null : sanitize(input.data);
-  const response = input.response === undefined || input.response === null ? null : sanitize(input.response);
+  // Whole payloads (Meta's request and answer, a webhook): deeper and longer than other values, secrets redacted
+  const payload = (v: unknown) => (v === undefined || v === null ? null : sanitize(v, 0, new WeakSet(), PAYLOAD_LIMITS));
+  const response = payload(input.response);
   const info = eventInfo(String(input.event));
   return {
+    logId: null,
     level: input.level,
     category: input.category,
     event: String(input.event).slice(0, 100),
@@ -283,15 +376,21 @@ export function toRecord(input: LogInput): LogRecord {
     errorCode: codeOrNull(input.errorCode),
     durationMs: typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? Math.max(0, Math.round(input.durationMs)) : null,
     direction: input.direction === 'in' || input.direction === 'out' ? input.direction : null,
-    messageId: idOrNull(input.messageId),
-    waMessageId: idOrNull(input.waMessageId),
-    conversationId: idOrNull(input.conversationId),
+    messageId: idOrNull(input.messageId ?? trace?.messageId),
+    waMessageId: customerData() ? idOrNull(input.waMessageId) : null,
+    waMessageRef: refOrNull(input.waMessageId),
+    conversationId: idOrNull(input.conversationId ?? trace?.conversationId),
+    messageSent: flagOrNull(input.messageSent),
+    customerReceived: flagOrNull(input.customerReceived),
+    deliveryStatus: input.deliveryStatus ? String(input.deliveryStatus).slice(0, 30) : null,
+    content: customerData() && input.content ? cleanString(String(input.content), PAYLOAD_LIMITS.maxString) : null,
     previousStatus: statusOrNull(input.previousStatus),
     newStatus: statusOrNull(input.newStatus ?? input.status),
     action: cleanString(input.action ?? info?.action ?? input.event, 200),
     reason: cleanString(input.reason ?? info?.reason ?? 'Not described', 300),
     outcome: (input.outcome ?? OUTCOME_OF[input.level] ?? 'unknown').slice(0, 30),
     source: input.source ?? null,
+    request: payload(input.request),
     response,
     errorDetails: input.errorDetails ? fitText(input.errorDetails, MAX_MESSAGE) : null,
     data: data && typeof data === 'object' && Object.keys(data).length ? data : null,
@@ -300,7 +399,10 @@ export function toRecord(input: LogInput): LogRecord {
 }
 
 // The traceable fields not in LogEntry's own columns: kept in its data in the database (no schema change)
-const EXTRA_FIELDS = ['action', 'reason', 'outcome', 'source', 'direction', 'previousStatus', 'newStatus', 'messageId', 'waMessageId', 'conversationId', 'response', 'errorDetails'] as const;
+const EXTRA_FIELDS = [
+  'logId', 'action', 'reason', 'outcome', 'source', 'direction', 'previousStatus', 'newStatus', 'messageId', 'waMessageId', 'waMessageRef',
+  'conversationId', 'messageSent', 'customerReceived', 'deliveryStatus', 'content', 'request', 'response', 'errorDetails',
+] as const;
 export function dataForDb(r: LogRecord) {
   const extra = Object.fromEntries(EXTRA_FIELDS.filter((k) => r[k] !== null && r[k] !== undefined).map((k) => [k, r[k]]));
   const merged = { ...extra, ...(r.data && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : {}) };
@@ -369,6 +471,7 @@ export function logEvent(input: LogInput): Promise<void> {
   try {
     record = toRecord(input);
     if (!record.source) record.source = callerSource();
+    record.logId = nextLogId();
   } catch (err) {
     try {
       console.warn('[log] Could not make a log entry:', (err as Error)?.message ?? err, { event: (input as any)?.event });
@@ -398,6 +501,7 @@ export function logEventSync(input: LogInput) {
   try {
     const record = toRecord(input);
     if (!record.source) record.source = callerSource();
+    record.logId = nextLogId();
     writeLogLineSync(record);
     logToConsole(record);
   } catch {
@@ -433,15 +537,92 @@ export function errorCodeOf(err: unknown): string | number | null {
   return e?.code ?? e?.extensions?.code ?? null;
 }
 
-// The error in words for errorDetails: its message, and Meta's details when it gave some
+// The error in words for errorDetails: its message, Meta's details when it gave some, and the network's own error
+// under it (fetch's "fetch failed" says nothing; its cause, e.g. ECONNRESET, does)
 export function errorDetailsOf(err: unknown): string | null {
   if (err === undefined || err === null) return null;
   const e = err as any;
   const message = typeof e?.message === 'string' ? e.message : String(err);
-  return typeof e?.details === 'string' && e.details && e.details !== message ? `${message}: ${e.details}` : message;
+  const withDetails = typeof e?.details === 'string' && e.details && e.details !== message ? `${message}: ${e.details}` : message;
+  const cause = e?.cause;
+  const causeText = cause ? [cause.code, cause.message].filter((v) => typeof v === 'string' && v).join(' ') : '';
+  return causeText && !withDetails.includes(causeText) ? `${withDetails} (${causeText})` : withDetails;
 }
 
-// Outgoing messages: whether WhatsApp accepted it (sent, with its message id) or refused it, after a send attempt
+// Network errors that happen before a request reaches Meta: the message certainly wasn't sent. Any other network
+// error (e.g. the connection reset after sending) leaves it unknown.
+const NOT_SENT_NETWORK = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'CERT_HAS_EXPIRED', 'UND_ERR_CONNECT_TIMEOUT']);
+
+export type MetaFailure = {
+  // Why, in words, from facts only: Meta's answer (and what Meta documents its code to mean), or what happened instead
+  reason: string;
+  // refused (Meta answered with an error) | timeout | unreachable | unclear (an answer that can't be read) | failed
+  outcome: string;
+  // 0 the message certainly didn't go out; null it may have (a timeout, a 5xx, a dropped connection)
+  sent: 0 | null;
+  errorCode: string | number | null;
+  response: Record<string, unknown> | null;
+};
+
+// Explains a failed call to Meta (a send, an upload). Works from the error's own fields (GraphApiError,
+// MetaTimeoutError and MetaResponseError in whatsapp.ts, or fetch's network error), never from guesses.
+export function describeMetaFailure(err: unknown): MetaFailure {
+  const e = err as any;
+  const message = typeof e?.message === 'string' ? e.message : String(err);
+  if (e?.name === 'MetaTimeoutError')
+    return {
+      reason: `${message}. Whether Meta accepted it is unknown: if it did, its delivery status will still arrive by webhook`,
+      outcome: 'timeout',
+      sent: null,
+      errorCode: 'META_TIMEOUT',
+      response: { ok: false, timeout: true, timeoutMs: e.timeoutMs ?? null },
+    };
+  if (e?.name === 'MetaResponseError')
+    return {
+      reason: `${message}. Whether Meta sent it is unknown`,
+      outcome: 'unclear',
+      sent: null,
+      errorCode: e.status ?? null,
+      response: { ok: false, httpStatus: e.status ?? null, contentType: e.contentType ?? null, bytes: e.bytes ?? null },
+    };
+  if (e?.name === 'GraphApiError') {
+    const code = e.code ?? null;
+    const known = explainMetaError(code);
+    const meta = [`HTTP ${e.status}`, code !== null ? `code ${code}${e.subcode !== null && e.subcode !== undefined ? `/${e.subcode}` : ''}` : 'no error code'].join(', ');
+    const said = `${message}${e.details && e.details !== message ? `: ${e.details}` : ''}`;
+    const meaning = known
+      ? `. Meta documents code ${code} as: ${known}`
+      : code !== null
+        ? `. Code ${code} has no documented meaning in this app's list; Meta's own words are above`
+        : '';
+    // A 5xx is Meta failing on its side: whether the message went out isn't certain
+    const serverSide = Number(e.status) >= 500;
+    return {
+      reason: `Meta ${serverSide ? 'failed' : 'refused it'} (${meta}): "${said}"${meaning}${serverSide ? '. Whether it was sent is unknown' : ''}`,
+      outcome: serverSide ? 'unclear' : 'refused',
+      sent: serverSide ? null : 0,
+      errorCode: code ?? e.status ?? null,
+      response: { ok: false, httpStatus: e.status ?? null, code, subcode: e.subcode ?? null, fbtraceId: e.fbtraceId ?? null, ...(e.body ? { body: e.body } : {}) },
+    };
+  }
+  const cause = e?.cause;
+  if (cause && (typeof cause.code === 'string' || message === 'fetch failed')) {
+    const certain = typeof cause.code === 'string' && NOT_SENT_NETWORK.has(cause.code);
+    return {
+      reason: `Meta couldn't be reached: ${[cause.code, cause.message].filter(Boolean).join(' ') || message}${certain ? ' (the request never got to Meta, so it was not sent)' : '. Whether Meta got it is unknown'}`,
+      outcome: 'unreachable',
+      sent: certain ? 0 : null,
+      errorCode: typeof cause.code === 'string' ? cause.code : null,
+      response: { ok: false, network: true },
+    };
+  }
+  return { reason: `The call to Meta failed without an answer from Meta: ${message}. Whether it was sent is unknown`, outcome: 'failed', sent: null, errorCode: errorCodeOf(err), response: null };
+}
+
+// Outgoing messages: Meta's answer to the send. Accepted: messageSent 1, deliveryStatus "sent", customerReceived
+// null (only a delivered/read webhook confirms the customer got it). Refused: messageSent 0, customerReceived 0, and
+// Meta's code, details and documented meaning. No clear answer (timeout, 5xx, dropped connection): both null, and
+// the entry says it is unknown.
 export function logMessageSend(p: {
   workspaceId: string;
   conversationId: string;
@@ -450,9 +631,12 @@ export function logMessageSend(p: {
   userId?: string | null;
   automation?: string;
   error?: unknown;
-  // WhatsApp's id for the message (when it accepted it)
+  // WhatsApp's id for the message (when it accepted it); logged as its waRef
   waMessageId?: string | null;
   durationMs?: number | null;
+  // The text sent (or the caption, or the template's text): logged with LOG_CUSTOMER_DATA; null for a secret (a
+  // one-time code)
+  content?: string | null;
 }) {
   const why =
     p.automation === 'auto_reply'
@@ -476,20 +660,38 @@ export function logMessageSend(p: {
     conversationId: p.conversationId,
     messageId: p.messageId,
     durationMs: p.durationMs,
+    content: p.content,
     data: { type: p.type, ...(p.automation ? { automation: p.automation } : {}) },
   };
   if (p.error === undefined)
-    return logEvent({ ...common, level: 'SUCCESS', event: 'message.sent', message: `Sent a message (${p.type}); WhatsApp accepted it`, outcome: 'sent', newStatus: 'sent', waMessageId: p.waMessageId, response: { waMessageId: p.waMessageId ?? null } });
+    return logEvent({
+      ...common,
+      level: 'SUCCESS',
+      event: 'message.sent',
+      message: `Sent a message (${p.type}): Meta accepted it; delivery to the customer is not confirmed until Meta's webhook reports it`,
+      outcome: 'sent',
+      newStatus: 'sent',
+      messageSent: 1,
+      customerReceived: null,
+      deliveryStatus: 'sent',
+      waMessageId: p.waMessageId,
+      response: { ok: true, waMessageId: p.waMessageId ?? null },
+    });
+  const f = describeMetaFailure(p.error);
   return logEvent({
     ...common,
     level: 'ERROR',
     event: 'message.send_failed',
-    message: `WhatsApp refused a message (${p.type}): ${(p.error as Error)?.message ?? String(p.error)}`,
-    outcome: 'failed',
+    message: `Message (${p.type}) ${f.sent === 0 ? 'not sent' : 'may not have been sent'}: ${f.reason}`,
+    outcome: f.outcome,
+    // The app marks the message failed either way (the agent sees it and can send it again)
     newStatus: 'failed',
-    errorCode: errorCodeOf(p.error),
+    messageSent: f.sent,
+    customerReceived: f.sent,
+    deliveryStatus: f.sent === 0 ? 'failed' : null,
+    errorCode: f.errorCode,
     errorDetails: errorDetailsOf(p.error),
-    response: (p.error as any)?.status ? { httpStatus: (p.error as any).status, code: (p.error as any).code ?? null, subcode: (p.error as any).subcode ?? null, fbtraceId: (p.error as any).fbtraceId ?? null } : null,
+    response: f.response,
   });
 }
 

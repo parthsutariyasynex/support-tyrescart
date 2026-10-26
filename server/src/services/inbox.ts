@@ -17,7 +17,7 @@ import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './inc
 import { withSender } from './senders.js';
 import { defaultStageValue } from './leadStages.js';
 import { parse } from './validate.js';
-import { logFailure, logMessageSend } from './logging.js';
+import { logEvent, logFailure, logMessageSend, withMessageTrace } from './logging.js';
 
 export const MAX_PAGE_SIZE = 100;
 
@@ -390,21 +390,23 @@ export async function sendMediaMessage(
   let saved;
   let sendError: unknown;
   try {
-    const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
-    const wamid =
-      kind === 'image'
-        ? await sendImage(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
+    // The upload and the send both name this message in the logs
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId }, async () => {
+      const mediaId = await uploadMedia(account, data, file.mime, fileName ?? `${message.id}.${file.ext}`);
+      return kind === 'image'
+        ? sendImage(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
         : kind === 'video'
-          ? await sendVideo(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
+          ? sendVideo(account, conversation.contact.waId, mediaId, caption || undefined, quoted?.waMessageId)
           : kind === 'voice'
-            ? await sendAudio(account, conversation.contact.waId, mediaId, quoted?.waMessageId)
-            : await sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined, quoted?.waMessageId);
+            ? sendAudio(account, conversation.contact.waId, mediaId, quoted?.waMessageId)
+            : sendDocument(account, conversation.contact.waId, mediaId, fileName!, caption || undefined, quoted?.waMessageId);
+    });
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
     sendError = err;
   }
-  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: kind, userId: sentById, error: sendError, waMessageId: saved.waMessageId });
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: kind, userId: sentById, error: sendError, waMessageId: saved.waMessageId, content: caption || null });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   const label = kind === 'image' ? '[Photo]' : kind === 'video' ? '[Video]' : kind === 'voice' ? '[Voice message]' : `[Document] ${fileName}`;
@@ -452,6 +454,23 @@ export async function readMessageMedia(workspaceId: string, messageId: string) {
 
 // `sentById` is the agent sending it; it decides who may edit or delete the message later
 export async function sendMessage(workspaceId: string, conversationId: string, rawInput: unknown, sentById?: string) {
+  // First step on the API's side, before any check: a refusal below (not assigned, window closed…) is logged by the
+  // GraphQL layer with the same request id, so the reply's text and chat are in the logs either way
+  const raw = rawInput as { body?: unknown; type?: unknown; replyToId?: unknown } | null;
+  void logEvent({
+    level: 'SUCCESS',
+    category: 'message',
+    event: 'message.send_requested',
+    message: `Reply received by the API (${typeof raw?.type === 'string' ? raw.type : 'text'}), checking it can be sent`,
+    direction: 'out',
+    outcome: 'received',
+    newStatus: 'requested',
+    workspaceId,
+    userId: sentById,
+    conversationId,
+    content: typeof raw?.body === 'string' ? raw.body : null,
+    data: { type: typeof raw?.type === 'string' ? raw.type : null, replyToId: typeof raw?.replyToId === 'string' ? raw.replyToId : null },
+  });
   const input = parse(sendSchema, rawInput);
   // Templates go only through sendTemplateMessage (the chat's "Yes, Send" confirmation), never through here
   if (input.type === 'template')
@@ -467,7 +486,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   let saved;
   let sendError: unknown;
   try {
-    const wamid = await sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId);
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId }, () => sendText(account, conversation.contact.waId, input.body, quoted?.waMessageId));
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({
@@ -476,7 +495,7 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
     });
     sendError = err;
   }
-  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: input.type, userId: sentById, error: sendError, waMessageId: saved.waMessageId });
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: input.type, userId: sentById, error: sendError, waMessageId: saved.waMessageId, content: body });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   // Contact details page activity log: "Message sent by …" (not the chat timeline or the bell; the chat shows the bubble)

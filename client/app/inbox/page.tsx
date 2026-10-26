@@ -1,11 +1,14 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
-import { API_URL, errorCode, getToken, isNetworkError } from '@/lib/api';
+import { API_URL, describeError, errorCode, getToken, isNetworkError, newRequestId } from '@/lib/api';
+import { reportClient } from '@/lib/clientLog';
+import { FormattedText } from './FormattedText';
+import { pendingIn, pendingLabel, pendingReducer } from '@/lib/pendingSends';
 import {
   type Conversation,
   type ConversationStatus,
@@ -111,6 +114,9 @@ import {
   messageActions,
 } from './messages';
 import { ForwardDialog } from './ForwardDialog';
+
+// How long a reply may take to be answered (the server gives Meta 30 s) before it's shown as not confirmed
+const SEND_TIMEOUT_MS = 60_000;
 
 // The Location screen (📎 → Location): its map library loads only when it's opened
 const LocationDialog = dynamic(() => import('./LocationDialog').then((m) => m.LocationDialog), { ssr: false });
@@ -2391,16 +2397,40 @@ function ChatPanel({
     onLoadOlder?.();
   };
 
+  // Replies on their way: "Sending…" at once, then the saved message, or the failure with its reason
+  const [pending, dispatchPending] = useReducer(pendingReducer, []);
+
+  // Each step is reported to the server's logs under one request id, which the send itself also carries
+  // (X-Request-Id): the browser's steps, the API's handling, the call to Meta and the saved message all share it
   async function send(body: string) {
     setError('');
     const quoted = replyTo;
+    const conversationId = conversation.id;
+    const requestId = newRequestId();
+    const started = Date.now();
+    dispatchPending({ type: 'start', send: { requestId, conversationId, body, startedAt: started } });
+    void reportClient({ event: 'send_started', requestId, conversationId, content: body, replyToId: quoted?.id ?? null });
     try {
-      onSent(await sendTextMessage(conversation.id, body, quoted?.id));
+      const m = await sendTextMessage(conversationId, body, quoted?.id, { requestId, timeoutMs: SEND_TIMEOUT_MS, reported: true });
+      dispatchPending({ type: 'done', requestId });
+      onSent(m);
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
+      const durationMs = Date.now() - started;
+      // Saved, but WhatsApp may have refused it: the message comes back failed, with WhatsApp's reason
+      void reportClient(
+        m.status === 'failed'
+          ? { event: 'send_failed', requestId, conversationId, messageId: m.id, status: m.status, durationMs, error: { message: m.error || 'WhatsApp refused it without a reason', kind: 'whatsapp' } }
+          : { event: 'send_succeeded', requestId, conversationId, messageId: m.id, status: m.status, durationMs },
+      );
     } catch (err) {
-      setError((err as Error).message);
+      const e = describeError(err);
+      // No answer in time: it may have gone through, so the text isn't put back to be sent twice
+      const unknown = e.kind === 'timeout';
+      dispatchPending({ type: 'fail', requestId, error: e.message, unknown });
+      void reportClient({ event: 'send_failed', requestId, conversationId, durationMs: Date.now() - started, error: e });
+      setError(e.message);
       noteRefusal(err);
-      setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
+      if (!unknown) setText((t) => t || body); // not sent: the text comes back (unless something new was typed meanwhile)
     }
   }
 
@@ -2716,6 +2746,29 @@ function ChatPanel({
             </Fragment>
           );
         })}
+        {/* Replies on their way (or that failed before being saved), after the saved messages */}
+        {pendingIn(pending, conversation.id).map((p) => (
+          <div key={p.requestId} className="flex justify-end" data-pending-send={p.state}>
+            <div
+              className={`max-w-[72%] rounded-2xl rounded-tr-xs px-3.5 py-2 text-xs shadow-xs ${
+                p.state === 'sending' ? 'bg-bubble-out text-ink opacity-70' : 'border border-danger/40 bg-danger-soft text-ink'
+              }`}
+            >
+              <FormattedText text={p.body} className="pr-3 text-[13px] leading-relaxed" />
+              <div className="mt-1 flex items-center justify-end gap-2 text-[10px]">
+                <span role="status" className={p.state === 'sending' ? 'text-faint' : 'text-danger'}>
+                  {p.state === 'sending' ? '🕓 ' : '⚠ '}
+                  {pendingLabel(p)}
+                </span>
+                {p.state !== 'sending' && (
+                  <button type="button" onClick={() => dispatchPending({ type: 'dismiss', requestId: p.requestId })} className="text-faint hover:text-ink" aria-label="Dismiss" title="Dismiss">
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
         {unseen > 0 && (
           <div className="pointer-events-none sticky bottom-1 z-20 flex justify-center">
             <button

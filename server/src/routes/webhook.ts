@@ -4,7 +4,10 @@ import { env } from '../env.js';
 import { applyStatus, isCustomerMessage, parseWebhookMessage, saveIncoming } from '../messages.js';
 import { applyCustomerReaction } from '../services/reactions.js';
 import { prisma } from '../prisma.js';
-import { errorCodeOf, errorDetailsOf, logEvent } from '../services/logging.js';
+import { errorCodeOf, errorDetailsOf, logEvent, waRef } from '../services/logging.js';
+
+// WhatsApp ids in the terminal (pm2 logs) as their reference: a wamid holds the customer's number
+const ref = (id: unknown) => (typeof id === 'string' && id ? waRef(id) : null);
 
 export const webhookRouter = Router();
 
@@ -44,7 +47,7 @@ export function callsCount(value: any): number {
 
 // Incoming messages + delivery/read statuses
 webhookRouter.post('/', async (req, res) => {
-  // Logs never include customer numbers, names or message text: only ids, types and statuses
+  // Logs never include customer numbers, names or message text, or WhatsApp's own ids: only references, types and statuses
   const rawBody = (req as any).rawBody as Buffer | undefined;
   const signatureHeader = req.header('x-hub-signature-256');
   if (!validSignature(rawBody, signatureHeader, env.metaAppSecret, env.isProd)) {
@@ -80,7 +83,7 @@ webhookRouter.post('/', async (req, res) => {
       for (const change of entry.changes ?? []) {
         const value = change.value;
         const phoneNumberId = value?.metadata?.phone_number_id;
-        console.log('[Webhook] Event change:', { field: change.field, phoneNumberId, messagesCount: value?.messages?.length, statusesCount: value?.statuses?.length });
+        console.log('[Webhook] Event change:', { field: change.field, phoneNumberRef: ref(phoneNumberId), messagesCount: value?.messages?.length, statusesCount: value?.statuses?.length });
         // Only how many: never the call payload (caller id, call metadata)
         const calls = callsCount(value);
         if (calls > 0) console.log('[Webhook] Calls event:', { count: calls });
@@ -88,20 +91,20 @@ webhookRouter.post('/', async (req, res) => {
         if (!phoneNumberId) continue;
         const account = await prisma.whatsAppAccount.findUnique({ where: { phoneNumberId } });
         if (!account) {
-          console.warn(`[Webhook] No WhatsAppAccount found for phoneNumberId: ${phoneNumberId}`);
-          void logEvent({ level: 'WARNING', category: 'webhook', event: 'webhook.unknown_number', message: 'Webhook for a WhatsApp number not connected to any workspace, ignored', direction: 'in', outcome: 'ignored', reason: `Meta sent a webhook for number id ${phoneNumberId}, which no workspace has connected`, data: { phoneNumberId, messages: value?.messages?.length ?? 0, statuses: value?.statuses?.length ?? 0 } });
+          console.warn(`[Webhook] No WhatsAppAccount found for phone number id ${ref(phoneNumberId)}`);
+          void logEvent({ level: 'WARNING', category: 'webhook', event: 'webhook.unknown_number', message: 'Webhook for a WhatsApp number not connected to any workspace, ignored', direction: 'in', outcome: 'ignored', reason: `Meta sent a webhook for number id ${ref(phoneNumberId)} (reference), which no workspace has connected`, data: { phoneNumberId, messages: value?.messages?.length ?? 0, statuses: value?.statuses?.length ?? 0 } });
           continue;
         }
         workspaceIds.add(account.workspaceId);
 
         for (const msg of value.messages ?? []) {
-          console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type, ...(msg?.errors ? { errors: msg.errors } : {}) });
+          console.log('[Webhook] Incoming message:', { ref: ref(msg?.id), type: msg?.type, ...(msg?.errors ? { errors: msg.errors.map((e: any) => ({ code: e?.code, title: e?.title })) } : {}) });
           counts.messages++;
           try {
             // A reaction belongs to the message it's on (not a new message in the chat)
             if (msg?.type === 'reaction') {
               const applied = await applyCustomerReaction(account.workspaceId, msg.reaction);
-              if (!applied) console.warn('[Webhook] Reaction to a message not in this workspace, ignored:', { id: msg?.id });
+              if (!applied) console.warn('[Webhook] Reaction to a message not in this workspace, ignored:', { ref: ref(msg?.id) });
               void logEvent({
                 level: applied ? 'SUCCESS' : 'WARNING',
                 category: 'webhook',
@@ -117,15 +120,15 @@ webhookRouter.post('/', async (req, res) => {
             }
             // Meta's own notices aren't the customer writing: logged only (no window, no unread, no auto-reply)
             if (!isCustomerMessage(msg)) {
-              console.log('[Webhook] Not a customer message, not saved:', { id: msg?.id, type: msg?.type });
+              console.log('[Webhook] Not a customer message, not saved:', { ref: ref(msg?.id), type: msg?.type });
               void logEvent({ level: 'SUCCESS', category: 'webhook', event: 'webhook.notice', message: `Meta notice (${msg?.type}), not a customer message: not saved`, direction: 'in', outcome: 'ignored', reason: `Meta sent a "${msg?.type}" notice (not something the customer wrote), so it isn't saved as a message`, workspaceId: account.workspaceId, waMessageId: msg?.id ?? null, data: { type: msg?.type ?? null }, fileOnly: true });
               continue;
             }
             await saveIncoming(account.workspaceId, parseWebhookMessage(msg, value.contacts));
           } catch (err) {
-            console.error('[Webhook] Failed to save incoming message, skipping it (rest of the batch continues):', { id: msg?.id, type: msg?.type }, err);
+            console.error('[Webhook] Failed to save incoming message, skipping it (rest of the batch continues):', { ref: ref(msg?.id), type: msg?.type }, (err as Error)?.message ?? err);
             counts.failed++;
-            failures.push(`message ${msg?.id} (${msg?.type}): ${(err as Error)?.message ?? err}`);
+            failures.push(`message ${ref(msg?.id)} (${msg?.type}): ${(err as Error)?.message ?? err}`);
             void logEvent({
               level: 'ERROR',
               category: 'webhook',
@@ -134,7 +137,7 @@ webhookRouter.post('/', async (req, res) => {
               workspaceId: account.workspaceId,
               direction: 'in',
               outcome: 'failed',
-              reason: `Saving WhatsApp message ${msg?.id} (${msg?.type}) from this webhook threw an error; the rest of the webhook continued`,
+              reason: `Saving WhatsApp message ${ref(msg?.id)} (${msg?.type}) from this webhook threw an error; the rest of the webhook continued`,
               waMessageId: msg?.id ?? null,
               errorCode: errorCodeOf(err),
               errorDetails: errorDetailsOf(err),
@@ -144,7 +147,7 @@ webhookRouter.post('/', async (req, res) => {
         }
         for (const status of value.statuses ?? []) {
           console.log('[Webhook] Status update:', {
-            id: status?.id,
+            ref: ref(status?.id),
             status: status?.status,
             errors: status?.errors?.map((e: any) => ({ code: e.code, title: e.title })),
           });
@@ -152,9 +155,9 @@ webhookRouter.post('/', async (req, res) => {
           try {
             await applyStatus(account.workspaceId, status);
           } catch (err) {
-            console.error('[Webhook] Failed to apply status update, skipping it (rest of the batch continues):', { id: status?.id, status: status?.status }, err);
+            console.error('[Webhook] Failed to apply status update, skipping it (rest of the batch continues):', { ref: ref(status?.id), status: status?.status }, (err as Error)?.message ?? err);
             counts.failed++;
-            failures.push(`status "${status?.status}" for ${status?.id}: ${(err as Error)?.message ?? err}`);
+            failures.push(`status "${status?.status}" for ${ref(status?.id)}: ${(err as Error)?.message ?? err}`);
             void logEvent({
               level: 'ERROR',
               category: 'webhook',
@@ -163,7 +166,7 @@ webhookRouter.post('/', async (req, res) => {
               workspaceId: account.workspaceId,
               direction: 'out',
               outcome: 'failed',
-              reason: `Applying status "${status?.status}" to WhatsApp message ${status?.id} threw an error; the rest of the webhook continued`,
+              reason: `Applying status "${status?.status}" to WhatsApp message ${ref(status?.id)} threw an error; the rest of the webhook continued`,
               waMessageId: status?.id ?? null,
               errorCode: errorCodeOf(err),
               errorDetails: errorDetailsOf(err),
@@ -175,10 +178,13 @@ webhookRouter.post('/', async (req, res) => {
     }
   } catch (err) {
     console.error('[Webhook] Webhook processing failed', err);
-    void logEvent({ level: 'ERROR', category: 'webhook', event: 'webhook.failed', message: `Webhook processing failed: ${(err as Error)?.message ?? String(err)}`, direction: 'in', outcome: 'failed', reason: 'Reading or processing the webhook threw an error before it finished', durationMs: Date.now() - started, errorDetails: errorDetailsOf(err), data: { ...counts, error: err } });
+    // The whole payload is kept here instead of in the summary below (which isn't written then): logged once either way
+    void logEvent({ level: 'ERROR', category: 'webhook', event: 'webhook.failed', message: `Webhook processing failed: ${(err as Error)?.message ?? String(err)}`, direction: 'in', outcome: 'failed', reason: 'Reading or processing the webhook threw an error before it finished', durationMs: Date.now() - started, errorDetails: errorDetailsOf(err), request: req.body, data: { ...counts, error: err } });
     return;
   }
-  // One summary per webhook, whatever it held (messages, statuses, calls or other fields), with how long it took
+  // One summary per webhook, whatever it held (messages, statuses, calls or other fields), with how long it took and
+  // the complete payload as Meta sent it (once per webhook: each message's and status's own entry carries the same
+  // request id instead of repeating it). An unsigned/forged webhook is never stored (rejected above).
   void logEvent({
     level: counts.failed ? 'WARNING' : 'SUCCESS',
     category: 'webhook',
@@ -190,6 +196,7 @@ webhookRouter.post('/', async (req, res) => {
     workspaceId: workspaceIds.size === 1 ? [...workspaceIds][0] : null,
     durationMs: Date.now() - started,
     errorDetails: failures.length ? `${failures.length} item(s) failed (each has its own entry, same request id): ${failures.slice(0, 3).join('; ')}` : null,
+    request: req.body,
     data: { ...counts, fields: [...new Set((req.body?.entry ?? []).flatMap((e: any) => (e?.changes ?? []).map((c: any) => c?.field)).filter(Boolean))] },
   });
 });

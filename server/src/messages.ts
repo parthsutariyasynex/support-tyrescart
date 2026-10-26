@@ -8,6 +8,7 @@ import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
 import { errorCodeOf, errorDetailsOf, fitText, logEvent } from './services/logging.js';
+import { explainMetaError } from './services/metaErrors.js';
 import { locationBody, placeFromWebhook } from './services/locationFormat.js';
 
 // Meta's explanation for a message it couldn't deliver as a normal type (e.g. type "unsupported", code 131051)
@@ -170,9 +171,20 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     messageId: message.id,
     waMessageId: m.waMessageId ?? null,
     conversationId: conversation.id,
+    // The customer's words, number and name (with LOG_CUSTOMER_DATA), and when they sent it by Meta's clock
+    content: m.body,
     errorCode: providerErrorCode ?? null,
     errorDetails: providerErrorMessage ?? null,
-    data: { conversationId: conversation.id, messageId: message.id, waMessageId: m.waMessageId ?? null, type: m.type, providerErrorCode: providerErrorCode ?? null, providerErrorMessage: providerErrorMessage ?? null },
+    data: {
+      type: m.type,
+      from: m.waId,
+      senderName: m.name ?? null,
+      sentAt: m.sentAt && !Number.isNaN(m.sentAt.getTime()) ? m.sentAt.toISOString() : null,
+      ...(m.replyToWaId ? { replyToWaMessageId: m.replyToWaId } : {}),
+      ...(m.media ? { media: { mime: m.media.mime ?? null, filename: m.media.filename ?? null } } : {}),
+      providerErrorCode: providerErrorCode ?? null,
+      providerErrorMessage: providerErrorMessage ?? null,
+    },
   });
   // Fetch the file in the background (the webhook answers Meta right away); retried when someone opens it
   if (m.media)
@@ -202,36 +214,90 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
 
 // Meta's timestamps (seconds since 1970, sent as text) as numbers in the logs
 const metaTime = (t: unknown) => (t === null || t === undefined || t === '' ? null : Number.isFinite(Number(t)) ? Number(t) : String(t));
+// …and as an exact time (ISO 8601, UTC), when it is one
+const metaIso = (t: unknown) => {
+  const n = Number(t);
+  return t !== null && t !== undefined && t !== '' && Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString() : null;
+};
 
 const STATUS_RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3, failed: 4 };
 
-// Meta's delivery failures that come later in a status webhook (the send itself was accepted), explained for the logs
-const KNOWN_FAILURES: Record<number, string> = {
-  131047: 'More than 24 hours since the customer last wrote: only an approved template can be sent',
-  131049: 'Meta chose not to deliver this message to maintain healthy ecosystem engagement (per-customer marketing limit); retrying right away will fail again',
-  131026: "The customer's number can't receive it (not on WhatsApp, old app version, or hasn't accepted the terms)",
-  131050: 'The customer stopped marketing messages from this business',
-};
-
 // Meta's error on a status update: its numeric code, title and details (only for failed statuses)
 export function statusError(s: any): { code: number | null; title: string | null; details: string | null } | null {
-  const e = s?.errors?.[0];
-  if (!e) return null;
-  const code = Number.isFinite(Number(e.code)) && e.code !== '' && e.code !== null ? Number(e.code) : null;
-  const details = e.error_data?.details ?? e.message ?? null;
-  return { code, title: typeof e.title === 'string' ? e.title : null, details: typeof details === 'string' ? details : null };
+  const first = statusErrors(s)[0];
+  return first ? { code: first.code, title: first.title, details: first.details } : null;
 }
+
+// Every error Meta listed on a status update (usually one), each with what Meta documents its code to mean (null
+// when the code isn't documented: then only Meta's own words are logged)
+export function statusErrors(s: any): { code: number | null; title: string | null; details: string | null; meaning: string | null }[] {
+  return (Array.isArray(s?.errors) ? s.errors : []).map((e: any) => {
+    const code = Number.isFinite(Number(e?.code)) && e?.code !== '' && e?.code !== null ? Number(e.code) : null;
+    const details = e?.error_data?.details ?? e?.message ?? null;
+    return { code, title: typeof e?.title === 'string' ? e.title : null, details: typeof details === 'string' ? details : null, meaning: explainMetaError(code) };
+  });
+}
+
+// Why a status says the message wasn't delivered, from Meta's errors only: Meta's code, title and details, plus the
+// documented meaning of the code. When Meta gave no error, that is said as it is (never a guessed reason).
+export function failureReason(s: any) {
+  const errors = statusErrors(s);
+  if (!errors.length) return "Meta reported the message as failed but gave no error code or reason";
+  return errors
+    .map((e) => {
+      const said = [e.title, e.details && e.details !== e.title ? e.details : null].filter(Boolean).join(': ') || 'no title or details';
+      const code = e.code !== null ? `code ${e.code}` : 'no error code';
+      return `Meta: "${said}" (${code})${e.meaning ? `. Meta documents code ${e.code} as: ${e.meaning}` : e.code !== null ? `. Code ${e.code} has no documented meaning in this app's list` : ''}`;
+    })
+    .join('; ');
+}
+
+// What a status webhook adds besides the status (no customer data): Meta's time for it, and the conversation and
+// pricing details Meta attaches (its category, whether it's billable)
+function statusFacts(s: any) {
+  return {
+    metaTimestamp: metaTime(s?.timestamp),
+    metaTime: metaIso(s?.timestamp),
+    // The customer it was for (with LOG_CUSTOMER_DATA)
+    recipientId: typeof s?.recipient_id === 'string' ? s.recipient_id : null,
+    conversationCategory: s?.conversation?.origin?.type ?? s?.pricing?.category ?? null,
+    conversationExpiresAt: metaIso(s?.conversation?.expiration_timestamp),
+    billable: typeof s?.pricing?.billable === 'boolean' ? s.pricing.billable : null,
+    pricingModel: s?.pricing?.pricing_model ?? null,
+  };
+}
+
+// What the status confirms about the customer: delivered or read 1, failed 0, anything else (sent) not confirmed
+export const customerReceivedFor = (status: unknown): 0 | 1 | null => (status === 'delivered' || status === 'read' ? 1 : status === 'failed' ? 0 : null);
 
 export async function applyStatus(workspaceId: string, s: any) {
   const message = await prisma.message.findUnique({ where: { waMessageId: s.id } });
   if (!message) {
-    // Not one of ours (e.g. sent from the WhatsApp app on the phone), or deleted since: recorded, not dropped
-    void logEvent({ level: 'WARNING', category: 'message', event: 'message.status_unmatched', message: `Status "${s.status}" for a message not in this app`, direction: 'out', outcome: 'ignored', newStatus: s?.status ?? null, reason: `Meta reported "${s?.status}" for WhatsApp message ${s?.id}, which isn't in this app (sent from the phone, or deleted)`, workspaceId, waMessageId: s?.id ?? null, errorCode: statusError(s)?.code ?? null, errorDetails: statusError(s)?.title ?? null, data: { metaTimestamp: metaTime(s?.timestamp) } });
+    // Not one of ours (e.g. sent from the WhatsApp app on the phone), sent by a call that timed out here, or deleted
+    // since: recorded, not dropped
+    const error = statusError(s);
+    void logEvent({
+      level: s?.status === 'failed' ? 'ERROR' : 'WARNING',
+      category: 'message',
+      event: 'message.status_unmatched',
+      message: `Status "${s?.status}" for a message not in this app${s?.status === 'failed' ? `: ${failureReason(s)}` : ''}`,
+      direction: 'out',
+      outcome: 'ignored',
+      newStatus: s?.status ?? null,
+      deliveryStatus: s?.status ?? null,
+      customerReceived: customerReceivedFor(s?.status),
+      reason: `Meta reported "${s?.status}" for a WhatsApp message this app has no record of (sent from the phone, sent by a request that timed out here, or deleted)`,
+      workspaceId,
+      waMessageId: s?.id ?? null,
+      errorCode: error?.code ?? null,
+      errorDetails: s?.status === 'failed' ? failureReason(s) : (error?.title ?? null),
+      data: statusFacts(s),
+    });
     return;
   }
   // Statuses can arrive out of order; never downgrade read -> delivered (the late one is recorded)
   if ((STATUS_RANK[s.status] ?? 0) <= (STATUS_RANK[message.status] ?? 0)) {
-    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.status_stale', message: `Status "${s.status}" arrived after "${message.status}", kept "${message.status}"`, direction: 'out', outcome: 'skipped', previousStatus: message.status, newStatus: message.status, reason: `Meta reported "${s.status}" after the message was already "${message.status}" (statuses arrive out of order; a status never goes back)`, workspaceId, messageId: message.id, waMessageId: message.waMessageId, conversationId: message.conversationId, data: { received: s?.status ?? null, metaTimestamp: metaTime(s?.timestamp) }, fileOnly: true });
+    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.status_stale', message: `Status "${s.status}" arrived after "${message.status}", kept "${message.status}"`, direction: 'out', outcome: 'skipped', previousStatus: message.status, newStatus: message.status, deliveryStatus: message.status, messageSent: 1, customerReceived: customerReceivedFor(message.status), reason: `Meta reported "${s.status}" after the message was already "${message.status}" (statuses arrive out of order; a status never goes back)`, workspaceId, messageId: message.id, waMessageId: message.waMessageId, conversationId: message.conversationId, data: { received: s?.status ?? null, ...statusFacts(s) }, fileOnly: true });
     return;
   }
   const updated = await prisma.message.update({
@@ -242,34 +308,43 @@ export async function applyStatus(workspaceId: string, s: any) {
   logStatus(workspaceId, message, s);
 }
 
-// One entry per status change of an outgoing message (sent → delivered → read, or failed with Meta's code)
-function logStatus(workspaceId: string, message: { id: string; conversationId: string; status: string; type: string; waMessageId: string | null }, s: any) {
-  const error = statusError(s);
-  const data = { messageId: message.id, conversationId: message.conversationId, type: message.type, from: message.status, to: s.status, metaTimestamp: metaTime(s?.timestamp) };
+// One entry per status change of an outgoing message (sent → delivered → read, or failed with Meta's reason), with
+// Meta's exact time for it and how long after the message was created it came
+export function logStatus(workspaceId: string, message: { id: string; conversationId: string; status: string; type: string; waMessageId: string | null; createdAt?: Date | null }, s: any) {
+  const facts = statusFacts(s);
+  const createdAt = message.createdAt instanceof Date ? message.createdAt.getTime() : null;
+  const afterSendMs = createdAt !== null && typeof facts.metaTimestamp === 'number' ? Math.max(0, facts.metaTimestamp * 1000 - createdAt) : null;
+  const data = { type: message.type, fromStatus: message.status, toStatus: s.status, ...facts, msSinceCreated: afterSendMs };
   const ids = {
     direction: 'out' as const,
     previousStatus: message.status,
     newStatus: s.status,
+    deliveryStatus: s.status ?? null,
+    messageSent: 1 as const, // Meta only reports statuses for messages it accepted
+    customerReceived: customerReceivedFor(s.status),
     reason: `Meta's webhook reported the message as "${s.status}" (it was "${message.status}")`,
     messageId: message.id,
     waMessageId: message.waMessageId,
     conversationId: message.conversationId,
   };
+  const timing = facts.metaTime ? ` at ${facts.metaTime}${afterSendMs !== null ? ` (${(afterSendMs / 1000).toFixed(1)} s after it was sent)` : ''}` : '';
   if (s.status !== 'failed') {
-    void logEvent({ ...ids, level: 'SUCCESS', category: 'message', event: 'message.status', message: `Message ${message.status} → ${s.status}`, outcome: 'updated', workspaceId, data });
+    const confirms = s.status === 'delivered' || s.status === 'read' ? '; the customer received it' : s.status === 'sent' ? '; not yet confirmed delivered' : '';
+    void logEvent({ ...ids, level: 'SUCCESS', category: 'message', event: 'message.status', message: `Message ${message.status} → ${s.status}${timing}${confirms}`, outcome: 'updated', workspaceId, data });
     return;
   }
-  const known = error?.code !== null && error?.code !== undefined ? KNOWN_FAILURES[error.code] : undefined;
+  const error = statusError(s);
+  const why = failureReason(s);
   void logEvent({
     level: 'ERROR',
     category: 'message',
     event: 'message.status',
-    message: `WhatsApp didn't deliver a message: ${error?.title ?? 'no reason given'}${error?.code ? ` (${error.code})` : ''}${known ? `. ${known}` : ''}`,
+    message: `WhatsApp didn't deliver a message${timing}: ${why}`,
     ...ids,
     outcome: 'not delivered',
     workspaceId,
     errorCode: error?.code ?? null,
-    errorDetails: [error?.title, error?.details, known].filter(Boolean).join(': ') || null,
-    data: { ...data, title: error?.title, details: error?.details },
+    errorDetails: why,
+    data: { ...data, errors: statusErrors(s) },
   });
 }
