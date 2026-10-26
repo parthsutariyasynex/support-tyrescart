@@ -39,7 +39,7 @@ export async function sendLocationMessage(workspaceId: string, conversationId: s
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
     sendError = err;
   }
-  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'location', userId: sentById, error: sendError });
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'location', userId: sentById, error: sendError, waMessageId: saved.waMessageId });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   await recordActivity({

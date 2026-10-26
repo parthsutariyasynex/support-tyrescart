@@ -1,4 +1,4 @@
-// How long backend logs are kept: LogEntry rows and the daily log files (logs/app-YYYY-MM-DD.log). A daily job looks
+// How long backend logs are kept: LogEntry rows and the daily log files (logs/YYYY-MM-DD.log). A daily job looks
 // for those older than LOG_RETENTION_DAYS and, by default, only counts them (dry run): nothing is deleted unless
 // LOG_RETENTION_MODE=delete. The same check can be run
 // by hand with `npm run logs:retention` (dry run; add -- --delete to remove them). Deleting goes in small batches,
@@ -52,7 +52,7 @@ export async function pruneLogs({ days, dryRun = true, now = new Date(), batchSi
 
 export type FilePruneResult = { cutoffDay: string; dryRun: boolean; files: string[]; bytes: number; deleted: number };
 
-// Daily log files whose whole day is before the cutoff (app-2026-07-25.log when the cutoff falls on 26 July): listed
+// Daily log files whose whole day is before the cutoff (2026-07-25.log when the cutoff falls on 26 July): listed
 // with their size, and deleted only when dryRun is false. Today's file is never touched; a missing folder is none.
 export async function pruneLogFiles({ days, dryRun = true, now = new Date(), dir = logFileDir() }: { days: number; dryRun?: boolean; now?: Date; dir?: string | null }): Promise<FilePruneResult> {
   if (!Number.isInteger(days) || days < 1) throw new Error('Log retention needs a whole number of days, 1 or more');

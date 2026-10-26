@@ -99,7 +99,7 @@ export async function findOrphanAccount(email: string) {
 
 // Sign-ins are logged with the email and IP (never the password): refusals as WARNING with the reason
 const logLoginRefused = (reason: string, code: string, data: Record<string, unknown>, userId?: string) =>
-  void logEvent({ level: 'WARNING', category: 'auth', event: 'login.failed', message: `Sign-in refused: ${reason}`, errorCode: code, userId, data });
+  void logEvent({ level: 'WARNING', category: 'auth', event: 'login.failed', message: `Sign-in refused: ${reason}`, reason: `A sign-in attempt was refused: ${reason}`, direction: 'in', outcome: 'refused', errorCode: code, errorDetails: reason, userId, data });
 
 export async function login(input: unknown, ip: string) {
   try {
@@ -129,7 +129,7 @@ export async function login(input: unknown, ip: string) {
     logLoginRefused('account has no workspace', 'NO_WORKSPACE', { email, ip }, user.id);
     throw new AppError('This account has no workspace', 403, 'NO_WORKSPACE');
   }
-  void logEvent({ level: 'SUCCESS', category: 'auth', event: 'login.success', message: 'Signed in', userId: user.id, workspaceId: member.workspaceId, data: { email, ip } });
+  void logEvent({ level: 'SUCCESS', category: 'auth', event: 'login.success', message: 'Signed in', reason: 'Someone signed in with a correct email and password', direction: 'in', outcome: 'succeeded', userId: user.id, workspaceId: member.workspaceId, data: { email, ip } });
   return { token: signToken({ userId: user.id, workspaceId: member.workspaceId }), userId: user.id };
 }
 

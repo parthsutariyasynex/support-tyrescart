@@ -36,7 +36,11 @@ test('SUCCESS, WARNING and ERROR entries are saved with their time, level, event
     assert.equal(r.userId, 'test-user');
   }
   const success = rows.find((r) => r.level === 'SUCCESS')!;
-  assert.deepEqual(success.data, { email: 'a@example.com', password: '[REDACTED]' });
+  // The entry's own data, plus why and where it was logged (kept in data: the table has no columns for them)
+  const saved = success.data as Record<string, unknown>;
+  assert.deepEqual([saved.email, saved.password], ['a@example.com', '[REDACTED]']);
+  assert.deepEqual([saved.action, saved.reason, saved.outcome], ['Sign a user in', 'Someone signed in with a correct email and password', 'succeeded']);
+  assert.match(String(saved.source), /^test\/loggingDb\.test\.ts:\d+/);
   assert.equal(rows.find((r) => r.level === 'ERROR')!.durationMs, 5);
 });
 
@@ -88,7 +92,7 @@ test("an incoming message is logged as message.received, with Meta's error code 
     assert.deepEqual([ok.level, ok.errorCode, (ok.data as any).providerErrorCode, (ok.data as any).providerErrorMessage], ['SUCCESS', null, null, null]);
     assert.deepEqual([err.level, err.errorCode, (err.data as any).providerErrorCode, (err.data as any).providerErrorMessage], [
       'WARNING',
-      '131051',
+      131051,
       131051,
       'Message type unknown: Message type is currently not supported.',
     ]);

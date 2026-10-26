@@ -3,6 +3,7 @@ import path from 'node:path';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
 import { AppError, notFound } from './errors.js';
+import { logFailure } from './logging.js';
 
 // Your own profile picture (Settings → General → Profile). JPEG, PNG or WebP up to 2 MB, checked from the bytes;
 // stored at uploads/avatars/<user id> and served only through the API with your sign-in.
@@ -43,7 +44,8 @@ export async function readAvatar(userId: string) {
   if (!user?.avatarMime) throw notFound('Picture');
   try {
     return { bytes: await readFile(fileOf(userId)), mime: user.avatarMime };
-  } catch {
+  } catch (err) {
+    void logFailure('file.missing', 'A profile picture is missing on the server', err, { level: 'WARNING', userId });
     throw notFound('Picture');
   }
 }

@@ -12,9 +12,13 @@ function denied(auth: AuthPayload, action: string, message: string, role?: strin
     category: 'permission',
     event: 'permission.denied',
     message: `Refused: ${action}`,
+    direction: 'in',
+    outcome: 'refused',
+    reason: `Someone with the role "${role ?? 'none'}" tried to ${action}, which their role doesn't allow`,
     userId: auth.userId,
     workspaceId: auth.workspaceId,
     errorCode: 'FORBIDDEN',
+    errorDetails: message,
     data: { action, role: role ?? null },
   });
   return new AppError(message, 403, 'FORBIDDEN');

@@ -4,6 +4,7 @@ import { prisma } from '../prisma.js';
 import { emitToUser, emitToWorkspace } from '../realtime.js';
 import { notFound } from './errors.js';
 import { isAdminRole } from './roles.js';
+import { logFailure } from './logging.js';
 
 // Activity history: what happened in each chat and who did it. Shown as a timeline in the chat and in
 // the header's notification bell. Recording never fails the action it describes.
@@ -94,6 +95,7 @@ export async function recordActivity(e: {
       if (userId !== e.actorId) emitToUser(e.workspaceId, userId, 'notification:new', activity);
   } catch (err) {
     console.error('[activity] could not record', e.type, err);
+    void logFailure('activity.failed', `Couldn't record the activity "${e.type}"`, err, { workspaceId: e.workspaceId, conversationId: e.conversationId ?? null });
   }
 }
 

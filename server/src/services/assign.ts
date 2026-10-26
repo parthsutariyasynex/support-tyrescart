@@ -8,6 +8,7 @@ import { requireConversation } from './inbox.js';
 import { normalizeReason, recordAssignment } from './assignmentReports.js';
 import { getPermissions, requireAssignmentManager } from './permissions.js';
 import { ASSIGNABLE_TO_ROLES, ROLE_COLORS, isAdminRole } from './roles.js';
+import { logEvent } from './logging.js';
 
 // A conversation is assigned to a workspace member: Conversation.assignedToId is a Member.id. The API and the
 // Socket.IO payloads keep the "assignee" shape clients already use: id = the member id, name = the person's name,
@@ -154,6 +155,23 @@ export async function assignConversation(
     if (count === 0) continue; // changed by someone else in between: read it again
 
     const payload = member && toAssigneeRef(member);
+    const by = actor?.name ?? options.actorLabel ?? 'the system';
+    void logEvent({
+      level: 'SUCCESS',
+      category: 'system',
+      event: 'conversation.assigned',
+      message: !member ? `Chat unassigned (was ${previous?.user.name ?? 'nobody'})` : previous ? `Chat reassigned: ${previous.user.name} → ${member.user.name}` : `Chat assigned to ${member.user.name}`,
+      reason: options.claim
+        ? `${by} took the unassigned chat with "Assign to Me"`
+        : `${by} ${!member ? 'unassigned' : previous ? 'reassigned' : 'assigned'} the chat${reason ? `, giving the reason: "${reason}"` : ''}`,
+      outcome: 'changed',
+      previousStatus: previous ? `assigned to ${previous.user.name}` : 'unassigned',
+      newStatus: member ? `assigned to ${member.user.name}` : 'unassigned',
+      workspaceId,
+      userId: actorId,
+      conversationId,
+      data: { previousMemberId: previous?.id ?? null, newMemberId: member?.id ?? null, claim: !!options.claim, by: options.actorLabel ?? null },
+    });
     emitToWorkspace(workspaceId, 'conversation:assigned', { conversationId, assignee: payload });
     await recordActivity({
       workspaceId,

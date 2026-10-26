@@ -75,7 +75,7 @@ describe('every Graph API call is logged', () => {
     next = { status: 400, body: { error: { message: 'Message failed to send because of healthy ecosystem engagement', code: 131049, fbtrace_id: 'Tr4ce' } } };
     await assert.rejects(wa.sendTemplateWithValues(account, '971500000000', 'promo', 'en', []));
     const log = await lastLog();
-    assert.deepEqual([log.level, log.event, log.errorCode], ['ERROR', 'whatsapp.send', '131049']);
+    assert.deepEqual([log.level, log.event, log.errorCode], ['ERROR', 'whatsapp.send', 131049]);
     assert.match(log.message, /healthy ecosystem engagement/);
     assert.deepEqual(log.data, { type: 'template', httpStatus: 400, subcode: null, fbtraceId: 'Tr4ce' });
   });

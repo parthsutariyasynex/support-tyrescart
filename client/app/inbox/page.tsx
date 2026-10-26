@@ -85,7 +85,6 @@ import { setOpenConversationId } from '@/lib/desktopNotifications';
 import { dismissChatPopups } from '@/lib/messagePopups';
 import { isWindowClosedError, lastCustomerMessageAt, msUntilClose, windowOpen } from '@/lib/messagingWindow';
 import { OVERLAY_SELECTOR, type EscapeTarget, escapeClosesChat } from '@/lib/escapeToClose';
-import { CountryCodeMenu } from './CountryCodeMenu';
 import { NewChatDialog } from './NewChatDialog';
 import { NoteBubble } from './NoteBubble';
 import { type MentionMember, MentionMenu } from './MentionMenu';
@@ -2540,7 +2539,6 @@ function ChatPanel({
               <path d="m21 21-4.3-4.3" />
             </svg>
           </button>
-          <CountryCodeMenu contactId={conversation.contact.id} country={conversation.contact.country} waId={conversation.contact.waId} />
           <button
             onClick={(e) => onOpenLabels(e.currentTarget)}
             title="Label chat"

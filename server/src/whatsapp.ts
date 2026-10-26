@@ -1,5 +1,5 @@
 import { env } from './env.js';
-import { errorCodeOf, logEvent } from './services/logging.js';
+import { errorCodeOf, errorDetailsOf, logEvent } from './services/logging.js';
 import { type TemplateInfo, parseTemplate } from './services/templateModel.js';
 
 type Account = { phoneNumberId: string; accessToken: string };
@@ -14,6 +14,8 @@ export class GraphApiError extends Error {
     public code: number | null = null,
     public subcode: number | null = null,
     public fbtraceId: string | null = null,
+    // Meta's explanation (error_data.details), when it gave one
+    public details: string | null = null,
   ) {
     super(message);
     this.name = 'GraphApiError';
@@ -24,26 +26,48 @@ const numberOrNull = (v: unknown) => (v === null || v === undefined || v === '' 
 
 export function graphError(status: number, data: any, message: string) {
   const e = data?.error ?? {};
-  return new GraphApiError(message, status, numberOrNull(e.code), numberOrNull(e.error_subcode), typeof e.fbtrace_id === 'string' ? e.fbtrace_id : null);
+  const details = typeof e.error_data?.details === 'string' ? e.error_data.details : typeof e.error_data === 'string' ? e.error_data : null;
+  return new GraphApiError(message, status, numberOrNull(e.code), numberOrNull(e.error_subcode), typeof e.fbtrace_id === 'string' ? e.fbtrace_id : null, details);
 }
 
-// Every Graph API call is logged: which call, how long it took and, when Meta refused it, its error code. Never the
+// Every Graph API call is logged (direction out): which call, how long it took, Meta's answer (the new message's id
+// on a send) or, when Meta refused it, its HTTP status, error code, subcode, trace id and explanation. Never the
 // access token, the customer's number or the message text.
 async function logged<T>(call: string, details: Record<string, unknown>, fn: () => Promise<T>): Promise<T> {
   const started = Date.now();
   try {
     const result = await fn();
-    void logEvent({ level: 'SUCCESS', category: 'whatsapp', event: `whatsapp.${call}`, message: `Meta API ${call} succeeded`, durationMs: Date.now() - started, data: details });
+    const waMessageId = call === 'send' && typeof result === 'string' ? result : null;
+    const mediaId = call === 'upload_media' && typeof result === 'string' ? result : null;
+    void logEvent({
+      level: 'SUCCESS',
+      category: 'whatsapp',
+      event: `whatsapp.${call}`,
+      message: `Meta API ${call} succeeded`,
+      direction: 'out',
+      outcome: 'accepted',
+      reason: details.type ? `Deliver a ${details.type} message to the customer through Meta` : `Meta's ${call.replace(/_/g, ' ')} was needed`,
+      waMessageId,
+      durationMs: Date.now() - started,
+      response: { ok: true, ...(waMessageId ? { waMessageId } : {}), ...(mediaId ? { mediaId } : {}) },
+      data: details,
+    });
     return result;
   } catch (err) {
+    const graph = err instanceof GraphApiError ? err : null;
     void logEvent({
       level: 'ERROR',
       category: 'whatsapp',
       event: `whatsapp.${call}`,
       message: `Meta API ${call} failed: ${(err as Error)?.message ?? String(err)}`,
+      direction: 'out',
+      outcome: graph ? 'refused' : 'failed',
+      reason: `${details.type ? `Deliver a ${details.type} message to the customer through Meta` : `Meta's ${call.replace(/_/g, ' ')} was needed`}; ${graph ? `Meta answered HTTP ${graph.status}` : "Meta couldn't be reached"}`,
       errorCode: errorCodeOf(err),
+      errorDetails: errorDetailsOf(err),
       durationMs: Date.now() - started,
-      data: { ...details, ...(err instanceof GraphApiError ? { httpStatus: err.status, subcode: err.subcode, fbtraceId: err.fbtraceId } : {}) },
+      response: graph ? { ok: false, httpStatus: graph.status, code: graph.code, subcode: graph.subcode, fbtraceId: graph.fbtraceId } : { ok: false, network: true },
+      data: { ...details, ...(graph ? { httpStatus: graph.status, subcode: graph.subcode, fbtraceId: graph.fbtraceId } : {}) },
     });
     throw err;
   }

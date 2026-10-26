@@ -5,6 +5,7 @@ import { prisma } from '../prisma.js';
 import { AppError } from './errors.js';
 import { requireAdmin } from './permissions.js';
 import { parse } from './validate.js';
+import { logFailure } from './logging.js';
 
 const connectSchema = z.object({
   wabaId: z.string().trim().min(1),
@@ -35,7 +36,8 @@ export async function connectWhatsApp(auth: AuthPayload, rawInput: unknown) {
       { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15_000) },
     );
     info = await r.json();
-  } catch {
+  } catch (err) {
+    void logFailure('whatsapp.connect_unreachable', "Couldn't reach Meta to check the WhatsApp number", err, { category: 'whatsapp' });
     throw new AppError('Could not reach Meta. Try again.', 502, 'META_UNREACHABLE');
   }
   if (!r.ok) throw new AppError(info?.error?.message ?? 'Invalid credentials', 400, 'INVALID_CREDENTIALS');

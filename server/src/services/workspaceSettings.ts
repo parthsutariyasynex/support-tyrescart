@@ -6,6 +6,7 @@ import { emitToWorkspace } from '../realtime.js';
 import { APP_TIME_ZONE } from '../time.js';
 import { getPermissions, requireAdmin } from './permissions.js';
 import { parse } from './validate.js';
+import { logFailure } from './logging.js';
 
 // Settings → Company settings → Workspace preferences (admins). Each value is null until an admin sets it, and then
 // the app's previous default applies (listed in DEFAULTS), so nothing changes for a workspace that never visits the
@@ -53,7 +54,8 @@ export async function settingsOf(workspaceId: string): Promise<WorkspaceSettings
 // For synchronous callers: the last known settings (or the defaults), refreshing in the background
 export function cachedSettingsOf(workspaceId: string): WorkspaceSettings {
   const hit = cache.get(workspaceId);
-  if (!hit || Date.now() - hit.at >= CACHE_MS) settingsOf(workspaceId).catch(() => {});
+  if (!hit || Date.now() - hit.at >= CACHE_MS)
+    settingsOf(workspaceId).catch((err) => logFailure('settings.refresh_failed', "Couldn't refresh the workspace settings (the last ones are used)", err, { level: 'WARNING', workspaceId }));
   return hit?.value ?? withDefaults(null);
 }
 

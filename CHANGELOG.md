@@ -82,8 +82,45 @@ committed yet.
   - webhooks (bad signature, unknown number, failed items, a summary per delivery);
   - message sends (sent / refused) and delivery statuses (sent → delivered → read, or failed with Meta's code and a
     plain explanation for 131047, 131049, 131026 and 131050).
-- **Daily log files**: the same entries as readable lines in `server/logs/app-YYYY-MM-DD.log` (server time, with its
-  offset). `tail -f` / grep friendly. `LOG_DIR` sets the folder, `LOG_TO_FILE=false` turns them off.
+- **Daily log files** `server/logs/YYYY-MM-DD.log`: one JSON object per line (JSON Lines), every line with the same
+  keys (null where they don't apply), so they can be searched with grep or `jq` and parsed line by line:
+  `timestamp` (ISO 8601 with the server's offset), `level`, `category`, `event`, `direction` (`in` / `out`),
+  `status`, `requestId`, `messageId`, `waMessageId`, `conversationId`, `workspaceId`, `userId`, `durationMs`,
+  `errorCode`, `errorDetails`, `message`, `response` (the API's answer, sanitized) and `data`. `LOG_DIR` sets the
+  folder, `LOG_TO_FILE=false` turns them off. (Files from before are `app-YYYY-MM-DD.log`, in text; retention covers
+  both.)
+- **Every log entry explains itself**: `action` (what was done), `reason` (why it was logged: what triggered it, e.g.
+  "A teammate sent an approved template, confirmed with \"Yes, Send\"" or "Meta reported \"delivered\" after the
+  message was already \"read\""), `source` (the file, line and function that logged it, found automatically),
+  `outcome` (succeeded, failed, refused, skipped, ignored, duplicate…), and `previousStatus` → `newStatus` where
+  something changed state (`pending → sent → delivered → read`, `open → closed`, `unassigned → assigned to Kiran`).
+  Warnings and errors always carry the real error text (the API's own error message, Meta's explanation, Prisma's
+  error), never just "failed". Every event has a default action and reason, kept in one list (`EVENTS` in
+  `server/src/services/logging.ts`); a test fails if code logs an event that isn't in it. The log files' `status`
+  field is replaced by `previousStatus` / `newStatus`.
+- **Typed values in the log files**: numeric values are JSON numbers (Meta's error codes such as `131049`, HTTP
+  statuses such as `401`, Meta's timestamps, and numeric ids such as the imported quick-reply `BigInt` ids); text
+  values stay text (cuid ids, `wamid…` and other external ids, `P2002`, `FORBIDDEN`). The database's `errorCode`
+  column is text as before.
+- **Server start, stop and crashes are logged** (`server.started`, `server.stopping`, `server.crashed`). A crash
+  (an uncaught error, or a rejected promise nobody handled) is written to the file at once, with its message and
+  stack, before Node.js stops the process; nothing about the crash itself changes.
+- **Tests no longer write to the real `server/logs/` folder**: under the test runner, logs go to a temporary folder
+  unless `LOG_DIR` is set.
+- **New events**: chat status changes (`conversation.status_changed`, `conversation.woken`), assignments
+  (`conversation.assigned`, with the previous and new assignee and the reason given) and live location
+  (`live.started`, `live.stopped`).
+- **End-to-end tracing**: a message can be followed by its WhatsApp id from the send (Meta's answer and how long it
+  took) through sent → delivered → read (or failed, with Meta's HTTP status, code, subcode, trace id and
+  explanation), and everything one request caused shares its request id.
+- **Logged now as well**: every HTTP request and its response (method, path, status, size, duration; the client
+  giving up is logged as aborted), every Socket.IO connection, disconnection, refused sign-in and event sent to the
+  team (with the message and chat ids, never the content), database errors (model, operation, Prisma code, time;
+  still thrown to the caller), duplicate messages from Meta, statuses for unknown messages or arriving late,
+  webhook reactions and Meta notices, and a summary of every webhook with its duration. Very frequent entries
+  (successful HTTP requests, socket events) go to the files only; the rest to the database too.
+- **No error only in the terminal any more**: failed media downloads, automations, reminders, snooze and purge jobs,
+  activity records, emails, file clean-ups and missing files are all logged with their code and details.
 - **Request ids**: every request gets an `X-Request-Id` (also in each of its log entries and in a 500 error's
   response), so one request can be followed through everything it caused.
 - **Log retention**: a daily job finds log entries and log files older than `LOG_RETENTION_DAYS` (default 90). By
@@ -92,10 +129,18 @@ committed yet.
 - `GraphApiError`: a refusal from Meta keeps its numeric code, subcode and trace id (same message as before).
 
 ### Changed
+- The left menu's **Lifecycle stages** title shows the total number of chats across all stages, e.g.
+  "LIFECYCLE STAGES (3)", next to each stage's own count; it updates live like them.
+- Inbox **Filter** menu: "Collaborator" is renamed **Assign** (with an assign icon). It always filtered by who the
+  chat is assigned to; only the name was wrong. Works as before.
 - The 📎 button opens a small menu: **Photo or document** (as before) and **Location**. Dropping a file on the chat
   works as before.
 - The message box no longer uses kerning (spacing tweaks between letter pairs, barely visible), so the formatted
   text drawn in it lines up exactly with the cursor.
+
+### Removed
+- The country code drop-down (flag + dial code) in the chat header, added in 0.10.0. Nothing about the contact's
+  number or country changes.
 
 ### Fixed
 - Auto-reply: when the chat or its workspace was deleted while WhatsApp was still answering, the reply's message was
@@ -118,6 +163,8 @@ committed yet.
   a second, results cached, requests identified, searches only when asked (no search-as-you-type).
 
 ### Known limits
+- Log files grow quickly with every HTTP request and socket event logged (about 0.5 MB per 1,000 lines); they follow
+  `LOG_RETENTION_DAYS` like the database (dry run until `LOG_RETENTION_MODE=delete`).
 - Live location keeps updating only while the sharer has the app open (a browser gives no position to a closed tab),
   and a server restart ends every live location (they are kept in memory; the messages stay).
 - Live locations are held by one API process: run the API as a single process (not PM2 cluster mode), or the link may

@@ -14,7 +14,7 @@ import { recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
 import { checkCanSend } from './inbox.js';
 import { roundCoord } from './locationFormat.js';
-import { logMessageSend } from './logging.js';
+import { logEvent, logMessageSend } from './logging.js';
 import { getPermissions } from './permissions.js';
 import { withSender } from './senders.js';
 import { parse } from './validate.js';
@@ -121,7 +121,7 @@ export async function startLiveLocation(auth: AuthPayload, rawInput: unknown) {
     sendError = err;
     share.stoppedAt = new Date(); // the customer never got the link
   }
-  logMessageSend({ workspaceId: auth.workspaceId, conversationId: input.conversationId, messageId: message.id, type: 'live_location', userId: auth.userId, error: sendError });
+  logMessageSend({ workspaceId: auth.workspaceId, conversationId: input.conversationId, messageId: message.id, type: 'live_location', userId: auth.userId, error: sendError, waMessageId: saved.waMessageId });
   await prisma.conversation.update({ where: { id: input.conversationId }, data: { lastMessageAt: new Date(), updatedBy: auth.userId } });
   emitToWorkspace(auth.workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   announce(share);
@@ -131,6 +131,23 @@ export async function startLiveLocation(auth: AuthPayload, rawInput: unknown) {
     actorId: auth.userId,
     type: 'message_sent',
     data: { preview: `📍 Live location (${input.minutes >= 60 ? `${input.minutes / 60} h` : `${input.minutes} min`})`, messageType: 'live_location', status: saved.status },
+  });
+  void logEvent({
+    level: share.stoppedAt ? 'WARNING' : 'SUCCESS',
+    category: 'message',
+    event: 'live.started',
+    message: share.stoppedAt ? "Live location not started: the customer didn't get the link" : `Sharing live location for ${input.minutes} minutes`,
+    reason: `${sharerName} chose Share live location (${input.minutes} min) in the chat`,
+    outcome: share.stoppedAt ? 'failed' : 'started',
+    previousStatus: null,
+    newStatus: share.stoppedAt ? 'stopped' : 'active',
+    direction: 'out',
+    workspaceId: auth.workspaceId,
+    userId: auth.userId,
+    conversationId: input.conversationId,
+    messageId: message.id,
+    errorDetails: share.stoppedAt ? (sendError as Error)?.message ?? null : null,
+    data: { until: until.toISOString(), minutes: input.minutes },
   });
   return { message: saved, live: liveInfo(share) };
 }
@@ -161,6 +178,21 @@ export async function stopLiveLocation(auth: AuthPayload, messageId: string) {
   if (isActive(share)) {
     share.stoppedAt = new Date();
     announce(share);
+    void logEvent({
+      level: 'SUCCESS',
+      category: 'message',
+      event: 'live.stopped',
+      message: 'Live location sharing stopped',
+      reason: share.userId === auth.userId ? `${share.sharerName} pressed Stop sharing` : `An admin stopped ${share.sharerName}'s live location`,
+      outcome: 'stopped',
+      previousStatus: 'active',
+      newStatus: 'stopped',
+      workspaceId: auth.workspaceId,
+      userId: auth.userId,
+      conversationId: share.conversationId,
+      messageId: share.messageId,
+      data: { until: share.until.toISOString() },
+    });
   }
   return liveInfo(share);
 }

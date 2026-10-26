@@ -15,6 +15,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from '../env.js';
 import { checkFile, cleanFileName } from './inbox.js';
+import { logFailure } from './logging.js';
 
 // Customer profile (chat side panel): "Contact property" fields and "Remarks" (internal notes).
 // Every member of the workspace (owner, admin, supervisor, agent) can view and edit them; a remark can be deleted
@@ -245,14 +246,19 @@ export async function uploadRemarkFile(auth: AuthPayload, contactId: string, byt
 async function removeFiles(rows: { id: string; path: string }[]) {
   if (!rows.length) return;
   await prisma.remarkFile.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
-  for (const r of rows) if (r.path) await unlink(path.join(env.uploadsDir, r.path)).catch(() => {});
+  for (const r of rows)
+    if (r.path)
+      await unlink(path.join(env.uploadsDir, r.path)).catch((err) =>
+        // Already gone is fine; anything else (permissions, disk) is recorded
+        (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? undefined : logFailure('file.remove_failed', "Couldn't remove a note's file", err, { level: 'WARNING', data: { fileId: r.id } }),
+      );
 }
 async function removePendingFiles(auth: AuthPayload) {
   const old = await prisma.remarkFile.findMany({
     where: { workspaceId: auth.workspaceId, createdById: auth.userId, remarkId: null, createdAt: { lt: new Date(Date.now() - PENDING_KEEP_MS) } },
     select: { id: true, path: true },
   });
-  await removeFiles(old).catch(() => {});
+  await removeFiles(old).catch((err) => logFailure('file.remove_failed', "Couldn't remove unused note files", err, { level: 'WARNING' }));
 }
 
 // The file itself, for any teammate of the workspace once it's on a note (before that, only for whoever uploaded it)
@@ -262,7 +268,8 @@ export async function readRemarkFile(auth: AuthPayload, id: string) {
   if (!f?.path) throw notFound('File');
   try {
     return { bytes: await readFile(path.join(env.uploadsDir, f.path)), mime: f.mime, name: f.name };
-  } catch {
+  } catch (err) {
+    void logFailure('file.missing', "A note's file is missing on the server", err, { level: 'WARNING', workspaceId: auth.workspaceId, data: { fileId: f.id } });
     throw notFound('File');
   }
 }

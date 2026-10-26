@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { STATUS_CODES, createServer } from 'node:http';
 import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { env } from './env.js';
@@ -18,7 +18,7 @@ import { startDeletedContactsPurge } from './services/deletedContacts.js';
 import { startLogRetention } from './services/logRetention.js';
 import { startLiveLocationSweeper } from './services/liveLocation.js';
 import { AppError } from './services/errors.js';
-import { logEvent, outcomeForStatus, requestIdFrom, runWithRequest } from './services/logging.js';
+import { installCrashLogger, logEvent, logEventSync, outcomeForStatus, requestIdFrom, runWithRequest } from './services/logging.js';
 
 const app = express();
 app.use(cors({ origin: env.webOrigin }));
@@ -29,29 +29,58 @@ app.use((req, res, next) => {
   res.setHeader('X-Request-Id', requestId);
   runWithRequest(requestId, next);
 });
-// HTTP outcomes: refusals and server errors always, and requests that change something (not GET) when they work.
-// GraphQL is logged per operation and webhooks by their route, so neither is repeated here. The path only, never
-// the query string or body.
+// Every HTTP request and its response (except /health): method, path (never the query string or body, and a live
+// location link's token masked), status, response size and duration. Successful ones go to the day's log file only
+// (there are many); refusals and errors to the database too. A request the client gave up on is logged as aborted.
+// GraphQL operations and webhooks also log their own entries, with the same request id.
+export const logPath = (originalUrl: string) => originalUrl.split('?')[0].replace(/^\/live\/[^/]+/, '/live/[token]');
 app.use((req, res, next) => {
   const started = Date.now();
   const requestId = (req as any).requestId as string;
-  res.on('finish', () => {
-    const path = req.originalUrl.split('?')[0];
-    if (path === '/health' || path.startsWith(yoga.graphqlEndpoint) || path.startsWith('/webhook')) return;
-    const level = outcomeForStatus(res.statusCode);
-    if (level === 'SUCCESS' && ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return;
+  const path = logPath(req.originalUrl);
+  if (path === '/health') return next();
+  // The error message the API answered with (its JSON "error"), so a refusal says why, not just its status code
+  let answeredError: string | null = null;
+  const json = res.json.bind(res);
+  res.json = (body: any) => {
+    if (res.statusCode >= 400 && body && typeof body === 'object' && typeof body.error === 'string') answeredError = body.error;
+    return json(body);
+  };
+  let done = false;
+  const log = (aborted: boolean) => {
+    if (done) return;
+    done = true;
+    const level = aborted ? 'WARNING' : outcomeForStatus(res.statusCode);
+    const bytes = Number(res.getHeader('content-length')) || null;
     void logEvent({
       level,
       category: 'http',
-      event: 'http.request',
-      message: `${req.method} ${path} → ${res.statusCode}`,
+      event: aborted ? 'http.aborted' : 'http.request',
+      message: aborted ? `${req.method} ${path}: the client closed the connection before the response` : `${req.method} ${path} → ${res.statusCode}`,
+      direction: 'in',
+      newStatus: aborted ? 'aborted' : res.statusCode,
+      outcome: aborted ? 'aborted' : res.statusCode >= 500 ? 'failed' : res.statusCode >= 400 ? 'refused' : 'succeeded',
+      reason: path.startsWith('/webhook')
+        ? `Meta called the webhook (${req.method} ${path})`
+        : path === '/graphql'
+          ? 'The web app called the GraphQL API (the operation is logged separately, same request id)'
+          : `A client called ${req.method} ${path}${req.auth ? '' : ' (not signed in)'}`,
       requestId,
       workspaceId: req.auth?.workspaceId,
       userId: req.auth?.userId,
       durationMs: Date.now() - started,
-      data: { method: req.method, path, status: res.statusCode },
+      errorDetails: aborted
+        ? 'The client closed the connection before the response was sent'
+        : res.statusCode >= 400
+          ? (answeredError ?? `HTTP ${res.statusCode} ${STATUS_CODES[res.statusCode] ?? ''}`.trim())
+          : null,
+      response: aborted ? null : { status: res.statusCode, bytes, contentType: String(res.getHeader('content-type') ?? '').split(';')[0] || null, ...(answeredError ? { error: answeredError } : {}) },
+      data: { method: req.method, path },
+      fileOnly: level === 'SUCCESS',
     });
-  });
+  };
+  res.on('finish', () => log(false));
+  res.on('close', () => log(!res.writableFinished));
   next();
 });
 // GraphQL parses its own body, so mount it before express.json
@@ -92,7 +121,19 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
 
 const server = createServer(app);
 initRealtime(server);
-server.listen(env.port, () => console.log(`API running on http://localhost:${env.port}`));
+server.listen(env.port, () => {
+  console.log(`API running on http://localhost:${env.port}`);
+  void logEvent({
+    level: 'SUCCESS',
+    category: 'system',
+    event: 'server.started',
+    message: `API listening on port ${env.port}`,
+    outcome: 'started',
+    newStatus: 'running',
+    data: { port: env.port, pid: process.pid, node: process.version, production: env.isProd, logDir: env.logDir },
+  });
+});
+installCrashLogger();
 const stopReminders = startAssignmentReminders();
 const stopSnoozeWaker = startSnoozeWaker();
 const stopPurge = startDeletedContactsPurge();
@@ -100,6 +141,7 @@ const stopLogRetention = startLogRetention();
 const stopLiveSweeper = startLiveLocationSweeper();
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
+    logEventSync({ level: 'SUCCESS', category: 'system', event: 'server.stopping', message: `Received ${signal}: stopping the scheduled jobs`, reason: `The process received ${signal} (Ctrl+C, a restart or a deploy)`, outcome: 'stopping', previousStatus: 'running', newStatus: 'stopping', data: { signal, pid: process.pid, uptimeSeconds: Math.round(process.uptime()) } });
     stopReminders();
     stopSnoozeWaker();
     stopPurge();

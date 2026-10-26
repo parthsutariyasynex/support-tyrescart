@@ -7,8 +7,8 @@ import { type ContactOption, STAGE_COUNTS_EVENT, fetchContactFieldOptions, fetch
 import { revalidateOnReturn } from '@/lib/revalidate';
 import { useStagesChanged } from './inbox/StageMenu';
 
-// Left menu → LIFECYCLE STAGES: the workspace's stages (Settings → Customer lifecycle) with their colours and how
-// many chats are at each, e.g. "New (3)"; one click shows the Inbox with only the chats at that stage. Follows
+// Left menu → LIFECYCLE STAGES (total): the workspace's stages (Settings → Customer lifecycle) with their colours and
+// how many chats are at each, e.g. "New (3)"; one click shows the Inbox with only the chats at that stage. Follows
 // renames, colours, new stages and the counts live. The section folds, and that is remembered on this device.
 let cachedCounts: Record<string, number> | null = null;
 const KEY = 'support:lifecycleMenuOpen';
@@ -70,6 +70,8 @@ export function LifecycleMenu({ matches }: { matches: (label: string) => boolean
   }, []);
 
   const shown = (stages ?? []).filter((s) => matches(s.label));
+  // All chats at a stage: the sum of the stages listed, so it always matches the numbers below
+  const total = counts && stages ? stages.reduce((sum, s) => sum + (counts[s.value] ?? 0), 0) : null;
   if (stages && !shown.length) return null; // the menu search hides the section when no stage matches
   const toggle = () => {
     const next = !open;
@@ -89,7 +91,14 @@ export function LifecycleMenu({ matches }: { matches: (label: string) => boolean
         aria-expanded={open}
         className="flex w-full items-center justify-between rounded-md px-2 pb-1.5 text-[10px] font-bold uppercase tracking-wider text-faint hover:text-body"
       >
-        Lifecycle stages
+        <span>
+          Lifecycle stages
+          {total !== null && (
+            <span className="ml-1 tabular-nums" aria-label={`${total} chats in all`}>
+              ({total})
+            </span>
+          )}
+        </span>
         <svg className={`h-3.5 w-3.5 transition-transform ${open ? '' : 'rotate-180'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m18 15-6-6-6 6" />
         </svg>

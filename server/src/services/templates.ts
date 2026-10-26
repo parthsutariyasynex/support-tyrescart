@@ -155,7 +155,7 @@ async function sendApprovedTemplate(auth: AuthPayload, rawInput: unknown, file?:
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
     sendError = err;
   }
-  logMessageSend({ workspaceId: auth.workspaceId, conversationId: conversation.id, messageId: message.id, type: 'template', userId: auth.userId, error: sendError });
+  logMessageSend({ workspaceId: auth.workspaceId, conversationId: conversation.id, messageId: message.id, type: 'template', userId: auth.userId, error: sendError, waMessageId: saved.waMessageId });
   await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date(), updatedBy: auth.userId } });
   emitToWorkspace(auth.workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   await recordActivity({

@@ -7,7 +7,7 @@ import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/inc
 import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
-import { fitText, logEvent } from './services/logging.js';
+import { errorCodeOf, errorDetailsOf, fitText, logEvent } from './services/logging.js';
 import { locationBody, placeFromWebhook } from './services/locationFormat.js';
 
 // Meta's explanation for a message it couldn't deliver as a normal type (e.g. type "unsupported", code 131051)
@@ -113,8 +113,12 @@ export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
 }
 
 export async function saveIncoming(workspaceId: string, m: Incoming) {
-  if (m.waMessageId && (await prisma.message.findUnique({ where: { waMessageId: m.waMessageId } })))
-    return null; // Meta retries webhooks, so ignore duplicates
+  const duplicate = m.waMessageId ? await prisma.message.findUnique({ where: { waMessageId: m.waMessageId }, select: { id: true, conversationId: true } }) : null;
+  if (duplicate) {
+    // Meta retries webhooks: already saved, so nothing more to do (recorded, not silently dropped)
+    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.duplicate', message: `Message already received (Meta sent it again), ignored`, direction: 'in', outcome: 'duplicate', workspaceId, messageId: duplicate.id, waMessageId: m.waMessageId, conversationId: duplicate.conversationId, data: { type: m.type }, fileOnly: true });
+    return null;
+  }
 
   const now = new Date();
   const contact = await prisma.contact.upsert({
@@ -157,12 +161,25 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     category: 'message',
     event: 'message.received',
     message: `Received a message (${m.type})${providerErrorMessage ? `. WhatsApp: ${providerErrorMessage}` : ''}`,
+    direction: 'in',
+    outcome: 'saved',
+    previousStatus: null,
+    newStatus: 'received',
+    reason: existed ? "Meta's webhook delivered a customer's message in an existing chat" : "Meta's webhook delivered a message from a new customer (a new chat was created)",
     workspaceId,
+    messageId: message.id,
+    waMessageId: m.waMessageId ?? null,
+    conversationId: conversation.id,
     errorCode: providerErrorCode ?? null,
+    errorDetails: providerErrorMessage ?? null,
     data: { conversationId: conversation.id, messageId: message.id, waMessageId: m.waMessageId ?? null, type: m.type, providerErrorCode: providerErrorCode ?? null, providerErrorMessage: providerErrorMessage ?? null },
   });
   // Fetch the file in the background (the webhook answers Meta right away); retried when someone opens it
-  if (m.media) void fetchIncomingMedia(workspaceId, message.id).catch((err) => console.error('[media] download failed', message.id, (err as Error).message));
+  if (m.media)
+    void fetchIncomingMedia(workspaceId, message.id).catch((err) => {
+      console.error('[media] download failed', message.id, (err as Error).message);
+      void logEvent({ level: 'ERROR', category: 'message', event: 'message.media_failed', message: `Couldn't download the customer's file: ${(err as Error)?.message ?? err}`, direction: 'in', workspaceId, messageId: message.id, waMessageId: m.waMessageId ?? null, conversationId: conversation.id, errorCode: errorCodeOf(err), errorDetails: errorDetailsOf(err), data: { type: m.type } });
+    });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(message) });
   // A brand-new chat: tell every connected member (toast). Only the customer's name, never the message text.
   if (!existed) emitToWorkspace(workspaceId, 'chat:new', { conversationId: conversation.id, contactName: conversation.contact.name || `+${conversation.contact.waId}` });
@@ -176,9 +193,15 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     data: { messageId: message.id, preview: previewOf(m.body, 100) },
   });
   // Simple automations (routing, auto-reply); they never stop the message from being saved
-  await runAutomations(workspaceId, conversation.id).catch((err) => console.error('[automations] failed', conversation.id, (err as Error).message));
+  await runAutomations(workspaceId, conversation.id).catch((err) => {
+    console.error('[automations] failed', conversation.id, (err as Error).message);
+    void logEvent({ level: 'ERROR', category: 'system', event: 'automation.failed', message: `Automations failed for an incoming message: ${(err as Error)?.message ?? err}`, workspaceId, messageId: message.id, conversationId: conversation.id, errorCode: errorCodeOf(err), errorDetails: errorDetailsOf(err) });
+  });
   return message;
 }
+
+// Meta's timestamps (seconds since 1970, sent as text) as numbers in the logs
+const metaTime = (t: unknown) => (t === null || t === undefined || t === '' ? null : Number.isFinite(Number(t)) ? Number(t) : String(t));
 
 const STATUS_RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3, failed: 4 };
 
@@ -201,8 +224,16 @@ export function statusError(s: any): { code: number | null; title: string | null
 
 export async function applyStatus(workspaceId: string, s: any) {
   const message = await prisma.message.findUnique({ where: { waMessageId: s.id } });
-  // Statuses can arrive out of order; never downgrade read -> delivered
-  if (!message || (STATUS_RANK[s.status] ?? 0) <= (STATUS_RANK[message.status] ?? 0)) return;
+  if (!message) {
+    // Not one of ours (e.g. sent from the WhatsApp app on the phone), or deleted since: recorded, not dropped
+    void logEvent({ level: 'WARNING', category: 'message', event: 'message.status_unmatched', message: `Status "${s.status}" for a message not in this app`, direction: 'out', outcome: 'ignored', newStatus: s?.status ?? null, reason: `Meta reported "${s?.status}" for WhatsApp message ${s?.id}, which isn't in this app (sent from the phone, or deleted)`, workspaceId, waMessageId: s?.id ?? null, errorCode: statusError(s)?.code ?? null, errorDetails: statusError(s)?.title ?? null, data: { metaTimestamp: metaTime(s?.timestamp) } });
+    return;
+  }
+  // Statuses can arrive out of order; never downgrade read -> delivered (the late one is recorded)
+  if ((STATUS_RANK[s.status] ?? 0) <= (STATUS_RANK[message.status] ?? 0)) {
+    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.status_stale', message: `Status "${s.status}" arrived after "${message.status}", kept "${message.status}"`, direction: 'out', outcome: 'skipped', previousStatus: message.status, newStatus: message.status, reason: `Meta reported "${s.status}" after the message was already "${message.status}" (statuses arrive out of order; a status never goes back)`, workspaceId, messageId: message.id, waMessageId: message.waMessageId, conversationId: message.conversationId, data: { received: s?.status ?? null, metaTimestamp: metaTime(s?.timestamp) }, fileOnly: true });
+    return;
+  }
   const updated = await prisma.message.update({
     where: { id: message.id },
     data: { status: s.status, error: s.errors?.[0]?.title },
@@ -212,11 +243,20 @@ export async function applyStatus(workspaceId: string, s: any) {
 }
 
 // One entry per status change of an outgoing message (sent → delivered → read, or failed with Meta's code)
-function logStatus(workspaceId: string, message: { id: string; conversationId: string; status: string; type: string }, s: any) {
+function logStatus(workspaceId: string, message: { id: string; conversationId: string; status: string; type: string; waMessageId: string | null }, s: any) {
   const error = statusError(s);
-  const data = { messageId: message.id, conversationId: message.conversationId, type: message.type, from: message.status, to: s.status };
+  const data = { messageId: message.id, conversationId: message.conversationId, type: message.type, from: message.status, to: s.status, metaTimestamp: metaTime(s?.timestamp) };
+  const ids = {
+    direction: 'out' as const,
+    previousStatus: message.status,
+    newStatus: s.status,
+    reason: `Meta's webhook reported the message as "${s.status}" (it was "${message.status}")`,
+    messageId: message.id,
+    waMessageId: message.waMessageId,
+    conversationId: message.conversationId,
+  };
   if (s.status !== 'failed') {
-    void logEvent({ level: 'SUCCESS', category: 'message', event: 'message.status', message: `Message ${message.status} → ${s.status}`, workspaceId, data });
+    void logEvent({ ...ids, level: 'SUCCESS', category: 'message', event: 'message.status', message: `Message ${message.status} → ${s.status}`, outcome: 'updated', workspaceId, data });
     return;
   }
   const known = error?.code !== null && error?.code !== undefined ? KNOWN_FAILURES[error.code] : undefined;
@@ -225,8 +265,11 @@ function logStatus(workspaceId: string, message: { id: string; conversationId: s
     category: 'message',
     event: 'message.status',
     message: `WhatsApp didn't deliver a message: ${error?.title ?? 'no reason given'}${error?.code ? ` (${error.code})` : ''}${known ? `. ${known}` : ''}`,
+    ...ids,
+    outcome: 'not delivered',
     workspaceId,
     errorCode: error?.code ?? null,
+    errorDetails: [error?.title, error?.details, known].filter(Boolean).join(': ') || null,
     data: { ...data, title: error?.title, details: error?.details },
   });
 }

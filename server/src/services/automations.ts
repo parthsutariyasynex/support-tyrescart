@@ -12,7 +12,7 @@ import { parse } from './validate.js';
 import { fillVariables, listVariables, resolveKey, variableValues, variablesIn } from './variables.js';
 import { settingsOf } from './workspaceSettings.js';
 import { windowOpen } from './messagingWindow.js';
-import { logEvent, logMessageSend } from './logging.js';
+import { logEvent, logFailure, logMessageSend } from './logging.js';
 
 // Settings → Company settings → Simple automations. When a customer writes:
 //  1. routing: a chat nobody holds is assigned to the next of the chosen members, in turn (optionally only to
@@ -240,6 +240,7 @@ export async function runAutomations(workspaceId: string, conversationId: string
       }
     } catch (err) {
       console.error('[automations] routing failed', conversationId, (err as Error).message);
+      void logFailure('automation.routing_failed', 'Automatic routing failed', err, { workspaceId, conversationId });
     }
   }
 
@@ -265,7 +266,7 @@ export async function runAutomations(workspaceId: string, conversationId: string
         } catch (err) {
           sendError = err;
         }
-        logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'text', automation: 'auto_reply', error: sendError });
+        logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'text', automation: 'auto_reply', error: sendError, waMessageId: wamid });
         // The chat (or the whole workspace) can be deleted while WhatsApp is answering, which removes this message
         // with it: updateMany doesn't throw for a row that's gone, and then there's nothing left to update or show
         const result = sendError === undefined ? { waMessageId: wamid, status: 'sent' } : { status: 'failed', error: (sendError as Error).message };
@@ -282,6 +283,8 @@ export async function runAutomations(workspaceId: string, conversationId: string
             category: 'message',
             event: 'automation.auto_reply_discarded',
             message: `The chat was deleted while the auto-reply was being sent (${sendError === undefined ? 'WhatsApp accepted it' : 'WhatsApp refused it'})`,
+            outcome: 'discarded',
+            errorDetails: `The chat (or its workspace) was deleted while Meta was answering, so the reply has nothing left to update or show${sendError === undefined ? '' : `. WhatsApp had refused it: ${(sendError as Error)?.message ?? sendError}`}`,
             workspaceId,
             data: { conversationId, messageId: message.id },
           });
@@ -289,6 +292,7 @@ export async function runAutomations(workspaceId: string, conversationId: string
     }
   } catch (err) {
     console.error('[automations] auto-reply failed', conversationId, (err as Error).message);
+    void logFailure('automation.auto_reply_failed', 'Auto-reply failed', err, { workspaceId, conversationId });
   }
   return { assigned, replied };
 }

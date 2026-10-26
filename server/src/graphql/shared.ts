@@ -40,13 +40,13 @@ function logOperation(op: Operation | undefined, started: number, err?: unknown)
   const durationMs = Date.now() - started;
   const data = { operation: name, operationType: type };
   if (err === undefined) {
-    if (type === 'mutation') void logEvent({ level: 'SUCCESS', category: 'graphql', event: 'graphql.mutation', message: `${name} succeeded`, durationMs, data });
+    if (type === 'mutation') void logEvent({ level: 'SUCCESS', category: 'graphql', event: 'graphql.mutation', message: `${name} succeeded`, reason: `A user did "${name}" in the web app`, direction: 'in', outcome: 'succeeded', durationMs, data });
     return;
   }
   const code = err instanceof AppError ? err.code : err instanceof GraphQLError ? (err.extensions?.code as string | undefined) : undefined;
   if (code) {
     if (type === 'mutation')
-      void logEvent({ level: 'WARNING', category: 'graphql', event: 'graphql.mutation', message: `${name} refused: ${(err as Error).message}`, errorCode: code, durationMs, data });
+      void logEvent({ level: 'WARNING', category: 'graphql', event: 'graphql.mutation', message: `${name} refused: ${(err as Error).message}`, reason: `A user tried "${name}" in the web app and it was refused (${code})`, direction: 'in', outcome: 'refused', errorCode: code, errorDetails: (err as Error).message, durationMs, data });
     return;
   }
   void logEvent({
@@ -54,6 +54,10 @@ function logOperation(op: Operation | undefined, started: number, err?: unknown)
     category: 'graphql',
     event: `graphql.${type}`,
     message: `${name} failed: ${(err as Error)?.message ?? String(err)}`,
+    direction: 'in',
+    outcome: 'failed',
+    reason: `The web app called "${name}" and the server hit an unexpected error`,
+    errorDetails: (err as Error)?.message ?? String(err),
     durationMs,
     data: { ...data, error: err, stack: (err as Error)?.stack?.split('\n').slice(0, 6).join('\n') },
   });

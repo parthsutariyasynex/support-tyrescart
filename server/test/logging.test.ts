@@ -68,7 +68,9 @@ describe('sanitize', () => {
     assert.equal((sanitize(cyclic) as any).self, '[Circular]');
     assert.equal(sanitize(Buffer.from('abc')), '[3 bytes]');
     assert.deepEqual(sanitize(Object.assign(new Error('boom'), { code: 131049 })), { name: 'Error', message: 'boom', code: 131049 });
-    assert.equal(sanitize(10n), '10');
+    // Numeric ids stay numbers when JSON can hold them exactly; bigger ones stay exact as text
+    assert.equal(sanitize(10n), 10);
+    assert.equal(sanitize(2n ** 64n), '18446744073709551616');
     const throwing = { get bad() { throw new Error('no'); } };
     assert.doesNotThrow(() => sanitize(throwing));
   });
@@ -100,8 +102,11 @@ describe('logEvent', () => {
       await logEvent({ level: 'WARNING', category: 'auth', event: 'login.failed', message: 'Sign-in refused', errorCode: 'INVALID_CREDENTIALS', data: { email: 'a@b.c', password: 'nope' } });
     });
     assert.equal(saved.length, 1);
+    const { at, source, ...rest } = saved[0];
+    assert.match(source!, /^test\/logging\.test\.ts:\d+/, 'where it was logged');
+    assert.ok(at instanceof Date && Math.abs(at.getTime() - Date.now()) < 5000, 'stamped when made');
     assert.deepEqual(
-      { ...saved[0] },
+      rest,
       {
         level: 'WARNING',
         category: 'auth',
@@ -112,17 +117,34 @@ describe('logEvent', () => {
         userId: 'u1',
         errorCode: 'INVALID_CREDENTIALS',
         durationMs: null,
+        direction: null,
+        messageId: null,
+        waMessageId: null,
+        conversationId: null,
+        previousStatus: null,
+        newStatus: null,
+        action: 'Sign a user in',
+        reason: 'A sign-in attempt was refused',
+        outcome: 'warning',
+        response: null,
+        errorDetails: null,
         data: { email: 'a@b.c', password: '[REDACTED]' },
       },
     );
   });
-  test('explicit ids win over the request; outside a request they are null; numeric Meta codes become text', async () => {
+  test('explicit ids win over the request; outside a request they are null; numeric codes stay numbers, text codes stay text', async () => {
     const saved: LogRecord[] = [];
     setLogWriter(async (r) => saved.push(r));
     await runWithRequest('req-test-0002', () => logEvent({ level: 'ERROR', category: 'whatsapp', event: 'x', message: 'm', workspaceId: 'w9', errorCode: 131049, durationMs: 12.6 }));
     await logEvent({ level: 'SUCCESS', category: 'http', event: 'y', message: 'm' });
     assert.equal(saved[0].workspaceId, 'w9');
-    assert.equal(saved[0].errorCode, '131049');
+    assert.equal(saved[0].errorCode, 131049);
+    const { toRecord } = await import('../src/services/logging.js');
+    for (const [given, kept] of [['P2002', 'P2002'], ['FORBIDDEN', 'FORBIDDEN'], ['190', 190], [401, 401], [null, null]] as const)
+      assert.equal(toRecord({ level: 'ERROR', category: 'http', event: 'x', message: 'm', errorCode: given }).errorCode, kept);
+    // A status is a number when it is one (HTTP), text otherwise; ids are never turned into numbers
+    const r = toRecord({ level: 'SUCCESS', category: 'http', event: 'x', message: 'm', status: 200, previousStatus: 'sent', messageId: '12345', waMessageId: 'wamid.123' });
+    assert.deepEqual([r.newStatus, r.previousStatus, r.messageId, r.waMessageId], [200, 'sent', '12345', 'wamid.123']);
     assert.equal(saved[0].durationMs, 13);
     assert.equal(saved[1].requestId, null);
     assert.equal(saved[1].data, null);
@@ -155,7 +177,7 @@ describe('logEvent', () => {
     await logMessageSend({ workspaceId: 'w1', conversationId: 'c1', messageId: 'm1', type: 'text', userId: 'u1' });
     await logMessageSend({ workspaceId: 'w1', conversationId: 'c1', messageId: 'm2', type: 'template', error: Object.assign(new Error('Re-engagement message'), { code: 131047 }) });
     assert.deepEqual([saved[0].level, saved[0].event, saved[0].errorCode], ['SUCCESS', 'message.sent', null]);
-    assert.deepEqual([saved[1].level, saved[1].event, saved[1].errorCode], ['ERROR', 'message.send_failed', '131047']);
+    assert.deepEqual([saved[1].level, saved[1].event, saved[1].errorCode], ['ERROR', 'message.send_failed', 131047]);
     assert.match(saved[1].message, /Re-engagement message/);
   });
 });
@@ -173,4 +195,52 @@ test("statusError reads Meta's numeric code from a failed status webhook (131049
   });
   assert.equal(statusError({ id: 'wamid.y', status: 'delivered' }), null);
   assert.equal(statusError({ errors: [{ code: 'abc', title: 'odd' }] })?.code, null);
+});
+
+describe('every log explains itself', () => {
+  test('every event name the server logs has an action and a reason (no entry is ever unexplained)', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { eventInfo } = await import('../src/services/logging.js');
+    const root = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src');
+    const files: string[] = [];
+    const walk = async (d: string) => {
+      for (const e of await readdir(d, { withFileTypes: true })) e.isDirectory() ? await walk(path.join(d, e.name)) : e.name.endsWith('.ts') && files.push(path.join(d, e.name));
+    };
+    await walk(decodeURIComponent(root));
+    const names = new Set<string>();
+    const EVENT = /['`]((?:http|graphql|login|permission|message|automation|conversation|live|webhook|socket|database|activity|email|file|job|settings|logs|whatsapp)\.[a-z_]+)['`]/g;
+    const NOT_EVENTS = new Set(['socket.io']); // the library's name in imports
+    for (const f of files) for (const m of (await readFile(f, 'utf8')).matchAll(EVENT)) if (!NOT_EVENTS.has(m[1])) names.add(m[1]);
+    assert.ok(names.size >= 40, `found ${names.size} event names`);
+    const missing = [...names].filter((n) => !eventInfo(n));
+    assert.deepEqual(missing, [], 'events without an action and reason');
+    // Dynamic Meta API calls get theirs from the whatsapp.* rule
+    assert.match(eventInfo('whatsapp.upload_template_sample')!.action, /Meta's WhatsApp API \(upload_template_sample\)/);
+  });
+  test('defaults fill the action, reason and outcome; call sites can be more specific; status → newStatus', async () => {
+    const { toRecord } = await import('../src/services/logging.js');
+    const plain = toRecord({ level: 'ERROR', category: 'message', event: 'message.send_failed', message: 'x' });
+    assert.deepEqual([plain.action, plain.reason, plain.outcome], ['Send a message to the customer on WhatsApp', 'A message was sent from the chat and WhatsApp refused it', 'failed']);
+    const specific = toRecord({ level: 'SUCCESS', category: 'message', event: 'message.status', message: 'x', reason: 'Because', outcome: 'updated', previousStatus: 'sent', status: 'delivered' });
+    assert.deepEqual([specific.reason, specific.outcome, specific.previousStatus, specific.newStatus], ['Because', 'updated', 'sent', 'delivered']);
+    const unknown = toRecord({ level: 'SUCCESS', category: 'system', event: 'brand.new_event', message: 'x' });
+    assert.deepEqual([unknown.action, unknown.reason], ['brand.new_event', 'Not described']);
+  });
+  test('callerSource: the first frame outside the logging plumbing, as file:line function', async () => {
+    const { callerSource } = await import('../src/services/logging.js');
+    const stack = [
+      'Error',
+      '    at callerSource (/x/server/src/services/logging.ts:120:10)',
+      '    at logEvent (/x/server/src/services/logging.ts:300:5)',
+      '    at $allOperations (/x/server/src/prisma.ts:30:9)',
+      '    at async sendMessage (/x/server/src/services/inbox.ts:465:7)',
+      '    at async /x/server/src/routes/inbox.ts:50:3',
+    ].join('\n');
+    assert.equal(callerSource(stack), 'src/services/inbox.ts:465 sendMessage');
+    assert.equal(callerSource(['Error', '    at /x/server/src/routes/inbox.ts:50:3'].join('\n')), 'src/routes/inbox.ts:50');
+    assert.equal(callerSource(['Error', '    at node:internal/process:1:1', '    at waitForActual (node:assert:615:5)'].join('\n')), null);
+    assert.equal(callerSource(['Error', '    at async Module.saveIncoming (/x/server/src/messages.ts:159:3)'].join('\n')), 'src/messages.ts:159 saveIncoming');
+    assert.equal(callerSource(['Error', '    at TestContext.<anonymous> (/x/server/test/a.test.ts:5:1)'].join('\n')), 'test/a.test.ts:5');
+  });
 });

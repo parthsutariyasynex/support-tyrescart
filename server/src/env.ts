@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import os from 'node:os';
 import path from 'node:path';
 
 function required(name: string): string {
@@ -38,8 +39,9 @@ export const env = {
   // only counts them), delete, or off. Checked in services/logRetention.ts.
   logRetentionDays: process.env.LOG_RETENTION_DAYS,
   logRetentionMode: process.env.LOG_RETENTION_MODE,
-  // The daily log files (logs/app-YYYY-MM-DD.log): their folder, and LOG_TO_FILE=false to not write them
-  logDir: path.resolve(process.env.LOG_DIR || 'logs'),
+  // The daily log files (logs/YYYY-MM-DD.log, JSON lines): their folder, and LOG_TO_FILE=false to not write them
+  // Test runs (node --test) never write to the real logs/ folder: a temporary one unless LOG_DIR is set
+  logDir: path.resolve(process.env.LOG_DIR || (process.env.NODE_TEST_CONTEXT ? path.join(os.tmpdir(), 'support-tyrescart-test-logs') : 'logs')),
   logToFile: process.env.LOG_TO_FILE !== 'false',
   // Address search and "what's here" for the Location screen (services/geocoding.ts): an OpenStreetMap Nominatim
   // server. Default: the free public one (1 request a second, no search-as-you-type; its usage policy applies).
