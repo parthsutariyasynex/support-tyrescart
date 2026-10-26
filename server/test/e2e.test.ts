@@ -138,6 +138,7 @@ describe('authentication', () => {
     `{ unreadTotal }`,
     `mutation { markNotificationsSeen }`,
     `mutation { clearConversation(id: "x") }`,
+    `mutation { deleteConversationForMe(id: "x") }`,
   ];
   for (const op of protectedOps)
     test(`rejects without token: ${op.slice(0, 60)}`, async () => {

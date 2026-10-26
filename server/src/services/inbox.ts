@@ -13,6 +13,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AppError, notFound } from './errors.js';
 import { previewOf, recordActivity } from './activity.js';
+import { deletedConversationIds } from './conversationClear.js';
 import { cleanIncomingName, fetchIncomingMedia, storeIncomingMedia } from './incomingMedia.js';
 import { withSender } from './senders.js';
 import { defaultStageValue } from './leadStages.js';
@@ -122,8 +123,11 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   const pins = viewerId
     ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
     : [];
+  // Chats the viewer deleted for themselves ("Delete chat"), until a newer message brings them back
+  const deleted = viewerId ? await deletedConversationIds(viewerId, workspaceId) : [];
   const where: Prisma.ConversationWhereInput = {
       workspaceId,
+      ...(deleted.length ? { id: { notIn: deleted } } : {}),
       contact: { deletedAt: null, ...(leadStage ? { leadStage } : {}) },
       ...(labelId ? { labels: { some: { labelId } } } : {}),
       ...(assignee === 'collaborating'

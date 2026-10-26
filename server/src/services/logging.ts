@@ -212,6 +212,7 @@ export const EVENTS: Record<string, EventInfo> = {
   'conversation.status_changed': { action: "Change a chat's status (open, snoozed, closed)", reason: 'A teammate closed, reopened or snoozed the chat' },
   'conversation.woken': { action: 'Reopen a snoozed chat', reason: 'The snooze time ended, or the customer wrote' },
   'conversation.assigned': { action: 'Change who a chat is assigned to', reason: 'A chat was assigned, reassigned or unassigned' },
+  'conversation.deleted_for_user': { action: 'Delete a chat from one person\'s list', reason: 'A teammate chose Delete chat and confirmed' },
   'live.started': { action: 'Start sharing a live location', reason: 'A teammate chose Share live location in the chat' },
   'live.stopped': { action: 'Stop sharing a live location', reason: 'A teammate (or an admin) pressed Stop sharing' },
   'webhook.received': { action: "Process one of Meta's webhooks", reason: 'Meta called the webhook (messages, statuses, calls or other updates)' },

@@ -34,13 +34,16 @@ export type ActivityType =
   | 'list_removed'
   // An internal note @mentioned someone (one per person and note; data: remarkId, mentionedUserId, text): only that
   // person's bell and Mentions list
-  | 'note_mention';
+  | 'note_mention'
+  // "Delete chat" (services/conversationClear.ts): the actor's own marker that the chat is out of their list until a
+  // newer message. Personal: never in the timeline, a bell or the contact's log
+  | 'chat_deleted';
 
 // Profile edits and remarks are only for the contact details page's activity log: never in the chat timeline or
 // anyone's bell (so the chat and the notifications stay exactly as they were)
 const PROFILE_ONLY: ActivityType[] = ['contact_updated', 'remark_added', 'remark_edited', 'remark_deleted', 'message_sent', 'list_added', 'list_removed'];
 // Customer messages already appear as bubbles, so they're only in the bell, not the chat timeline
-const NOT_IN_TIMELINE: ActivityType[] = ['message_received', 'note_mention', ...PROFILE_ONLY];
+const NOT_IN_TIMELINE: ActivityType[] = ['message_received', 'note_mention', 'chat_deleted', ...PROFILE_ONLY];
 
 type Row = Prisma.ActivityEventGetPayload<{ include: { conversation: { select: { contact: true } } } }>;
 
@@ -164,7 +167,7 @@ export async function listNotifications({ userId, workspaceId }: AuthPayload, fi
       notMine,
       {
         OR: [
-          { AND: [{ type: { notIn: [...PROFILE_ONLY, 'note_mention'] } }, visibleTo(userId, member.role)] },
+          { AND: [{ type: { notIn: [...PROFILE_ONLY, 'note_mention', 'chat_deleted'] } }, visibleTo(userId, member.role)] },
           // mentions: only the person mentioned (admins don't get everyone else's)
           { type: 'note_mention', data: { path: '$.mentionedUserId', equals: userId } },
         ],
@@ -206,7 +209,7 @@ export async function listContactActivity(workspaceId: string, contactId: string
   if (!(await prisma.contact.findFirst({ where: { id: contactId, workspaceId }, select: { id: true } }))) throw notFound('Contact');
   if (!conversation) return [];
   const rows = await prisma.activityEvent.findMany({
-    where: { workspaceId, conversationId: conversation.id, type: { not: 'note_mention' } }, // mentions: the bell only
+    where: { workspaceId, conversationId: conversation.id, type: { notIn: ['note_mention', 'chat_deleted'] } }, // mentions: the bell only; deletes: personal
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: Math.min(Math.max(first, 1), 500),
     include,

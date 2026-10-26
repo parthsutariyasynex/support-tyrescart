@@ -24,6 +24,7 @@ import {
   needsAttention,
   newerMessage,
   clearConversation,
+  deleteConversationForMe,
   restoreMessage,
   setConversationStatus,
   sendTextMessage,
@@ -77,7 +78,9 @@ import { enterAction, fitHeight } from '@/lib/composer';
 import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInline, toggleLines } from '@/lib/formatting';
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
-import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
+import { type ChatOption, ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, DeleteIcon, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
+import { ConfirmDialog } from '../ConfirmDialog';
+import { NO_DELETE, createDeleteChat, deleteChatText, withoutChat } from '@/lib/deleteChat';
 import { snoozeChoices, snoozedUntilText } from '@/lib/snooze';
 import { LabelChips, LabelPicker, TagIcon } from './labels';
 import { NotificationBell, unlockSound } from './notifications';
@@ -619,6 +622,40 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     [patchConversations],
   );
 
+  // Leave the open chat (Close chat, Delete chat): back to the list, and a reload doesn't open it again
+  const leaveChat = useCallback(() => {
+    cachedActiveIdByPath[pathname] = null;
+    saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('chat')) {
+        url.searchParams.delete('chat');
+        window.history.replaceState(null, '', url.toString());
+      }
+    }
+    setActiveId(null);
+  }, [pathname]);
+
+  // "Delete chat" (for this user only), here or in another of their tabs: out of the list until a newer message
+  const onChatDeleted = useCallback(
+    (conversationId: string) => {
+      messagesCache.delete(conversationId);
+      saveSessionMessages(messagesCache);
+      setConversations((prev) => withoutChat(prev, conversationId));
+      if (lastActiveRef.current?.id === conversationId) lastActiveRef.current = null;
+      if (activeIdRef.current === conversationId) leaveChat();
+    },
+    [leaveChat],
+  );
+  const onChatDeletedRef = useRef(onChatDeleted);
+  onChatDeletedRef.current = onChatDeleted;
+  // Delete chat asks first (lib/deleteChat.ts): nothing is sent until Delete is pressed in the dialog
+  const [deleteState, setDeleteState] = useState(NO_DELETE);
+  const deleteFlow = useMemo(
+    () => createDeleteChat({ remove: deleteConversationForMe, onDeleted: (id) => onChatDeletedRef.current(id), onChange: setDeleteState }),
+    [],
+  );
+
   // Clicking a closed chat in the list reopens it (there's no separate "Reopen chat" button)
   const [reopenError, setReopenError] = useState<{ id: string; message: string } | null>(null);
   const selectConversation = useCallback(
@@ -901,6 +938,8 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('conversation:cleared', ({ conversationId, userId }: { conversationId: string; userId: string }) => {
       if (userId === permissionsRef.current?.userId) onCleared(conversationId);
     });
+    // Deleted in another of your tabs (sent to you only)
+    socket.on('conversation:deleted', ({ conversationId }: { conversationId: string }) => onChatDeletedRef.current(conversationId));
     // A live location started, moved, stopped or ended: its card and the "you're sharing" bar follow
     socket.on('live:changed', (live: LiveLocation) => setLive(live));
     // Live locations you were sharing before a reload carry on from this tab
@@ -1118,6 +1157,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       {/* Left Conversations List Panel */}
       <ConversationList
         conversations={filteredConversations}
+        onDeleteChat={(id) => deleteFlow.ask(id)}
         sortOrder={sortOrder}
         onSortChange={onSortOrderChange}
         statusFilter={statusFilter}
@@ -1195,19 +1235,9 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
             patchConversations((c) => (c.id === id ? { ...c, unread } : c));
             loadUnreadTotal();
           }}
-          onClosed={() => {
-            cachedActiveIdByPath[pathname] = null;
-            saveSessionJson(SKEY_ACTIVE, cachedActiveIdByPath);
-            if (typeof window !== 'undefined') {
-              const url = new URL(window.location.href);
-              if (url.searchParams.has('chat')) {
-                url.searchParams.delete('chat');
-                window.history.replaceState(null, '', url.toString());
-              }
-            }
-            setActiveId(null);
-          }}
+          onClosed={leaveChat}
           onCleared={() => onCleared(active.id)}
+          onDelete={() => deleteFlow.ask(active.id)}
           onClaim={() => claim(active.id)}
           claimError={claimError?.id === active.id ? claimError.message : null}
           reopenError={reopenError?.id === active.id ? reopenError.message : null}
@@ -1278,8 +1308,35 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
         />
       )}
 
+      {deleteState.conversationId && (
+        <DeleteChatDialog
+          conversation={conversations.find((c) => c.id === deleteState.conversationId) ?? (active?.id === deleteState.conversationId ? active : undefined)}
+          busy={deleteState.busy}
+          error={deleteState.error}
+          onConfirm={() => void deleteFlow.confirm()}
+          onCancel={() => deleteFlow.cancel()}
+        />
+      )}
     </div>
   );
+}
+
+// Delete chat confirmation: Cancel (or Esc, or clicking outside) changes nothing
+function DeleteChatDialog({
+  conversation,
+  busy,
+  error,
+  onConfirm,
+  onCancel,
+}: {
+  conversation: Conversation | undefined;
+  busy: boolean;
+  error: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const text = deleteChatText(conversation ? contactDisplayName(conversation.contact) : 'this customer');
+  return <ConfirmDialog title={text.title} body={text.body} yes={busy ? 'Deleting…' : 'Delete'} no="Cancel" error={error} danger busy={busy} onYes={onConfirm} onNo={onCancel} />;
 }
 
 function ConversationList({
@@ -1318,7 +1375,10 @@ function ConversationList({
   meId,
   unassignedCount,
   stageBar,
+  onDeleteChat,
 }: {
+  // Delete chat from the row's ⋮ menu (asks first)
+  onDeleteChat: (conversationId: string) => void;
   stageBar?: React.ReactNode; // the lifecycle stage being shown (left menu), with a way back to all chats
   conversations: Conversation[];
   totalCount: number;
@@ -1661,7 +1721,14 @@ function ConversationList({
                       )}
                     </span>
                   </button>
-                  
+                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens) */}
+                  <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
+                    <ChatOptionsMenu
+                      small
+                      label={`Chat options for ${contactName}`}
+                      options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
+                    />
+                  </div>
                 </li>
               );
             })}
@@ -1708,6 +1775,7 @@ function ChatPanel({
   onMarkedUnread,
   onClosed,
   onCleared,
+  onDelete,
   onClaim,
   claimError,
   reopenError,
@@ -1737,6 +1805,8 @@ function ChatPanel({
   onMarkedUnread: (id: string, unread: number) => void;
   // "Clear chat" succeeded (for this user only)
   onCleared: () => void;
+  // "Delete chat" chosen (the confirmation is shown first)
+  onDelete: () => void;
   // "Assign to Me" for an unassigned chat (New Lead), and why it failed if it did
   onClaim: () => void;
   claimError: string | null;
@@ -2010,6 +2080,23 @@ function ChatPanel({
       setConfirmClear(false);
     }
   }
+
+  // The ⋮ menu's options while the chat isn't closed
+  const chatMenuOptions = (): ChatOption[] => [
+    { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
+    { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
+    { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
+    { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
+    ...(conversation.status === 'snoozed'
+      ? [{ label: 'Unsnooze', icon: SnoozeIcon, onSelect: () => changeStatus('open') }]
+      : [
+          {
+            label: 'Snooze',
+            icon: SnoozeIcon,
+            children: snoozeChoices().map((s) => ({ label: s.label, hint: snoozedUntilText(s.until.toISOString()), onSelect: () => changeStatus('snoozed', s.until) })),
+          },
+        ]),
+  ];
 
   async function togglePin() {
     setError('');
@@ -2560,27 +2647,15 @@ function ChatPanel({
               <path d="M12 16v-4M12 8h.01" />
             </svg>
           </button>
-          {!isClosed && (
-            <ChatOptionsMenu
-              disabled={statusBusy}
-              busy={statusBusy}
-              options={[
-                { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
-                { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
-                { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
-                { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
-                ...(conversation.status === 'snoozed'
-                  ? [{ label: 'Unsnooze', icon: SnoozeIcon, onSelect: () => changeStatus('open') }]
-                  : [
-                      {
-                        label: 'Snooze',
-                        icon: SnoozeIcon,
-                        children: snoozeChoices().map((s) => ({ label: s.label, hint: snoozedUntilText(s.until.toISOString()), onSelect: () => changeStatus('snoozed', s.until) })),
-                      },
-                    ]),
-              ]}
-            />
-          )}
+          {/* A closed chat offers only Delete chat (the rest needs it open) */}
+          <ChatOptionsMenu
+            disabled={statusBusy}
+            busy={statusBusy}
+            options={[
+              ...(isClosed ? [] : chatMenuOptions()),
+              { label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: onDelete },
+            ]}
+          />
           {/* {process.env.NODE_ENV !== 'production' && (
             <button
               onClick={async () => {

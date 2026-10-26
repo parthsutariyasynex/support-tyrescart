@@ -17,10 +17,14 @@ export function ChatOptionsMenu({
   options,
   disabled,
   busy,
+  label = 'More options',
+  small,
 }: {
   options: ChatOption[];
   disabled?: boolean;
   busy?: boolean;
+  label?: string;
+  small?: boolean; // the chat list row's version: a smaller ⋮ button
 }) {
   const [open, setOpen] = useState(false);
   const [sub, setSub] = useState<string | null>(null); // the option whose children are showing
@@ -48,16 +52,17 @@ export function ChatOptionsMenu({
       <button
         type="button"
         disabled={disabled}
-        aria-label="More options"
+        aria-label={label}
+        title={small ? label : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className={`flex h-7 w-7 items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-body disabled:opacity-50 ${open ? 'bg-surface-strong text-body' : ''}`}
+        className={`flex ${small ? 'h-5 w-5' : 'h-7 w-7'} items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-body disabled:opacity-50 ${open ? 'bg-surface-strong text-body' : ''}`}
       >
         {busy ? (
           <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line-strong border-t-primary" />
         ) : (
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+          <svg className={small ? 'h-3.5 w-3.5' : 'h-4 w-4'} viewBox="0 0 24 24" fill="currentColor">
             <circle cx="12" cy="5" r="1.8" />
             <circle cx="12" cy="12" r="1.8" />
             <circle cx="12" cy="19" r="1.8" />
@@ -68,7 +73,7 @@ export function ChatOptionsMenu({
         <div
           role="menu"
           aria-label="Chat options"
-          className="absolute right-0 top-9 z-50 w-48 rounded-xl border border-line bg-surface p-1 text-xs shadow-lg"
+          className={`absolute right-0 ${small ? 'top-6' : 'top-9'} z-50 w-48 rounded-xl border border-line bg-surface p-1 text-xs shadow-lg`}
         >
           {options.map((o) => (
             <div key={o.label} className="relative" onMouseEnter={() => setSub(o.children ? o.label : null)}>
@@ -153,6 +158,12 @@ export const SnoozeIcon = (
   <>
     <circle cx="12" cy="13" r="8" />
     <path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3" />
+  </>
+);
+export const DeleteIcon = (
+  <>
+    <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6M14 11v6" />
   </>
 );
 export const ClearIcon = (

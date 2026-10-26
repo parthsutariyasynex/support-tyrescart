@@ -256,3 +256,8 @@ export async function snoozeConversation(id: string, until: Date) {
 export async function clearConversation(id: string) {
   await gql(`mutation ClearChat($id: ID!) { clearConversation(id: $id) }`, { id });
 }
+
+// Delete chat for yourself only (like WhatsApp): it leaves your list until a newer message; nothing is deleted
+export async function deleteConversationForMe(id: string) {
+  await gql(`mutation DeleteChat($id: ID!) { deleteConversationForMe(id: $id) }`, { id });
+}
