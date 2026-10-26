@@ -17,13 +17,30 @@ export class NetworkError extends Error {
   }
 }
 export const isNetworkError = (err: unknown) => err instanceof NetworkError;
+// No answer within the time limit: the request may still have been carried out (e.g. a reply sent), so callers say
+// it's unknown rather than "not sent"
+export class RequestTimeoutError extends NetworkError {
+  constructor(public timeoutMs: number) {
+    super(`No answer from the server within ${Math.round(timeoutMs / 1000)} s. It may still have gone through: check before trying again.`);
+  }
+}
+
+// An id for one request, sent as X-Request-Id: the server's logs for it carry the same id as the browser's own reports
+export function newRequestId() {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
 
 // fetch() only rejects for network-level failures (refused/reset connection, timeout, offline, CORS) — never for
 // a response with a non-2xx status, which resolves normally. So any rejection here is a NetworkError.
-async function fetchOrThrowNetworkError(input: string, init: RequestInit): Promise<Response> {
+async function fetchOrThrowNetworkError(input: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
   try {
-    return await fetch(input, init);
-  } catch {
+    return await fetch(input, timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
+  } catch (err) {
+    if (timeoutMs && (err as Error)?.name === 'TimeoutError') throw new RequestTimeoutError(timeoutMs);
     throw new NetworkError();
   }
 }
@@ -72,26 +89,60 @@ export async function api<T = any>(path: string, options: { method?: string; bod
   return data;
 }
 
+// requestId: sent as X-Request-Id (the server logs the request under it); timeoutMs: give up waiting after that long
+// (RequestTimeoutError); reported: the caller reports a failure itself (otherwise a failed mutation is reported to
+// the logs here as client.api_error)
+export type GqlOptions = { requestId?: string; timeoutMs?: number; reported?: boolean };
+
+// The operation's name for the reports: "sendTextMessage" from "mutation SendText($input…) { sendTextMessage(…"
+export const operationName = (query: string) => /^\s*(query|mutation|subscription)\b[^{]*\{\s*(\w+)/.exec(query)?.[2] ?? null;
+
 // GraphQL client for /graphql. Throws the first error message, like api().
-export async function gql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
-  const token = getToken();
-  const res = await fetchOrThrowNetworkError(`${API_URL}/graphql`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  const json = await parseJsonOrThrowNetworkError(res);
-  const error = json.errors?.[0];
-  if (error) {
-    if (error.extensions?.code === 'UNAUTHENTICATED' && typeof window !== 'undefined') {
-      setToken(null);
-      window.location.href = '/login';
+export async function gql<T = any>(query: string, variables?: Record<string, unknown>, options: GqlOptions = {}): Promise<T> {
+  const started = Date.now();
+  const mutation = /^\s*mutation\b/.test(query);
+  const requestId = options.requestId ?? (mutation ? newRequestId() : undefined);
+  try {
+    const token = getToken();
+    const res = await fetchOrThrowNetworkError(
+      `${API_URL}/graphql`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(requestId ? { 'X-Request-Id': requestId } : {}),
+        },
+        body: JSON.stringify({ query, variables }),
+      },
+      options.timeoutMs,
+    );
+    const json = await parseJsonOrThrowNetworkError(res);
+    const error = json.errors?.[0];
+    if (error) {
+      if (error.extensions?.code === 'UNAUTHENTICATED' && typeof window !== 'undefined') {
+        setToken(null);
+        window.location.href = '/login';
+      }
+      throw new GqlError(error.message, error.extensions?.code);
     }
-    throw new GqlError(error.message, error.extensions?.code);
+    if (!res.ok || !json.data) throw new Error(`Request failed (${res.status})`);
+    return json.data;
+  } catch (err) {
+    // A failed change is reported to the logs (sign-in problems aren't: the app goes to the sign-in page)
+    if (mutation && !options.reported && errorCode(err) !== 'UNAUTHENTICATED')
+      void import('./clientLog').then(({ reportClient }) =>
+        reportClient({ event: 'api_error', requestId, operation: operationName(query), durationMs: Date.now() - started, error: describeError(err) }),
+      );
+    throw err;
   }
-  if (!res.ok || !json.data) throw new Error(`Request failed (${res.status})`);
-  return json.data;
+}
+
+// An error for the reports: what it says, its code, and what kind of failure it was
+export function describeError(err: unknown): { message: string; code?: string; kind: 'network' | 'timeout' | 'api' | 'ui' } {
+  const message = (err as Error)?.message ?? String(err);
+  if (err instanceof RequestTimeoutError) return { message, kind: 'timeout' };
+  if (err instanceof NetworkError) return { message, kind: 'network' };
+  if (err instanceof GqlError) return { message, code: err.code, kind: 'api' };
+  return { message, kind: err instanceof Error && /^Request failed \(\d+\)$/.test(message) ? 'api' : 'ui' };
 }

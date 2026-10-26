@@ -42,6 +42,8 @@ import { type MessageEvent, appInBackground, customerMessageNotice, shouldSuppre
 import { alertsYou, clearMessagePopups, showMessagePopup, soundEnabled } from '@/lib/messagePopups';
 import { fetchConversation } from '@/lib/inbox';
 import { MessagePopups } from './inbox/MessagePopups';
+// Reports this page's uncaught errors and failed changes to the server's logs (installs its listeners on load)
+import '@/lib/clientLog';
 
 // Customer messages already notified in this tab (the same message can arrive twice, e.g. after a reconnect)
 const seenMessages = new Set<string>();

@@ -216,11 +216,18 @@ export function MessageBubble({
               className={
                 m.status === 'read' ? 'text-tick-read font-bold' : m.status === 'failed' ? 'text-danger-icon' : 'text-faint'
               }
+              title={m.status === 'failed' ? `Not delivered${m.error ? `: ${m.error}` : ''}` : m.status}
             >
               {STATUS_ICON[m.status]}
             </span>
           )}
         </div>
+        {/* Why WhatsApp didn't take or deliver it, as WhatsApp said it */}
+        {isOut && !m.deletedAt && m.status === 'failed' && (
+          <p role="status" className="mt-0.5 text-right text-[10px] text-danger">
+            Not delivered{m.error ? `: ${m.error}` : ''}
+          </p>
+        )}
       </div>
     </div>
   );

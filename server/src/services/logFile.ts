@@ -4,6 +4,9 @@
 // LOG_DIR (default: logs/ where the server runs); LOG_TO_FILE=false turns the files off. Writing is buffered, never
 // throws and never holds up a request: if the folder can't be written, the terminal says why (once) and the next
 // entry tries again. Entries are already sanitized by logging.ts (no passwords, tokens or customer data).
+// Every entry has a logId: 1, 2, 3… in the order entries are written, continuing after a restart from the highest
+// logId in the newest files of the folder (older lines without one are skipped). One server process writes the files;
+// a separate process writing to the same folder at the same time (e.g. npm run logs:retention) could repeat a number.
 import fs from 'node:fs';
 import path from 'node:path';
 import { env } from '../env.js';
@@ -16,6 +19,8 @@ let dir: string | null = env.logToFile ? env.logDir : null;
 let stream: fs.WriteStream | null = null;
 let streamDay = '';
 let lastError: string | null = null;
+// The last logId given out (null: not read from the folder yet)
+let lastLogId: number | null = null;
 
 const pad = (n: number, w = 2) => String(n).padStart(w, '0');
 
@@ -31,10 +36,50 @@ export function localStamp(d = new Date()) {
   return `${localDay(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
 }
 
-// One entry as one JSON line, keys always in this order: when, how it ended, what happened and why, where in the
-// code, the status before and after, the ids to follow it, how long it took, and the actual response or error
+// The highest logId in the folder's newest dated files (read from the end of each; the first file that has any wins)
+export function highestLogId(folder: string | null): number {
+  if (!folder) return 0;
+  let files: string[];
+  try {
+    files = fs.readdirSync(folder).filter((f) => /^\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort().reverse();
+  } catch {
+    return 0;
+  }
+  for (const f of files.slice(0, 7)) {
+    try {
+      const file = path.join(folder, f);
+      const size = fs.statSync(file).size;
+      const length = Math.min(size, 256 * 1024);
+      const fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(length);
+      try {
+        fs.readSync(fd, buf, 0, length, size - length);
+      } finally {
+        fs.closeSync(fd);
+      }
+      let max = 0;
+      for (const m of buf.toString('utf8').matchAll(/"logId":(\d+)/g)) max = Math.max(max, Number(m[1]));
+      if (max) return max;
+    } catch {
+      // unreadable file: try the one before
+    }
+  }
+  return 0;
+}
+
+// The next logId (sequential; continues from the folder's files after a restart)
+export function nextLogId() {
+  if (lastLogId === null) lastLogId = highestLogId(dir);
+  lastLogId += 1;
+  return lastLogId;
+}
+
+// One entry as one JSON line, keys always in this order: its number and when, how it ended, what happened and why,
+// where in the code, the status before and after, the ids to follow it, the delivery tracking, how long it took, and
+// the actual response or error
 export function formatLine(r: LogRecord, at: Date = r.at ?? new Date()) {
   return JSON.stringify({
+    logId: r.logId ?? null,
     timestamp: localStamp(at),
     level: r.level,
     outcome: r.outcome ?? null,
@@ -49,13 +94,19 @@ export function formatLine(r: LogRecord, at: Date = r.at ?? new Date()) {
     requestId: r.requestId,
     messageId: r.messageId ?? null,
     waMessageId: r.waMessageId ?? null,
+    waMessageRef: r.waMessageRef ?? null,
     conversationId: r.conversationId ?? null,
+    messageSent: r.messageSent ?? null,
+    customerReceived: r.customerReceived ?? null,
+    deliveryStatus: r.deliveryStatus ?? null,
     workspaceId: r.workspaceId,
     userId: r.userId,
     durationMs: r.durationMs,
     errorCode: r.errorCode,
     errorDetails: r.errorDetails ?? null,
     message: r.message,
+    content: r.content ?? null,
+    request: r.request ?? null,
     response: r.response ?? null,
     data: r.data ?? null,
   });
@@ -121,5 +172,6 @@ export function setLogFileDir(next?: string | null) {
   stream = null;
   streamDay = '';
   lastError = null;
+  lastLogId = null;
   dir = next === undefined ? (env.logToFile ? env.logDir : null) : next;
 }

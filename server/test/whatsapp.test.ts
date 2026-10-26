@@ -62,14 +62,24 @@ describe('Graph API errors keep Meta’s code', () => {
 });
 
 describe('every Graph API call is logged', () => {
-  test('a successful send: SUCCESS with the message type and a duration, never the number, text or token', async () => {
-    next = { status: 200, body: { messages: [{ id: 'wamid.OK1' }] } };
-    assert.equal(await wa.sendText(account, '971500000000', 'secret text'), 'wamid.OK1');
+  test('a successful send: SUCCESS with the exact request and Meta’s whole answer, never the access token', async () => {
+    next = { status: 200, body: { messaging_product: 'whatsapp', contacts: [{ input: '971500000000', wa_id: '971500000000' }], messages: [{ id: 'wamid.OK1' }] } };
+    assert.equal(await wa.sendText(account, '971500000000', 'hello text'), 'wamid.OK1');
     const log = await lastLog();
-    assert.deepEqual([log.level, log.category, log.event, log.errorCode], ['SUCCESS', 'whatsapp', 'whatsapp.send', null]);
+    assert.deepEqual([log.level, log.category, log.event, log.errorCode, log.waMessageId], ['SUCCESS', 'whatsapp', 'whatsapp.send', null, 'wamid.OK1']);
     assert.deepEqual(log.data, { type: 'text' });
     assert.equal(typeof log.durationMs, 'number');
-    assert.doesNotMatch(JSON.stringify(log), /971500000000|secret text|EAAG-test-token-secret/);
+    assert.deepEqual(log.request, { messaging_product: 'whatsapp', to: '971500000000', type: 'text', text: { body: 'hello text' } });
+    assert.deepEqual((log.response as any).body, next.body);
+    assert.doesNotMatch(JSON.stringify(log), /EAAG-test-token-secret/);
+  });
+  test('an authentication template: its values (a one-time code) are hidden in the logged request', async () => {
+    next = { status: 200, body: { messages: [{ id: 'wamid.OTP1' }] } };
+    const components = [{ type: 'body', parameters: [{ type: 'text', text: '482913' }] }, { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: '482913' }] }];
+    await wa.sendTemplateWithValues(account, '971500000000', 'login_code', 'en', components, { secret: true });
+    const log = await lastLog();
+    assert.doesNotMatch(JSON.stringify(log), /482913/);
+    assert.equal((log.request as any).template.components[0].parameters[0].text, '[REDACTED]');
   });
   test('a refused send: ERROR with Meta’s numeric code (e.g. 131049), HTTP status, subcode and trace id', async () => {
     next = { status: 400, body: { error: { message: 'Message failed to send because of healthy ecosystem engagement', code: 131049, fbtrace_id: 'Tr4ce' } } };
@@ -77,7 +87,11 @@ describe('every Graph API call is logged', () => {
     const log = await lastLog();
     assert.deepEqual([log.level, log.event, log.errorCode], ['ERROR', 'whatsapp.send', 131049]);
     assert.match(log.message, /healthy ecosystem engagement/);
-    assert.deepEqual(log.data, { type: 'template', httpStatus: 400, subcode: null, fbtraceId: 'Tr4ce' });
+    // Meta's answer is in the response; the send is recorded as certainly not sent (Meta refused it)
+    assert.deepEqual(log.response, { ok: false, httpStatus: 400, code: 131049, subcode: null, fbtraceId: 'Tr4ce', body: next.body });
+    assert.deepEqual(log.data, { type: 'template' });
+    assert.deepEqual([log.messageSent, log.customerReceived, log.deliveryStatus, log.outcome], [0, 0, 'failed', 'refused']);
+    assert.match(log.message, /Meta documents code 131049 as: Meta chose not to deliver/);
   });
   test('uploads and template listing are logged under their own names', async () => {
     next = { status: 200, body: { id: 'media-1' } };

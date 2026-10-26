@@ -14,7 +14,7 @@ import { recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
 import { checkCanSend } from './inbox.js';
 import { roundCoord } from './locationFormat.js';
-import { logEvent, logMessageSend } from './logging.js';
+import { logEvent, logMessageSend, withMessageTrace } from './logging.js';
 import { getPermissions } from './permissions.js';
 import { withSender } from './senders.js';
 import { parse } from './validate.js';
@@ -114,14 +114,14 @@ export async function startLiveLocation(auth: AuthPayload, rawInput: unknown) {
   let saved;
   let sendError: unknown;
   try {
-    const wamid = await sendText(account, conversation.contact.waId, body);
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId: input.conversationId }, () => sendText(account, conversation.contact.waId, body));
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
     sendError = err;
     share.stoppedAt = new Date(); // the customer never got the link
   }
-  logMessageSend({ workspaceId: auth.workspaceId, conversationId: input.conversationId, messageId: message.id, type: 'live_location', userId: auth.userId, error: sendError, waMessageId: saved.waMessageId });
+  logMessageSend({ workspaceId: auth.workspaceId, conversationId: input.conversationId, messageId: message.id, type: 'live_location', userId: auth.userId, error: sendError, waMessageId: saved.waMessageId, content: body });
   await prisma.conversation.update({ where: { id: input.conversationId }, data: { lastMessageAt: new Date(), updatedBy: auth.userId } });
   emitToWorkspace(auth.workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   announce(share);

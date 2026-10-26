@@ -102,8 +102,9 @@ describe('logEvent', () => {
       await logEvent({ level: 'WARNING', category: 'auth', event: 'login.failed', message: 'Sign-in refused', errorCode: 'INVALID_CREDENTIALS', data: { email: 'a@b.c', password: 'nope' } });
     });
     assert.equal(saved.length, 1);
-    const { at, source, ...rest } = saved[0];
+    const { at, source, logId, ...rest } = saved[0];
     assert.match(source!, /^test\/logging\.test\.ts:\d+/, 'where it was logged');
+    assert.ok(Number.isInteger(logId) && logId! > 0, 'numbered');
     assert.ok(at instanceof Date && Math.abs(at.getTime() - Date.now()) < 5000, 'stamped when made');
     assert.deepEqual(
       rest,
@@ -120,12 +121,18 @@ describe('logEvent', () => {
         direction: null,
         messageId: null,
         waMessageId: null,
+        waMessageRef: null,
         conversationId: null,
+        messageSent: null,
+        customerReceived: null,
+        deliveryStatus: null,
+        content: null,
         previousStatus: null,
         newStatus: null,
         action: 'Sign a user in',
         reason: 'A sign-in attempt was refused',
         outcome: 'warning',
+        request: null,
         response: null,
         errorDetails: null,
         data: { email: 'a@b.c', password: '[REDACTED]' },
@@ -144,7 +151,10 @@ describe('logEvent', () => {
       assert.equal(toRecord({ level: 'ERROR', category: 'http', event: 'x', message: 'm', errorCode: given }).errorCode, kept);
     // A status is a number when it is one (HTTP), text otherwise; ids are never turned into numbers
     const r = toRecord({ level: 'SUCCESS', category: 'http', event: 'x', message: 'm', status: 200, previousStatus: 'sent', messageId: '12345', waMessageId: 'wamid.123' });
-    assert.deepEqual([r.newStatus, r.previousStatus, r.messageId, r.waMessageId], [200, 'sent', '12345', 'wamid.123']);
+    // WhatsApp's id only as its one-way reference (a wamid holds the customer's number)
+    const { waRef } = await import('../src/services/logging.js');
+    assert.deepEqual([r.newStatus, r.previousStatus, r.messageId, r.waMessageRef], [200, 'sent', '12345', waRef('wamid.123')]);
+    assert.match(r.waMessageRef!, /^wa:[0-9a-f]{16}$/);
     assert.equal(saved[0].durationMs, 13);
     assert.equal(saved[1].requestId, null);
     assert.equal(saved[1].data, null);
@@ -209,7 +219,7 @@ describe('every log explains itself', () => {
     };
     await walk(decodeURIComponent(root));
     const names = new Set<string>();
-    const EVENT = /['`]((?:http|graphql|login|permission|message|automation|conversation|live|webhook|socket|database|activity|email|file|job|settings|logs|whatsapp)\.[a-z_]+)['`]/g;
+    const EVENT = /['`]((?:http|graphql|login|permission|message|automation|conversation|live|webhook|socket|database|activity|email|file|job|settings|logs|whatsapp|client)\.[a-z_]+)['`]/g;
     const NOT_EVENTS = new Set(['socket.io']); // the library's name in imports
     for (const f of files) for (const m of (await readFile(f, 'utf8')).matchAll(EVENT)) if (!NOT_EVENTS.has(m[1])) names.add(m[1]);
     assert.ok(names.size >= 40, `found ${names.size} event names`);

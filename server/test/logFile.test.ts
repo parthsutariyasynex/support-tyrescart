@@ -23,6 +23,7 @@ after(async () => {
 });
 
 const record = (over: Partial<LogRecord> = {}): LogRecord => ({
+  logId: 42,
   level: 'ERROR',
   category: 'message',
   event: 'message.status',
@@ -35,13 +36,19 @@ const record = (over: Partial<LogRecord> = {}): LogRecord => ({
   direction: 'out',
   messageId: 'm1',
   waMessageId: 'wamid.ABC',
+  waMessageRef: 'wa:0123456789abcdef',
   conversationId: 'c1',
+  messageSent: 1,
+  customerReceived: 0,
+  deliveryStatus: 'failed',
+  content: null,
   previousStatus: 'sent',
   newStatus: 'failed',
   action: "Update a sent message's delivery status",
   reason: 'Meta\'s webhook reported the message as "failed" (it was "sent")',
   outcome: 'not delivered',
   source: 'src/messages.ts:262 logStatus',
+  request: null,
   response: null,
   errorDetails: 'This message was not delivered to maintain healthy ecosystem engagement.',
   data: { type: 'template' },
@@ -49,7 +56,11 @@ const record = (over: Partial<LogRecord> = {}): LogRecord => ({
   ...over,
 });
 
-const KEYS = ['timestamp', 'level', 'outcome', 'category', 'event', 'action', 'reason', 'source', 'direction', 'previousStatus', 'newStatus', 'requestId', 'messageId', 'waMessageId', 'conversationId', 'workspaceId', 'userId', 'durationMs', 'errorCode', 'errorDetails', 'message', 'response', 'data'];
+const KEYS = [
+  'logId', 'timestamp', 'level', 'outcome', 'category', 'event', 'action', 'reason', 'source', 'direction', 'previousStatus', 'newStatus', 'requestId', 'messageId',
+  'waMessageId', 'waMessageRef', 'conversationId', 'messageSent', 'customerReceived', 'deliveryStatus', 'workspaceId', 'userId', 'durationMs', 'errorCode', 'errorDetails',
+  'message', 'content', 'request', 'response', 'data',
+];
 
 describe('one JSON line per entry', () => {
   test('ISO time with its offset, then every field, always the same keys in the same order', () => {
@@ -60,6 +71,7 @@ describe('one JSON line per entry', () => {
     const o = JSON.parse(line);
     assert.deepEqual(Object.keys(o), KEYS);
     assert.deepEqual(o, {
+      logId: 42,
       timestamp: localStamp(at),
       level: 'ERROR',
       outcome: 'not delivered',
@@ -74,19 +86,25 @@ describe('one JSON line per entry', () => {
       requestId: 'req-1234abcd',
       messageId: 'm1',
       waMessageId: 'wamid.ABC',
+      waMessageRef: 'wa:0123456789abcdef',
       conversationId: 'c1',
+      messageSent: 1,
+      customerReceived: 0,
+      deliveryStatus: 'failed',
       workspaceId: 'w1',
       userId: null,
       durationMs: null,
       errorCode: 131049,
       errorDetails: 'This message was not delivered to maintain healthy ecosystem engagement.',
       message: "WhatsApp didn't deliver a message",
+      content: null,
+      request: null,
       response: null,
       data: { type: 'template' },
     });
   });
   test('fields that do not apply are null (still there, so every line can be read the same way)', () => {
-    const o = JSON.parse(formatLine(record({ direction: null, messageId: null, waMessageId: null, conversationId: null, previousStatus: null, newStatus: null, errorCode: null, errorDetails: null, data: null }), new Date()));
+    const o = JSON.parse(formatLine(record({ logId: null, direction: null, messageId: null, waMessageRef: null, messageSent: null, customerReceived: null, deliveryStatus: null, conversationId: null, previousStatus: null, newStatus: null, errorCode: null, errorDetails: null, data: null }), new Date()));
     assert.deepEqual(Object.keys(o), KEYS);
     assert.equal(o.direction, null);
     assert.equal(o.data, null);

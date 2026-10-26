@@ -43,6 +43,14 @@ export const env = {
   // Test runs (node --test) never write to the real logs/ folder: a temporary one unless LOG_DIR is set
   logDir: path.resolve(process.env.LOG_DIR || (process.env.NODE_TEST_CONTEXT ? path.join(os.tmpdir(), 'support-tyrescart-test-logs') : 'logs')),
   logToFile: process.env.LOG_TO_FILE !== 'false',
+  // Customer data in the logs (default on): message text, the customer's number and name, WhatsApp's ids (wamid) and
+  // the full payloads sent to and received from Meta, so every message can be traced exactly. LOG_CUSTOMER_DATA=false
+  // logs ids, statuses and errors only (numbers masked, wamids as one-way references). Secrets are redacted either way.
+  logCustomerData: process.env.LOG_CUSTOMER_DATA !== 'false',
+  // How long a call to Meta may take before it is given up and logged as a timeout: sends and other JSON calls, and
+  // file uploads (large documents take longer)
+  metaTimeoutMs: Number(process.env.META_TIMEOUT_MS) > 0 ? Number(process.env.META_TIMEOUT_MS) : 30_000,
+  metaUploadTimeoutMs: Number(process.env.META_UPLOAD_TIMEOUT_MS) > 0 ? Number(process.env.META_UPLOAD_TIMEOUT_MS) : 300_000,
   // Address search and "what's here" for the Location screen (services/geocoding.ts): an OpenStreetMap Nominatim
   // server. Default: the free public one (1 request a second, no search-as-you-type; its usage policy applies).
   // Set to your own or a hosted Nominatim, or "off" to turn search off.

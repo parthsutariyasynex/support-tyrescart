@@ -9,6 +9,7 @@
     "db:studio": "prisma studio",
     "typecheck": "tsc --noEmit -p .",
     "logs:retention": "tsx scripts/logRetention.ts",
+    "logs:trace": "tsx scripts/messageTrace.ts",
     "test:e2e": "tsx --test test/*.test.ts"
   },
   "dependencies": {

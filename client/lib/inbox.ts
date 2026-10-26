@@ -1,4 +1,4 @@
-import { gql } from './api';
+import { gql, type GqlOptions } from './api';
 import type { Assignee } from './assignees';
 import type { Label } from './labels';
 
@@ -157,9 +157,11 @@ export async function markConversationRead(id: string) {
 }
 
 // replyToId: send it as a reply to that message of the chat (quoted above it, in the app and in WhatsApp)
-export async function sendTextMessage(conversationId: string, body: string, replyToId?: string | null) {
+// options: the send's request id (the server's logs carry it), a time limit, and whether the caller reports the
+// outcome itself (see lib/api.ts)
+export async function sendTextMessage(conversationId: string, body: string, replyToId?: string | null, options?: GqlOptions) {
   const query = `mutation SendText($input: SendTextInput!) { sendTextMessage(input: $input) { ${MESSAGE_FIELDS} } }`;
-  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } })).sendTextMessage;
+  return (await gql<{ sendTextMessage: Message }>(query, { input: { conversationId, body, ...(replyToId ? { replyToId } : {}) } }, options)).sendTextMessage;
 }
 
 

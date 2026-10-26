@@ -8,7 +8,7 @@ import { sendLocation } from '../whatsapp.js';
 import { previewOf, recordActivity } from './activity.js';
 import { checkCanSend, replyTarget } from './inbox.js';
 import { locationBody, oneLine, roundCoord } from './locationFormat.js';
-import { logMessageSend } from './logging.js';
+import { logMessageSend, withMessageTrace } from './logging.js';
 import { withSender } from './senders.js';
 import { parse } from './validate.js';
 
@@ -33,13 +33,13 @@ export async function sendLocationMessage(workspaceId: string, conversationId: s
   let saved;
   let sendError: unknown;
   try {
-    const wamid = await sendLocation(account, conversation.contact.waId, place, quoted?.waMessageId);
+    const wamid = await withMessageTrace({ messageId: message.id, conversationId }, () => sendLocation(account, conversation.contact.waId, place, quoted?.waMessageId));
     saved = await prisma.message.update({ where: { id: message.id }, data: { waMessageId: wamid, status: 'sent' } });
   } catch (err) {
     saved = await prisma.message.update({ where: { id: message.id }, data: { status: 'failed', error: (err as Error).message } });
     sendError = err;
   }
-  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'location', userId: sentById, error: sendError, waMessageId: saved.waMessageId });
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'location', userId: sentById, error: sendError, waMessageId: saved.waMessageId, content: body });
   await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date(), ...(sentById ? { updatedBy: sentById } : {}) } });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
   await recordActivity({

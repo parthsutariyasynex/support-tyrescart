@@ -12,6 +12,7 @@ import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
 import { liveRouter } from './routes/live.js';
+import { clientLogRouter } from './routes/clientLog.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
 import { startSnoozeWaker } from './services/conversationStatus.js';
 import { startDeletedContactsPurge } from './services/deletedContacts.js';
@@ -98,6 +99,8 @@ app.use('/settings', settingsRouter);
 app.use('/reports', reportsRouter);
 // Live location links the customer opens (public; the token in the link is the key)
 app.use('/live', liveRouter);
+// What the web app reports about sending replies and its own errors (signed in only)
+app.use('/client-log', clientLogRouter);
 
 // Always answer with JSON, never Express's HTML error page (it leaks stack traces)
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {

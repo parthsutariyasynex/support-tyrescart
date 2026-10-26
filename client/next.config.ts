@@ -104,6 +104,11 @@ const nextConfig: NextConfig = {
         destination: `${API}/me/avatar`,
       },
       {
+        // The web app's own reports (sending a reply, failed API calls, browser errors) for the logs
+        source: '/client-log',
+        destination: `${API}/client-log`,
+      },
+      {
         source: '/health',
         destination: `${API}/health`,
       },
