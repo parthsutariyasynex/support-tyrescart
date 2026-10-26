@@ -104,6 +104,11 @@ const nextConfig: NextConfig = {
         destination: `${API}/health`,
       },
       {
+        // Live location links customers open (served by the API; public, the token in the link is the key)
+        source: '/live/:path*',
+        destination: `${API}/live/:path*`,
+      },
+      {
         // Report exports (e.g. /reports/assignments.csv). ':path+' needs at least one segment, so the
         // /reports page itself is still served by Next.
         source: '/reports/:path+',

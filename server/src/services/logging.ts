@@ -78,6 +78,13 @@ function cleanString(s: string, max = MAX_STRING) {
   return redacted.length > max ? `${redacted.slice(0, max)}… (+${redacted.length - max} chars)` : redacted;
 }
 
+// Text cut to fit a column of max characters, with the same redaction as every logged value. Never longer than max
+// (counted as the database counts: whole characters, so an emoji is never split); a cut one ends in "…".
+export function fitText(text: string, max = MAX_STRING) {
+  const chars = Array.from(cleanString(String(text ?? ''), Number.MAX_SAFE_INTEGER));
+  return chars.length <= max ? chars.join('') : `${chars.slice(0, Math.max(0, max - 1)).join('')}…`;
+}
+
 // A copy that is safe to store and print: sensitive keys redacted, bearer tokens in text removed, long strings and
 // arrays cut, nesting and cycles limited. Never throws.
 export function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {

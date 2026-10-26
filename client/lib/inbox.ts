@@ -82,7 +82,7 @@ export const PAGE_SIZE = 50;
 
 const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
 // Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
-const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
+export const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
 const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over

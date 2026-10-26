@@ -7,7 +7,11 @@ import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/inc
 import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
-import { logEvent } from './services/logging.js';
+import { fitText, logEvent } from './services/logging.js';
+import { locationBody, placeFromWebhook } from './services/locationFormat.js';
+
+// Meta's explanation for a message it couldn't deliver as a normal type (e.g. type "unsupported", code 131051)
+export type ProviderError = { code?: number; title?: string; error_data?: { details?: string } };
 
 type Incoming = {
   waId: string;
@@ -23,7 +27,20 @@ type Incoming = {
   replyToWaId?: string;
   // When the customer sent it (Meta's webhook timestamp); the 24-hour window runs from here
   sentAt?: Date;
+  // Meta's errors on the message, as sent (only when there are some)
+  errors?: ProviderError[];
 };
+
+// Fits the log's 500-character column
+const PROVIDER_ERROR_MAX = 500;
+
+// One of Meta's errors in words: "title: details" (or whichever is there); undefined when it has neither
+export function describeProviderError(err: ProviderError | null | undefined): string | undefined {
+  const title = typeof err?.title === 'string' ? err.title.trim() : '';
+  const details = typeof err?.error_data?.details === 'string' ? err.error_data.details.trim() : '';
+  if (!title && !details) return undefined;
+  return fitText(title && details ? `${title}: ${details}` : title || details, PROVIDER_ERROR_MAX);
+}
 
 // Optional chaining throughout: Meta's webhook normally matches `msg.type` exactly, but a malformed or
 // unexpected payload (a Meta API quirk, a future message shape) must degrade to a placeholder like the
@@ -55,6 +72,14 @@ export function describe(msg: any): { type: string; body: string; media?: Incomi
         type: 'interactive',
         body: msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? '[interactive]',
       };
+    case 'location': {
+      // A pin the customer sent: its coordinates, and the place's name/address when they picked one
+      const place = placeFromWebhook(msg.location);
+      return { type: 'location', body: place ? locationBody(place) : '[location]' };
+    }
+    case 'unsupported':
+      // Live location isn't available to businesses on WhatsApp's API: it arrives as an unsupported "location"
+      return msg.unsupported?.type === 'location' ? { type: 'location', body: '[live location]' } : { type: 'unsupported', body: '[unsupported]' };
     default:
       // location, contacts, reaction...: a placeholder
       return { type: msg.type, body: `[${msg.type}]` };
@@ -83,6 +108,7 @@ export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
     ...(username ? { username } : {}),
     ...(replyToWaId ? { replyToWaId } : {}),
     ...(msg?.timestamp !== undefined ? { sentAt: inboundSentAt(msg.timestamp) } : {}),
+    ...(Array.isArray(msg?.errors) && msg.errors.length ? { errors: msg.errors } : {}),
   };
 }
 
@@ -122,6 +148,18 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
         ? { waMediaId: m.media.id, mediaMime: m.media.mime ? cleanMime(m.media.mime) : null, mediaName: cleanIncomingName(m.media.filename) }
         : {}),
     },
+  });
+  // Logged without the customer's number or text; with Meta's error when it couldn't deliver the message normally
+  const providerErrorCode = m.errors?.[0]?.code;
+  const providerErrorMessage = describeProviderError(m.errors?.[0]);
+  void logEvent({
+    level: providerErrorCode !== undefined || providerErrorMessage ? 'WARNING' : 'SUCCESS',
+    category: 'message',
+    event: 'message.received',
+    message: `Received a message (${m.type})${providerErrorMessage ? `. WhatsApp: ${providerErrorMessage}` : ''}`,
+    workspaceId,
+    errorCode: providerErrorCode ?? null,
+    data: { conversationId: conversation.id, messageId: message.id, waMessageId: m.waMessageId ?? null, type: m.type, providerErrorCode: providerErrorCode ?? null, providerErrorMessage: providerErrorMessage ?? null },
   });
   // Fetch the file in the background (the webhook answers Meta right away); retried when someone opens it
   if (m.media) void fetchIncomingMedia(workspaceId, message.id).catch((err) => console.error('[media] download failed', message.id, (err as Error).message));

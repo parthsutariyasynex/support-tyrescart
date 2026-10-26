@@ -10,6 +10,7 @@ import * as auth from './auth.js';
 import * as contacts from './contacts.js';
 import * as inbox from './inbox.js';
 import * as labels from './labels.js';
+import * as location from './location.js';
 import * as members from './members.js';
 import * as quickReplies from './quickReplies.js';
 import * as permissions from './permissions.js';
@@ -21,7 +22,7 @@ import type { Context } from './shared.js';
 
 type ServerContext = { req: Request; res: Response };
 
-const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations];
+const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations, location];
 
 export const yoga = createYoga<ServerContext, Context>({
   schema: createSchema<ServerContext & Context>({

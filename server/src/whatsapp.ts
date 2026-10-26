@@ -137,6 +137,18 @@ export function sendAudio(account: Account, to: string, mediaId: string, replyTo
   return graphPost(account, { to, type: 'audio', audio: { id: mediaId }, ...context(replyTo) });
 }
 
+// A location pin (Meta's "location" type): coordinates, with the place's name and address when known; free-form,
+// so within 24 hours like text
+export function sendLocation(
+  account: Account,
+  to: string,
+  place: { latitude: number; longitude: number; name?: string | null; address?: string | null },
+  replyTo?: string | null,
+) {
+  const location = { latitude: place.latitude, longitude: place.longitude, ...(place.name ? { name: place.name } : {}), ...(place.address ? { address: place.address } : {}) };
+  return graphPost(account, { to, type: 'location', location, ...context(replyTo) });
+}
+
 // Approved template: allowed any time (this is what broadcasts use)
 export function sendTemplate(account: Account, to: string, name: string, language = 'en') {
   return graphPost(account, { to, type: 'template', template: { name, language: { code: language } } });

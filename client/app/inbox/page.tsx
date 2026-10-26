@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { type Socket, io } from 'socket.io-client';
@@ -52,6 +53,10 @@ import { AppShell, OPEN_CHAT_EVENT } from '../AppShell';
 import { pinText, showToast } from '@/lib/toasts';
 import { CONTACT_LISTS_EVENT, CONTACT_REMARKS_EVENT, CONTACT_UPDATED_EVENT, ContactPanel } from './ContactPanel';
 import { EmojiPicker, FileSendDialog } from './composerExtras';
+import { FormatToolbar } from './FormatToolbar';
+import { ComposerHighlight } from './ComposerHighlight';
+import { resumeMyLiveLocations, setLive, startWatching, stopSharing, useMyActiveLives } from '@/lib/liveSharing';
+import type { LiveLocation } from '@/lib/location';
 import { VoiceRecorder } from './voice';
 import { StageFilterBar, StageMenu, StagePill } from './StageMenu';
 import { TemplateComposer, TemplatePicker } from './templates';
@@ -69,6 +74,7 @@ import { type StatusFilter, StatusMenu } from './StatusMenu';
 import { QuickReplyMenu, useQuickReplies } from './quickReplies';
 import { type QuickReply, slashQuery } from '@/lib/quickReplies';
 import { enterAction, fitHeight } from '@/lib/composer';
+import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInline, toggleLines } from '@/lib/formatting';
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
@@ -106,6 +112,9 @@ import {
   messageActions,
 } from './messages';
 import { ForwardDialog } from './ForwardDialog';
+
+// The Location screen (📎 → Location): its map library loads only when it's opened
+const LocationDialog = dynamic(() => import('./LocationDialog').then((m) => m.LocationDialog), { ssr: false });
 
 const byLatest = (a: Conversation, b: Conversation) =>
   b.lastMessageAt.localeCompare(a.lastMessageAt) || b.id.localeCompare(a.id);
@@ -902,6 +911,10 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('conversation:cleared', ({ conversationId, userId }: { conversationId: string; userId: string }) => {
       if (userId === permissionsRef.current?.userId) onCleared(conversationId);
     });
+    // A live location started, moved, stopped or ended: its card and the "you're sharing" bar follow
+    socket.on('live:changed', (live: LiveLocation) => setLive(live));
+    // Live locations you were sharing before a reload carry on from this tab
+    void resumeMyLiveLocations();
     socket.on('message:status', (updated: Message) =>
       setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m))),
     );
@@ -1760,6 +1773,22 @@ function ChatPanel({
   // Emoji picker and image sending
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null); // the image or document about to be sent
+  const [attachOpen, setAttachOpen] = useState(false); // 📎 menu: Photo or document / Location
+  const [locationOpen, setLocationOpen] = useState(false);
+  const attachRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!attachOpen) return;
+    const onDown = (e: MouseEvent) => attachRef.current && !attachRef.current.contains(e.target as Node) && setAttachOpen(false);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setAttachOpen(false);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [attachOpen]);
+  // Your live locations in this chat (the bar above the message box, with Stop sharing)
+  const myLives = useMyActiveLives(viewer?.userId).filter((l) => l.conversationId === conversation.id);
   const [template, setTemplate] = useState<Template | null>(null); // the template about to be sent (values to fill in)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -1903,6 +1932,9 @@ function ChatPanel({
     if (mode === 'note' && members === null) fetchWorkspaceMembers().then(setMembers, () => setMembers([]));
   }, [mode, members]);
   const [caret, setCaret] = useState(0);
+  // WhatsApp formatting: shown as you type (*bold*…); the small format bar appears while text in the box is selected
+  const highlightRef = useRef<HTMLDivElement>(null);
+  const [selecting, setSelecting] = useState(false);
   const [mentionClosed, setMentionClosed] = useState(false); // Esc: hidden until the text changes
   const mention = noting && !mentionClosed ? mentionAt(text, caret) : null;
   const mentionItems = useMemo(
@@ -1949,6 +1981,8 @@ function ChatPanel({
   // The message box grows with multi-line text (up to ~8 lines, then scrolls)
   useEffect(() => {
     if (inputRef.current) fitHeight(inputRef.current, 160);
+    // The formatted text under the box scrolls with it
+    if (inputRef.current && highlightRef.current) highlightRef.current.scrollTop = inputRef.current.scrollTop;
   }, [text]);
   function insertQuickReply(reply: QuickReply) {
     const next = reply.description ?? '';
@@ -2010,6 +2044,42 @@ function ChatPanel({
       setError((err as Error).message);
     }
   }
+
+  // A formatting change (toolbar or Ctrl/⌘+B, I, Shift+X, Shift+M), made as typing so Ctrl/⌘+Z undoes it: only the
+  // part that changed is replaced, then the new selection is set. Falls back to setting the text directly.
+  function applyFormat(next: Edit) {
+    const el = inputRef.current;
+    if (!el) return;
+    const old = el.value;
+    let a = 0;
+    while (a < old.length && a < next.text.length && old[a] === next.text[a]) a++;
+    let b = 0;
+    while (b < old.length - a && b < next.text.length - a && old[old.length - 1 - b] === next.text[next.text.length - 1 - b]) b++;
+    const insert = next.text.slice(a, next.text.length - b);
+    el.focus();
+    el.setSelectionRange(a, old.length - b);
+    let done = false;
+    try {
+      done = insert ? document.execCommand('insertText', false, insert) : a < old.length - b ? document.execCommand('delete') : true;
+    } catch {
+      done = false;
+    }
+    if (!done || el.value !== next.text) setText(next.text);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(next.start, next.end);
+      setCaret(next.start);
+      setSelecting(next.start !== next.end);
+    });
+  }
+  const formatInline = (style: InlineStyle) => {
+    const el = inputRef.current;
+    if (el) applyFormat(toggleInline(el.value, el.selectionStart, el.selectionEnd, style));
+  };
+  const formatLines = (style: LineStyle) => {
+    const el = inputRef.current;
+    if (el) applyFormat(toggleLines(el.value, el.selectionStart, el.selectionEnd, style));
+  };
 
   // Emoji goes in at the cursor (or replaces the selection); the picker stays open for more
   function insertEmoji(emoji: string) {
@@ -2649,6 +2719,7 @@ function ChatPanel({
                 highlighted={menu?.message.id === m.id || editing?.id === m.id || replyTo?.id === m.id || flashId === m.id}
                 onOpenMenu={(anchor) => setMenu({ message: m, anchor })}
                 onJumpTo={jumpTo}
+                viewer={viewer}
                 highlightTerm={searchOpen ? searchText : ''}
                 currentMatch={searchOpen && m.id === currentMatchId}
                 onReact={canReact && !m.deletedAt && m.status !== 'failed' && m.status !== 'pending' ? (emoji) => react(m, emoji) : undefined}
@@ -2778,6 +2849,22 @@ function ChatPanel({
           <VoiceRecorder onSend={sendVoiceNote} onClose={() => setVoiceMode(false)} />
         ) : (
         <>
+        {/* Your live location in this chat: until when, and Stop sharing */}
+        {myLives.map((l) => (
+          <div key={l.messageId} className="mb-2 flex items-center gap-2 rounded-lg border border-success/30 bg-success-soft px-3 py-1.5 text-xs text-ink" role="status">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#22c55e]" aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate">
+              You&apos;re sharing your live location until {formatTime(l.until)}. Keep this app open so it keeps updating.
+            </span>
+            <button
+              type="button"
+              onClick={() => stopSharing(l.messageId).catch((err) => setError((err as Error).message))}
+              className="shrink-0 rounded-md bg-danger px-2.5 py-1 font-semibold text-white hover:opacity-90"
+            >
+              Stop sharing
+            </button>
+          </div>
+        ))}
         {/* Reply / Add note, Template, and the number replies go out from */}
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
           <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
@@ -2869,6 +2956,8 @@ function ChatPanel({
             <TemplatePicker variant="primary" disabled={false} highlight onPick={setTemplate} />
           </div>
         ) : (
+        <>
+        {selecting && <FormatToolbar onInline={formatInline} onLines={formatLines} />}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -2946,25 +3035,75 @@ function ChatPanel({
             </>
           )}
           {!noting && (
+          <div className="relative" ref={attachRef}>
+          {/* 📎: a photo or document (or drag a file onto the chat), or a location */}
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setAttachOpen((o) => !o)}
             disabled={!!editing}
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-faint hover:bg-surface-strong hover:text-body-soft transition disabled:opacity-40"
-            title="Send an image or document (or drag a file onto the chat)"
-            aria-label="Send an image or document"
+            aria-haspopup="menu"
+            aria-expanded={attachOpen}
+            className={`flex h-9 w-9 items-center justify-center rounded-xl transition hover:bg-surface-strong disabled:opacity-40 ${attachOpen ? 'text-primary' : 'text-faint hover:text-body-soft'}`}
+            title="Attach: photo, document or location"
+            aria-label="Attach"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           </button>
+          {attachOpen && (
+            <div role="menu" aria-label="Attach" className="absolute bottom-11 left-0 z-30 w-52 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-lg">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAttachOpen(false);
+                  fileInputRef.current?.click();
+                }}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] text-ink hover:bg-surface-muted"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#7c4dff] text-white" aria-hidden="true">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /></svg>
+                </span>
+                Photo or document
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAttachOpen(false);
+                  setError('');
+                  setLocationOpen(true);
+                }}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] text-ink hover:bg-surface-muted"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#22a06b] text-white" aria-hidden="true">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z" /></svg>
+                </span>
+                Location
+              </button>
+            </div>
+          )}
+          </div>
           )}
 
-          {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks) */}
+          {/* Main Message Input: Enter sends, Shift+Enter adds a line (quick replies keep their line breaks).
+              Its text is drawn by ComposerHighlight underneath, formatted as you type (*bold*, _italic_…), like
+              WhatsApp; the box itself keeps the cursor, selection and placeholder. */}
+          <div
+            className={`relative min-w-0 flex-1 rounded-xl transition ${
+              noting ? 'bg-warning-soft' : 'bg-surface-muted/70 focus-within:bg-surface'
+            }`}
+          >
+          {/* Same box, font and spacing as the text box; no kerning in either, so slanted words keep their places */}
+          <ComposerHighlight ref={highlightRef} text={text} className="border border-transparent px-4 py-2.5 text-xs leading-relaxed text-ink [font-kerning:none] [font-variant-ligatures:none]" />
           <textarea
             ref={inputRef}
             rows={1}
             value={text}
+            onScroll={(e) => {
+              if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
+            }}
             onChange={(e) => {
               setText(e.target.value);
               setCaret(e.target.selectionStart);
@@ -2972,9 +3111,21 @@ function ChatPanel({
               setMentionClosed(false);
               typingSender.onInput(e.target.value);
             }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-            onBlur={typingSender.stop}
+            onSelect={(e) => {
+              setCaret(e.currentTarget.selectionStart);
+              setSelecting(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd);
+            }}
+            onBlur={() => {
+              typingSender.stop();
+              setSelecting(false);
+            }}
             onKeyDown={(e) => {
+              // WhatsApp Desktop shortcuts: Ctrl/⌘+B bold, +I italic, +Shift+X strikethrough, +Shift+M monospace
+              const style = shortcutStyle(e);
+              if (style) {
+                e.preventDefault();
+                return formatInline(style);
+              }
               if (mention) {
                 const count = mentionItems.length;
                 if (e.key === 'ArrowDown' && count) {
@@ -3029,12 +3180,13 @@ function ChatPanel({
             }}
             placeholder={editing ? 'Edit message' : noting ? 'Write an internal note for your team…' : 'Type a message, or / for quick replies'}
             aria-label={noting ? 'Internal note' : 'Message'}
-            className={`flex-1 resize-none rounded-xl border px-4 py-2.5 text-xs leading-relaxed text-ink placeholder:text-faint outline-hidden transition ${
+            className={`relative block w-full resize-none rounded-xl border bg-transparent px-4 py-2.5 text-xs leading-relaxed text-transparent caret-ink [font-kerning:none] [font-variant-ligatures:none] placeholder:text-faint outline-hidden transition selection:bg-primary/25 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
               noting
-                ? 'border-warning-border bg-warning-soft focus:border-warning focus:ring-1 focus:ring-warning'
-                : 'border-line bg-surface-muted/70 focus:border-primary focus:bg-surface focus:ring-1 focus:ring-primary'
+                ? 'border-warning-border focus:border-warning focus:ring-1 focus:ring-warning'
+                : 'border-line focus:border-primary focus:ring-1 focus:ring-primary'
             }`}
           />
+          </div>
 
           {/* Empty message box: microphone to record a voice note (like WhatsApp); otherwise Send */}
           {!text.trim() && !editing && !noting ? (
@@ -3067,10 +3219,29 @@ function ChatPanel({
           </button>
           )}
         </form>
+        </>
         )}
         </>
         ))}
         {imageFile && <FileSendDialog file={imageFile} onSend={sendImageWithCaption} onClose={() => setImageFile(null)} />}
+        {locationOpen && (
+          <LocationDialog
+            conversationId={conversation.id}
+            replyToId={replyTo?.id}
+            onClose={() => setLocationOpen(false)}
+            onSent={(m) => {
+              onSent(m);
+              setReplyTo(null);
+              setLocationOpen(false);
+            }}
+            onLiveStarted={(m, live) => {
+              onSent(m);
+              setLive(live);
+              startWatching(live, setError); // this tab sends your position until it ends or you stop
+              setLocationOpen(false);
+            }}
+          />
+        )}
       </footer>
 
       {menu && (

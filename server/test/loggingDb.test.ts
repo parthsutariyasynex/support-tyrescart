@@ -61,3 +61,41 @@ test('a failed database write prints the entry to the terminal, saves nothing an
   await logEvent({ level: 'SUCCESS', category: 'http', event: 'http.request', message: 'recovered', requestId });
   assert.equal(await prisma.logEntry.count({ where: { requestId, message: 'recovered' } }), 1);
 });
+
+test("an incoming message is logged as message.received, with Meta's error code and message when it has them", async () => {
+  const { saveIncoming, parseWebhookMessage } = await import('../src/messages.js');
+  const ws = await prisma.workspace.create({ data: { name: `test-logdb-received-${Date.now()}` } });
+  const captured: import('../src/services/logging.js').LogRecord[] = [];
+  setLogWriter(async (r) => void captured.push(r));
+  try {
+    const at = String(Math.floor(Date.now() / 1000));
+    await saveIncoming(ws.id, parseWebhookMessage({ from: '971500000777', id: `wamid.logdb-ok-${Date.now()}`, timestamp: at, type: 'text', text: { body: 'secret text' } }));
+    await saveIncoming(
+      ws.id,
+      parseWebhookMessage({
+        from: '971500000777',
+        id: `wamid.logdb-err-${Date.now()}`,
+        timestamp: at,
+        type: 'unsupported',
+        unsupported: { type: 'poll_creation' },
+        errors: [{ code: 131051, title: 'Message type unknown', error_data: { details: 'Message type is currently not supported.' } }],
+      }),
+    );
+    await new Promise((r) => setImmediate(r));
+    const received = captured.filter((r) => r.event === 'message.received' && r.workspaceId === ws.id);
+    assert.equal(received.length, 2);
+    const [ok, err] = received;
+    assert.deepEqual([ok.level, ok.errorCode, (ok.data as any).providerErrorCode, (ok.data as any).providerErrorMessage], ['SUCCESS', null, null, null]);
+    assert.deepEqual([err.level, err.errorCode, (err.data as any).providerErrorCode, (err.data as any).providerErrorMessage], [
+      'WARNING',
+      '131051',
+      131051,
+      'Message type unknown: Message type is currently not supported.',
+    ]);
+    assert.match(err.message, /WhatsApp: Message type unknown/);
+    assert.doesNotMatch(JSON.stringify(received), /secret text|971500000777/, "never the customer's text or number");
+  } finally {
+    setLogWriter();
+    await prisma.workspace.delete({ where: { id: ws.id } });
+  }
+});

@@ -41,4 +41,16 @@ export const env = {
   // The daily log files (logs/app-YYYY-MM-DD.log): their folder, and LOG_TO_FILE=false to not write them
   logDir: path.resolve(process.env.LOG_DIR || 'logs'),
   logToFile: process.env.LOG_TO_FILE !== 'false',
+  // Address search and "what's here" for the Location screen (services/geocoding.ts): an OpenStreetMap Nominatim
+  // server. Default: the free public one (1 request a second, no search-as-you-type; its usage policy applies).
+  // Set to your own or a hosted Nominatim, or "off" to turn search off.
+  geocoderUrl: (process.env.GEOCODER_URL || 'https://nominatim.openstreetmap.org').replace(/\/$/, ''),
+  // A contact email or URL sent with those requests (the public server asks every app to identify itself)
+  geocoderContact: process.env.GEOCODER_CONTACT || '',
+  // The address customers use to open the web app: links in messages (live location pages) start with it
+  publicAppUrl: (process.env.PUBLIC_APP_URL || process.env.WEB_ORIGIN || 'http://localhost:4000').replace(/\/$/, ''),
+  // Map pictures on the public live location page: a {z}/{x}/{y} tile server (default: OpenStreetMap's, which needs
+  // the attribution shown and allows light use only)
+  mapTileUrl: process.env.MAP_TILE_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  mapAttribution: process.env.MAP_ATTRIBUTION || '© OpenStreetMap contributors',
 };

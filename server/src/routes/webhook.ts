@@ -37,6 +37,11 @@ export function signatureFailureReason(rawBody: Buffer | undefined, header: stri
 if (env.isProd && !env.metaAppSecret)
   console.error('[Webhook] META_APP_SECRET is not set: every webhook will be rejected until it is');
 
+// Calls events (WhatsApp Business Calling) in a webhook change: how many (anything but an array counts as none)
+export function callsCount(value: any): number {
+  return Array.isArray(value?.calls) ? value.calls.length : 0;
+}
+
 // Incoming messages + delivery/read statuses
 webhookRouter.post('/', async (req, res) => {
   // Logs never include customer numbers, names or message text: only ids, types and statuses
@@ -73,6 +78,9 @@ webhookRouter.post('/', async (req, res) => {
         const value = change.value;
         const phoneNumberId = value?.metadata?.phone_number_id;
         console.log('[Webhook] Event change:', { field: change.field, phoneNumberId, messagesCount: value?.messages?.length, statusesCount: value?.statuses?.length });
+        // Only how many: never the call payload (caller id, call metadata)
+        const calls = callsCount(value);
+        if (calls > 0) console.log('[Webhook] Calls event:', { count: calls });
         if (!phoneNumberId) continue;
         const account = await prisma.whatsAppAccount.findUnique({ where: { phoneNumberId } });
         if (!account) {
@@ -83,7 +91,7 @@ webhookRouter.post('/', async (req, res) => {
         workspaceIds.add(account.workspaceId);
 
         for (const msg of value.messages ?? []) {
-          console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type });
+          console.log('[Webhook] Incoming message:', { id: msg?.id, type: msg?.type, ...(msg?.errors ? { errors: msg.errors } : {}) });
           counts.messages++;
           try {
             // A reaction belongs to the message it's on (not a new message in the chat)

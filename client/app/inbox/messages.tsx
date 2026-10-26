@@ -1,13 +1,13 @@
 'use client';
 
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type Message, type QuotedMessage, QUICK_REACTIONS } from '@/lib/inbox';
 import { forwardKind } from '@/lib/forward';
-import { linkSegments } from '@/lib/links';
-import { highlightSegments } from '@/lib/messageSearch';
 import { formatDateTime, formatTime } from '@/lib/time';
 import { ChatImage, ChatPlayer, DocumentCard, EmojiPicker } from './composerExtras';
+import { FormattedText } from './FormattedText';
+import { LocationCard } from './LocationCard';
 import { VoicePlayer } from './voice';
 import { isMediaPlaceholder, quotePreview } from '@/lib/media';
 
@@ -86,9 +86,12 @@ export function MessageBubble({
   currentMatch = false,
   onReact,
   onJumpTo,
+  viewer = null,
 }: {
   message: Message;
   actions: MessageAction[];
+  // Who is looking (a live location's "Stop sharing" is for the person sharing, or an admin)
+  viewer?: { userId: string; isAdmin: boolean } | null;
   // A reply: go to the message it quotes
   onJumpTo?: (messageId: string) => void;
   highlighted: boolean;
@@ -189,38 +192,15 @@ export function MessageBubble({
               <DocumentCard messageId={m.id} name={m.mediaName || 'Document'} mime={m.mediaMime} size={m.mediaSize} />
             </div>
           )}
-          {(m.mediaMime ? m.body && !isMediaPlaceholder(m.body) : true) && (
-          <p className="whitespace-pre-wrap break-words pr-3 text-[13px] leading-relaxed">
-            {/* Web addresses are links that open in a new tab; "Search in conversation" marks matches inside them too */}
-            {linkSegments(m.body).map((part, p) => {
-              const inner = highlightTerm
-                ? highlightSegments(part.text, highlightTerm).map((seg, i) =>
-                    seg.match ? (
-                      <mark key={i} className="rounded-sm bg-warning-soft px-0.5 text-ink">
-                        {seg.text}
-                      </mark>
-                    ) : (
-                      <Fragment key={i}>{seg.text}</Fragment>
-                    ),
-                  )
-                : part.text;
-              return part.href ? (
-                <a
-                  key={p}
-                  href={part.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={part.href}
-                  onClick={(e) => e.stopPropagation()}
-                  className="break-all text-link underline decoration-1 underline-offset-2 hover:opacity-80"
-                >
-                  {inner}
-                </a>
-              ) : (
-                <Fragment key={p}>{inner}</Fragment>
-              );
-            })}
-          </p>
+          {/* A location (pin or live): a map preview that opens the exact point in Google Maps / Apple Maps */}
+          {(m.type === 'location' || m.type === 'live_location') && (
+            <div className="mb-0.5 mt-0.5 pr-1">
+              <LocationCard m={m} viewer={viewer} />
+            </div>
+          )}
+          {m.type !== 'location' && m.type !== 'live_location' && (m.mediaMime ? m.body && !isMediaPlaceholder(m.body) : true) && (
+          // WhatsApp formatting shown (bold, italic, lists…); links open in a new tab, search matches stay marked
+          <FormattedText text={m.body} highlightTerm={highlightTerm} className="pr-3 text-[13px] leading-relaxed" />
           )}
           </>
         )}

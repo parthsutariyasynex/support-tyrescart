@@ -27,12 +27,51 @@ Every notable change to **TyresCart Support Chat** (web client and API server), 
 
 ## [Unreleased]
 
-Status: **not yet deployed to production**. Backend only; the app's screens are unchanged.
+Status: **not yet deployed to production**. The logging below is committed (`1cb532e`); everything else here is not
+committed yet.
 
-Centralized backend logging: what happens on the server (sign-ins, refusals, WhatsApp/Meta calls, webhooks, message
-sends and deliveries, errors) is now recorded in one place, so a problem can be traced afterwards.
+- **WhatsApp text formatting**: \*bold\*, \_italic\_, \~strikethrough\~, monospace, code, lists and quotes, shown in
+  messages and notes, and in the message box while you type, like WhatsApp.
+- **Location**: send your location or any place (map, search), shown as a map in the chat that opens in Google Maps or
+  Apple Maps; plus **live location** for 15 minutes, 1 hour or 8 hours.
+- **Centralized backend logging**: what happens on the server (sign-ins, refusals, WhatsApp/Meta calls, webhooks,
+  message sends and deliveries, errors) is recorded in one place, so a problem can be traced afterwards.
 
 ### Added
+- **WhatsApp formatting in the chat**: messages (sent, received, history, arriving live) and internal notes show
+  WhatsApp's formatting: `*bold*`, `_italic_`, `~strikethrough~`, ```` ```monospace``` ```` (may span lines),
+  `` `inline code` ``, `- ` / `* ` bulleted lists, `1. ` numbered lists (numbers kept as typed), `> ` quotes, and
+  combinations such as `*_bold italic_*`. The rules are WhatsApp's: markers must touch the text and sit at word edges,
+  so `2*3*4`, `snake_case` and web addresses (`https://x.ae/a_b_c`) stay as typed. Links still open in a new tab;
+  "Search in conversation" still marks matches; @mentions in notes stay highlighted.
+- **Formatting while typing**: the message box (Reply and Add note) shows the formatting as you type, like WhatsApp:
+  close `*abcd*` and it turns bold, with the `*` shown faded. The text is sent exactly as typed, so the customer's
+  WhatsApp formats it the same way.
+- **Format bar on selection**: selecting text in the message box shows a small bar (bold, italic, strikethrough,
+  monospace, code, bulleted list, numbered list, quote) that wraps the selection or the lines it touches, or takes the
+  formatting off again. Shortcuts as in WhatsApp Desktop: Ctrl/⌘+B bold, Ctrl/⌘+I italic, Ctrl/⌘+Shift+X
+  strikethrough, Ctrl/⌘+Shift+M monospace. Ctrl/⌘+Z undoes formatting like typing.
+- **Location** (📎 → Location): a map that opens on where you are (the browser asks for permission the first time),
+  with a pin you drag or move by tapping the map.
+  - **Send your current location** (with its address) or **Send this location** (the pinned place, with its name and
+    address).
+  - **Search** for a place or address (press Enter or Search).
+  - Sent with WhatsApp's own location message, so the customer sees a normal WhatsApp location pin. Inside the 24-hour
+    window only, like any message that isn't a template.
+  - Location blocked, unavailable or not on https: a clear message says what to do; the map and search still work.
+- **Locations in the chat**: sent and received locations show as a map with the pin, the place's name and address,
+  and **Google Maps** / **Apple Maps** buttons. Clicking the map opens the exact point in Apple Maps on Apple devices,
+  Google Maps elsewhere. Chat list and reply quotes read "📍 Place name".
+- **Live location** (15 minutes, 1 hour or 8 hours): WhatsApp's Business API can't send a live location, so the
+  customer gets a message with a private link to a map page that follows the teammate's position in real time and
+  links to Google/Apple Maps. A "You're sharing your live location until …" bar has **Stop sharing**; the card in the
+  chat shows live or ended. The sharer or an admin can stop it; the link stops working once it ends.
+- **Customer's live location**: WhatsApp doesn't pass it on to businesses; the chat now says so and suggests asking
+  for their current location instead.
+- **Webhook: calls and Meta's errors**: a Calls event (WhatsApp Business Calling) is logged as a count only (never who
+  called or the call details). Incoming messages log Meta's errors when it sends some (e.g. 131051 for a message type
+  it doesn't support): a `message.received` log entry per incoming message, WARNING with the provider's code and
+  explanation (`providerErrorCode`, `providerErrorMessage`, at most 500 characters), SUCCESS otherwise.
 - **Backend log** (`LogEntry` table): one entry per notable event, as SUCCESS, WARNING or ERROR, with the time, the
   event name, the workspace and person involved, the error code and how long it took. Covers:
   - sign-ins (successful, wrong password, unknown email, deactivated account, too many attempts);
@@ -52,6 +91,12 @@ sends and deliveries, errors) is now recorded in one place, so a problem can be 
   it. `npm run logs:retention` runs the same check by hand (add `-- --delete` to remove).
 - `GraphApiError`: a refusal from Meta keeps its numeric code, subcode and trace id (same message as before).
 
+### Changed
+- The 📎 button opens a small menu: **Photo or document** (as before) and **Location**. Dropping a file on the chat
+  works as before.
+- The message box no longer uses kerning (spacing tweaks between letter pairs, barely visible), so the formatted
+  text drawn in it lines up exactly with the cursor.
+
 ### Fixed
 - Auto-reply: when the chat or its workspace was deleted while WhatsApp was still answering, the reply's message was
   already gone and updating it failed with "No record was found for an update" ("auto-reply failed"). It now finishes
@@ -62,9 +107,28 @@ sends and deliveries, errors) is now recorded in one place, so a problem can be 
   values are sanitized (redacted and shortened) before they are saved or written. Logging can't break or slow down
   the app: if the database or the folder can't be written, the entry goes to the terminal instead.
 - `server/logs/` is git-ignored.
+- Formatting is shown as text, never as HTML, so nothing a customer writes can inject markup. Only `http(s)` and
+  `www.` addresses become links (`javascript:` and the like stay text); links open in a new tab with
+  `rel="noopener noreferrer"`.
+- The live location page (`/live/<token>`) needs no sign-in: its random token is the key. It shows only the shared
+  position and the sharer's name (never the chat, the customer or anything else of the workspace), only while
+  sharing. It has a strict Content-Security-Policy (no outside scripts), isn't cached or indexed, and the map tiles'
+  server never sees the token. Positions are accepted only from the person sharing.
+- Place search goes through the server, which keeps OpenStreetMap's usage rules for the whole app: at most 1 request
+  a second, results cached, requests identified, searches only when asked (no search-as-you-type).
+
+### Known limits
+- Live location keeps updating only while the sharer has the app open (a browser gives no position to a closed tab),
+  and a server restart ends every live location (they are kept in memory; the messages stay).
+- Live locations are held by one API process: run the API as a single process (not PM2 cluster mode), or the link may
+  reach a process that doesn't know it.
+- Map pictures and place search use OpenStreetMap's free servers, meant for light use with no guarantee; they can be
+  switched to another provider in `.env` without code changes.
 
 ### Database
 - New table `LogEntry` (no links to other tables; indexes on time, workspace + time, level + time and request id).
+- Formatting, Location and the webhook logging need no database changes: a location is a message of type `location`
+  (live: `live_location`) whose text ends with a Google Maps link holding the exact coordinates.
 
 ### Deploy notes
 - Back up the production database, then create the table with the saved SQL
@@ -72,6 +136,14 @@ sends and deliveries, errors) is now recorded in one place, so a problem can be 
   the target.
 - Optional `.env`: `LOG_DIR` (e.g. `/var/log/support-tyrescart`), `LOG_TO_FILE`, `LOG_RETENTION_DAYS`,
   `LOG_RETENTION_MODE` (leave dry-run until you have reviewed `npm run logs:retention`).
+- Run `npm install` from the project root: the client has a new package, `leaflet` 1.9.4 (the map on the Location
+  screen).
+- Server `.env`: set `PUBLIC_APP_URL` to the app's **https** address (live location links start with it; browsers
+  share a location only over https) and `GEOCODER_CONTACT` to a contact email (OpenStreetMap asks apps to identify
+  themselves). Optional: `GEOCODER_URL` (another Nominatim server, or `off` to hide search), `MAP_TILE_URL` /
+  `MAP_ATTRIBUTION` (the live page's map). Client: `NEXT_PUBLIC_MAP_TILE_URL` / `NEXT_PUBLIC_MAP_ATTRIBUTION`.
+- Deploy the client too: `next.config.ts` sends `/live/*` to the API (the customer's live location page).
+- Keep the API to one process while live location is used (see Known limits).
 
 ---
 

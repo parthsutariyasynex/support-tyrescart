@@ -1,6 +1,7 @@
 import { API_URL, getToken } from './api';
 import type { Message } from './inbox';
 import { clockKey, dayKey } from './time';
+import { locationPreview } from './location';
 
 // Sending images (JPEG/PNG up to 5 MB) and documents (PDF, Word, Excel, PowerPoint, text up to 100 MB) from the
 // chat: WhatsApp's limits. The server checks every file again, from the file itself.
@@ -110,7 +111,7 @@ export async function downloadFile(messageId: string, name: string) {
 // "[image]", "[video]"…: the text WhatsApp media arrives with when there's no caption (not shown under the file)
 export const isMediaPlaceholder = (body: string) => /^\[(image|video|audio|document|sticker)\]$/.test(body.trim());
 
-// Chat list preview for a file message: "📷 caption" / "📷 Photo", "🎥 Video", "🎤 Voice message"…
+// Chat list preview for a file (or location) message: "📷 caption" / "📷 Photo", "🎥 Video", "🎤 Voice message"…
 export function filePreview(m: { type: string; body: string; mediaName?: string | null }) {
   const text = m.body && !isMediaPlaceholder(m.body) ? m.body : '';
   switch (m.type) {
@@ -126,6 +127,9 @@ export function filePreview(m: { type: string; body: string; mediaName?: string 
       return '🎵 Audio';
     case 'document':
       return `📄 ${m.mediaName || text || 'Document'}`;
+    case 'location':
+    case 'live_location':
+      return locationPreview(m);
     default:
       return null;
   }

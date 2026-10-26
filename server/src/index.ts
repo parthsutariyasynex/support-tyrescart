@@ -11,10 +11,12 @@ import { templatesRouter } from './routes/templates.js';
 import { reportsRouter } from './routes/reports.js';
 import { settingsRouter } from './routes/settings.js';
 import { webhookRouter } from './routes/webhook.js';
+import { liveRouter } from './routes/live.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
 import { startSnoozeWaker } from './services/conversationStatus.js';
 import { startDeletedContactsPurge } from './services/deletedContacts.js';
 import { startLogRetention } from './services/logRetention.js';
+import { startLiveLocationSweeper } from './services/liveLocation.js';
 import { AppError } from './services/errors.js';
 import { logEvent, outcomeForStatus, requestIdFrom, runWithRequest } from './services/logging.js';
 
@@ -65,6 +67,8 @@ app.use('/me', meRouter);
 app.use('/templates', templatesRouter);
 app.use('/settings', settingsRouter);
 app.use('/reports', reportsRouter);
+// Live location links the customer opens (public; the token in the link is the key)
+app.use('/live', liveRouter);
 
 // Always answer with JSON, never Express's HTML error page (it leaks stack traces)
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
@@ -93,10 +97,12 @@ const stopReminders = startAssignmentReminders();
 const stopSnoozeWaker = startSnoozeWaker();
 const stopPurge = startDeletedContactsPurge();
 const stopLogRetention = startLogRetention();
+const stopLiveSweeper = startLiveLocationSweeper();
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
     stopReminders();
     stopSnoozeWaker();
     stopPurge();
     stopLogRetention();
+    stopLiveSweeper();
   });
