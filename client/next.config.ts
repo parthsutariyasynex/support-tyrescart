@@ -61,6 +61,10 @@ const nextConfig: NextConfig = {
         destination: `${API}/inbox/conversations/:id/images`,
       },
       {
+        source: '/inbox/conversations/:id/videos',
+        destination: `${API}/inbox/conversations/:id/videos`,
+      },
+      {
         source: '/inbox/conversations/:id/documents',
         destination: `${API}/inbox/conversations/:id/documents`,
       },

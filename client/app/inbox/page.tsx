@@ -63,7 +63,7 @@ import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
+import { ACCEPT, CHAT_ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
 import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
@@ -1764,7 +1764,7 @@ function ChatPanel({
   // Emoji picker and image sending
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null); // the image or document about to be sent
-  const [attachOpen, setAttachOpen] = useState(false); // 📎 menu: Photo or document / Location
+  const [attachOpen, setAttachOpen] = useState(false); // 📎 menu: Photo, video or document / Location
   const [locationOpen, setLocationOpen] = useState(false);
   const attachRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -2108,7 +2108,7 @@ function ChatPanel({
   function pickFile(f: File | undefined, many = false) {
     if (!f) return;
     if (windowClosed) return setError('24-hour window closed: only approved templates can be sent until the customer writes again.');
-    const r = checkFile(f);
+    const r = checkFile(f, { video: true });
     if ('problem' in r) return setError(r.problem);
     setError(many ? 'One file at a time: sending the first one.' : '');
     setImageFile(f);
@@ -2411,7 +2411,7 @@ function ChatPanel({
   return (
     <section
       className="relative z-10 flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-chat-bg"
-      // Drag a photo or document onto the chat to send it (same checks and preview as the paperclip)
+      // Drag a photo, video or document onto the chat to send it (same checks and preview as the paperclip)
       onDragEnter={(e) => {
         if (!e.dataTransfer.types.includes('Files')) return;
         e.preventDefault();
@@ -2984,11 +2984,11 @@ function ChatPanel({
           </button>
           </div>
 
-          {/* Attach an image (JPEG/PNG up to 5 MB): preview + caption, then send */}
+          {/* Attach a photo, video or document: preview + caption, then send */}
           <input
             ref={fileInputRef}
             type="file"
-            accept={ACCEPT}
+            accept={CHAT_ACCEPT}
             className="hidden"
             aria-label="Choose a file"
             onChange={(e) => {
@@ -3027,7 +3027,7 @@ function ChatPanel({
           )}
           {!noting && (
           <div className="relative" ref={attachRef}>
-          {/* 📎: a photo or document (or drag a file onto the chat), or a location */}
+          {/* 📎: a photo, video or document (or drag a file onto the chat), or a location */}
           <button
             type="button"
             onClick={() => setAttachOpen((o) => !o)}
@@ -3035,7 +3035,7 @@ function ChatPanel({
             aria-haspopup="menu"
             aria-expanded={attachOpen}
             className={`flex h-9 w-9 items-center justify-center rounded-xl transition hover:bg-surface-strong disabled:opacity-40 ${attachOpen ? 'text-primary' : 'text-faint hover:text-body-soft'}`}
-            title="Attach: photo, document or location"
+            title="Attach: photo, video, document or location"
             aria-label="Attach"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3056,7 +3056,7 @@ function ChatPanel({
                 <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#7c4dff] text-white" aria-hidden="true">
                   <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /></svg>
                 </span>
-                Photo or document
+                Photo, video or document
               </button>
               <button
                 type="button"

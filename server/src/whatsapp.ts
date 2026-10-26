@@ -83,7 +83,7 @@ export function sendReaction(account: Account, to: string, messageId: string, em
   return graphPost(account, { recipient_type: 'individual', to, type: 'reaction', reaction: { message_id: messageId, emoji } });
 }
 
-// Uploads an image or document to WhatsApp and returns its media id (used to send it right after)
+// Uploads an image, video or document to WhatsApp and returns its media id (used to send it right after)
 export function uploadMedia(account: Account, bytes: Buffer, mime: string, fileName: string) {
   return logged('upload_media', { mime, bytes: bytes.length }, () => uploadMediaOnce(account, bytes, mime, fileName));
 }
@@ -106,6 +106,11 @@ async function uploadMediaOnce(account: Account, bytes: Buffer, mime: string, fi
 // Image with an optional caption: free-form, so only within 24h of the customer's last message (like text)
 export function sendImage(account: Account, to: string, mediaId: string, caption?: string, replyTo?: string | null) {
   return graphPost(account, { to, type: 'image', image: { id: mediaId, ...(caption ? { caption } : {}) }, ...context(replyTo) });
+}
+
+// Video (MP4 or 3GP, up to 16 MB) with an optional caption: free-form, so within 24 hours (like images)
+export function sendVideo(account: Account, to: string, mediaId: string, caption?: string, replyTo?: string | null) {
+  return graphPost(account, { to, type: 'video', video: { id: mediaId, ...(caption ? { caption } : {}) }, ...context(replyTo) });
 }
 
 // Document (PDF, Office, text) with its file name and an optional caption: free-form, so within 24 hours

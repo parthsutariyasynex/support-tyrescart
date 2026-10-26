@@ -120,16 +120,18 @@ export function FileSendDialog({
 }) {
   const [url, setUrl] = useState('');
   const [caption, setCaption] = useState('');
-  const checked = checkFile(file);
-  const isImage = 'kind' in checked && checked.kind === 'image';
+  const checked = checkFile(file, { video: true });
+  const kind = 'kind' in checked ? checked.kind : 'document';
+  const isImage = kind === 'image';
+  const title = kind === 'image' ? 'Send image' : kind === 'video' ? 'Send video' : 'Send document';
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
-    if (!isImage) return;
+    if (kind === 'document') return;
     const u = URL.createObjectURL(file);
     setUrl(u);
     return () => URL.revokeObjectURL(u);
-  }, [file, isImage]);
+  }, [file, kind]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose();
     document.addEventListener('keydown', onKey);
@@ -152,9 +154,9 @@ export function FileSendDialog({
   if (typeof document === 'undefined') return null;
   return createPortal(
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-ink/50 p-4" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div role="dialog" aria-label={isImage ? 'Send image' : 'Send document'} className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-surface shadow-2xl">
+      <div role="dialog" aria-label={title} className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-surface shadow-2xl">
         <div className="flex items-center justify-between border-b border-line-soft px-5 py-3">
-          <h2 className="text-sm font-bold text-ink">{isImage ? 'Send image' : 'Send document'}</h2>
+          <h2 className="text-sm font-bold text-ink">{title}</h2>
           <span className="truncate pl-3 text-[11px] text-muted">
             {file.name} · {formatSize(file.size)}
           </span>
@@ -162,6 +164,8 @@ export function FileSendDialog({
         <div className="flex min-h-0 flex-1 items-center justify-center bg-surface-muted p-4">
           {isImage ? (
             url && <img src={url} alt="Image to send" className="max-h-[50vh] max-w-full rounded-lg object-contain shadow-xs" />
+          ) : kind === 'video' ? (
+            url && <video src={url} controls preload="metadata" className="max-h-[50vh] max-w-full rounded-lg bg-ink shadow-xs" aria-label="Video to send" />
           ) : (
             <div className="flex w-full max-w-sm items-center gap-3 rounded-xl bg-surface px-4 py-3.5 shadow-xs">
               <DocIcon label={documentLabel('type' in checked ? checked.type : file.type, file.name)} />
