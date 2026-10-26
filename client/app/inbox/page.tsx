@@ -269,20 +269,11 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   });
   // Tell the app shell which chat is on screen, so a desktop notification is skipped only for this one (every
   // other chat still alerts even while this page has focus); cleared when this page is left entirely.
-  // TEMPORARY: console.debug logging while verifying the real-message notification flow end to end - remove once
-  // confirmed working (matching logs in AppShell.tsx and inbox/notifications.tsx).
   useEffect(() => {
     setOpenConversationId(activeId);
     if (activeId) dismissChatPopups(activeId); // its new-message pop-up has been seen
-    console.debug('[notify-debug] openConversationId set to', activeId, 'on', pathname);
-  }, [activeId, pathname]);
-  useEffect(
-    () => () => {
-      console.debug('[notify-debug] inbox page unmounting, clearing openConversationId');
-      setOpenConversationId(null);
-    },
-    [],
-  );
+  }, [activeId]);
+  useEffect(() => () => setOpenConversationId(null), []);
 
   const [messages, setMessages] = useState<Message[]>(() => {
     const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
