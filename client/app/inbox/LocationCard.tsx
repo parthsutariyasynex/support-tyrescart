@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { Message } from '@/lib/inbox';
 import {
   TILE_ATTRIBUTION,
+  TILE_REFERRER_POLICY,
   fetchLiveLocation,
   isIncomingLiveLocation,
   liveLinkOf,
@@ -33,7 +34,7 @@ export function MapPreview({ latitude, longitude, live = false }: { latitude: nu
     <div className="relative overflow-hidden rounded-lg bg-surface-strong" style={{ width: W, height: H, maxWidth: '100%' }}>
       {tiles.map((t) => (
         // eslint-disable-next-line @next/next/no-img-element
-        <img key={t.url} src={t.url} alt="" draggable={false} loading="lazy" className="absolute max-w-none select-none" style={{ left: t.left, top: t.top, width: 256, height: 256 }} />
+        <img key={t.url} src={t.url} alt="" draggable={false} loading="lazy" referrerPolicy={TILE_REFERRER_POLICY} className="absolute max-w-none select-none" style={{ left: t.left, top: t.top, width: 256, height: 256 }} />
       ))}
       <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-full">
         {live ? <span className="block h-5 w-5 translate-y-1/2 rounded-full border-[3px] border-white bg-[#1a73e8] shadow" /> : pinIcon}

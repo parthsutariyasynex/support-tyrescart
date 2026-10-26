@@ -123,7 +123,7 @@ function page(nonce: string, config: string, validToken: boolean) {
       for (var ty = Math.floor(top / 256); ty <= Math.floor((top + h) / 256); ty++) {
         if (ty < 0 || ty >= n) continue;
         var img = document.createElement('img');
-        img.alt = ''; img.draggable = false;
+        img.alt = ''; img.draggable = false; img.referrerPolicy = 'strict-origin-when-cross-origin';
         img.src = cfg.tileUrl.replace('{z}', zoom).replace('{x}', ((tx % n) + n) % n).replace('{y}', ty);
         img.style.left = Math.round(tx * 256 - left) + 'px'; img.style.top = Math.round(ty * 256 - top) + 'px';
         tiles.appendChild(img);

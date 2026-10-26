@@ -64,6 +64,9 @@ export const prefersAppleMaps = (platform: string, userAgent: string) => /Mac|iP
 
 export const TILE_URL = process.env.NEXT_PUBLIC_MAP_TILE_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 export const TILE_ATTRIBUTION = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION || '© OpenStreetMap contributors';
+// Tile requests must carry a Referer: OpenStreetMap answers ones without it with an "Access blocked" tile, and the
+// site's proxy sends Referrer-Policy: same-origin (no Referer to other sites). This sends just our origin per tile.
+export const TILE_REFERRER_POLICY = 'strict-origin-when-cross-origin';
 const TILE = 256;
 
 // Web Mercator: a point's position in pixels on the whole world map at a zoom level

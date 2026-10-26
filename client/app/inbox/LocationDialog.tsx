@@ -11,6 +11,7 @@ import {
   type Place,
   TILE_ATTRIBUTION,
   TILE_URL,
+  TILE_REFERRER_POLICY,
   geolocationProblem,
   locationSearchEnabled,
   reversePlace,
@@ -79,7 +80,7 @@ export function LocationDialog({
       if (cancelled || !mapEl.current || map.current) return;
       const m = L.map(mapEl.current, { zoomControl: true, attributionControl: true, worldCopyJump: true }).setView([20, 0], 2);
       m.attributionControl.setPrefix(false);
-      L.tileLayer(TILE_URL, { maxZoom: 19, attribution: `<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">${TILE_ATTRIBUTION}</a>` }).addTo(m);
+      L.tileLayer(TILE_URL, { maxZoom: 19, referrerPolicy: TILE_REFERRER_POLICY, attribution: `<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">${TILE_ATTRIBUTION}</a>` }).addTo(m);
       const marker = L.marker([20, 0], {
         draggable: true,
         autoPan: true,
