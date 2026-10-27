@@ -47,8 +47,9 @@ export function settingsGroups(role: string | undefined): Group[] {
         { href: '/settings/labels', label: 'Labels' },
         { href: '/settings/contact-properties', label: 'Contact properties' },
         { href: '/settings/lifecycle', label: 'Customer lifecycle' },
-        // Restoring deleted contacts is for owners/admins (they delete them)
-        ...(admin ? [{ href: '/settings/deleted-contacts', label: 'Recently deleted contacts' }] : []),
+        // Hidden for now: deleting a contact is permanent (nothing to restore). The page (/settings/deleted-contacts)
+        // is kept; uncomment to show it again for owners/admins.
+        // ...(admin ? [{ href: '/settings/deleted-contacts', label: 'Recently deleted contacts' }] : []),
       ],
     },
   ];
