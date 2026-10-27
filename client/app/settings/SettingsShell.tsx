@@ -136,7 +136,7 @@ export function SettingsShell({ me, section, title, actions, children }: { me: M
                     type="button"
                     onClick={() => toggleGroup(g.key)}
                     aria-expanded={open}
-                    className="flex w-full items-center justify-between rounded-md px-2 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted hover:text-body"
+                    className="flex w-full items-center justify-between rounded-md px-2 py-2 text-[12px] font-bold uppercase tracking-wide text-ink hover:text-primary"
                   >
                     {g.title}
                     <svg className={`h-4 w-4 transition-transform ${open ? '' : 'rotate-180'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -146,13 +146,14 @@ export function SettingsShell({ me, section, title, actions, children }: { me: M
                   {open && (
                     <ul className="space-y-0.5 pb-1">
                       {g.items.map((it) => {
-                        const active = pathname === it.href;
+                        // A trailing slash still counts (the app doesn't redirect it away: skipTrailingSlashRedirect)
+                        const active = (pathname.replace(/\/+$/, '') || '/') === it.href;
                         return (
                           <li key={it.href}>
                             <Link
                               href={it.href}
                               aria-current={active ? 'page' : undefined}
-                              className={`block rounded-lg px-2 py-2 text-[13px] transition ${active ? 'bg-surface-muted font-semibold text-ink shadow-2xs' : 'text-body hover:bg-surface-muted'}`}
+                              className={`block rounded-lg border-l-[3px] px-2 py-2 text-[13px] transition ${active ? 'border-primary bg-primary-subtle font-bold text-primary shadow-2xs' : 'border-transparent text-body hover:bg-surface-muted'}`}
                             >
                               {it.label}
                             </Link>
