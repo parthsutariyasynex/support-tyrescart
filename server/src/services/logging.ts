@@ -303,6 +303,7 @@ export const EVENTS: Record<string, EventInfo> = {
   'push.device_registered': { action: 'Register a phone for push notifications', reason: 'The mobile app signed in (or its token changed) and asked for notifications' },
   'push.device_unregistered': { action: 'Remove a phone from push notifications', reason: 'The mobile app signed out, or phone notifications were turned off' },
   'push.sent': { action: 'Send push notifications through Firebase', reason: 'A customer message, an assignment or an @mention for people with the app on their phone' },
+  'push.send_failed': { action: 'Send one push notification through Firebase', reason: 'Firebase refused the notification for one phone (its code and a redacted message are logged)' },
   'push.failed': { action: 'Send push notifications through Firebase', reason: 'Looking up the phones or reaching Firebase failed' },
   'webhook.received': { action: "Process one of Meta's webhooks", reason: 'Meta called the webhook (messages, statuses, calls or other updates)' },
   'webhook.invalid_signature': { action: "Check a webhook's signature", reason: "A webhook's signature didn't match the app secret, so it was rejected" },

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { AuthPayload } from '../auth.js';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
-import { logEvent } from './logging.js';
+import { logEvent, redactText } from './logging.js';
 import { isSupervisorOrAbove } from './roles.js';
 import { parse } from './validate.js';
 
@@ -143,7 +143,45 @@ const GONE_CODES = new Set(['messaging/registration-token-not-registered', 'mess
 
 type SendResult = { r: 'ok' | 'gone' | 'failed'; code?: string };
 
-async function sendOne(send: Sender, token: string, n: PushNotice): Promise<SendResult> {
+export type SafeFcmError = { code: string; message: string; stack: string | null; stackOmitted: boolean };
+
+const REMOVED = '[REDACTED]';
+const MAX_MESSAGE = 500;
+const MAX_STACK = 2000;
+// Secrets that can turn up in an error's text, whoever's they are
+const SECRET_PATTERNS: [RegExp, string][] = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[private key]'],
+  [/\bya29\.[A-Za-z0-9._-]+/g, '[access token]'], // a Google OAuth access token
+  [/("?(?:access_token|id_token|refresh_token|private_key|token)"?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|[^\s,}&]+)/gi, `$1${REMOVED}`],
+  [/\b[A-Za-z0-9_-]{8,}:APA91[A-Za-z0-9_-]{20,}|\bAPA91[A-Za-z0-9_-]{20,}/g, '[device token]'], // FCM registration tokens
+  [/[A-Za-z0-9_:-]{100,}/g, REMOVED], // anything else long and opaque (a token in a form not known here)
+];
+
+/** A Firebase error as it is safe to log: its code, and its message with the device token, the notification's text
+ * (it can quote the customer), private keys and access tokens taken out. The stack only when it held none of these
+ * (otherwise left out entirely, as `stackOmitted`). Never the error object itself: it can carry the request. */
+export function safeFcmError(err: unknown, token: string, notice: { title?: string; body?: string }): SafeFcmError {
+  const e = (err ?? {}) as { code?: unknown; message?: unknown; stack?: unknown };
+  const code = typeof e.code === 'string' && /^[\w./-]{1,100}$/.test(e.code) ? e.code : 'unknown';
+  // Exact strings: this phone's token, the notification's text, and the lines of this server's own private key
+  const literals = [token, notice.title, notice.body, ...(account?.private_key.split(/\\n|\n/).filter((l) => l.length >= 16 && !l.startsWith('-----')) ?? [])]
+    .filter((s): s is string => typeof s === 'string' && s.trim().length >= 3)
+    .sort((a, b) => b.length - a.length);
+  const clean = (text: string) => {
+    let out = text;
+    for (const l of literals) out = out.split(l).join(REMOVED);
+    for (const [re, to] of SECRET_PATTERNS) out = out.replace(re, to);
+    return redactText(out);
+  };
+  const raw = typeof e.message === 'string' ? e.message : typeof err === 'string' ? err : '';
+  const message = truncate(clean(raw), MAX_MESSAGE) || '(no message)';
+  const stack = typeof e.stack === 'string' ? e.stack : null;
+  const stackSafe = stack !== null && clean(stack) === stack;
+  return { code, message, stack: stackSafe ? truncate(stack, MAX_STACK) : null, stackOmitted: stack !== null && !stackSafe };
+}
+
+/** Sends one notification to one phone. Exported for tests. */
+export async function sendOne(send: Sender, token: string, n: PushNotice): Promise<SendResult> {
   const message: Message = {
     token,
     notification: { title: truncate(n.title, 100), body: truncate(n.body, 240) },
@@ -165,7 +203,21 @@ async function sendOne(send: Sender, token: string, n: PushNotice): Promise<Send
   } catch (err) {
     const e = err as { code?: string; message?: string };
     if (GONE_CODES.has(e.code ?? '') || (e.code === 'messaging/invalid-argument' && /token/i.test(e.message ?? ''))) return { r: 'gone', code: e.code };
-    console.error('[push] FCM refused a notification:', e.code ?? '');
+    // Only what safeFcmError keeps: never the error object, the token or the notification's text
+    const safe = safeFcmError(err, token, message.notification ?? {});
+    console.error('[push] FCM refused a notification:', safe.code, safe.message);
+    void logEvent({
+      level: 'ERROR',
+      category: 'system',
+      event: 'push.send_failed',
+      message: `Firebase refused a notification: ${safe.code}: ${safe.message}`,
+      outcome: 'failed',
+      direction: 'out',
+      conversationId: n.conversationId,
+      errorCode: safe.code,
+      errorDetails: safe.message,
+      data: { kind: n.kind, stack: safe.stack, stackOmitted: safe.stackOmitted },
+    });
     return { r: 'failed', code: e.code ?? 'unknown' };
   }
 }
