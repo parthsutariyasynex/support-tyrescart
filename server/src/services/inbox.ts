@@ -531,9 +531,11 @@ const startSchema = z.object({
 });
 
 // Start a chat with a number (the first message must be a template). The number is checked against real numbering
-// plans and stored one way (digits with country code), so the same customer is never added twice: an existing
-// contact and chat are reused (startedNow: false; a deleted contact comes back), and two people starting the same
-// number at once get the same chat. A new chat appears in everyone's inbox at once (conversation:started).
+// plans and stored one way (digits with country code), so the same customer is never added twice: an existing,
+// still-active contact and chat are reused (startedNow: false), and two people starting the same number at once get
+// the same chat. A deleted contact comes back with their chat history intact, but counts as startedNow: true — they
+// and their chat were hidden from everyone (deletedContacts.ts), so this is a fresh start from the team's point of
+// view, not "the number already has a chat". A new chat appears in everyone's inbox at once (conversation:started).
 export async function startConversation(workspaceId: string, rawInput: unknown, createdBy: string | null = null) {
   const { waId, name } = parse(startSchema, rawInput);
   const stage = await defaultStageValue(workspaceId);
@@ -552,6 +554,7 @@ export async function startConversation(workspaceId: string, rawInput: unknown, 
     }
   };
   const contactKey = { workspaceId_waId: { workspaceId, waId } };
+  const wasDeleted = !!(await prisma.contact.findUnique({ where: contactKey, select: { deletedAt: true } }))?.deletedAt;
   const contact = await once(
     () =>
       prisma.contact.upsert({
@@ -567,7 +570,7 @@ export async function startConversation(workspaceId: string, rawInput: unknown, 
     () => prisma.conversation.upsert({ where: conversationKey, update: {}, create: { workspaceId, contactId: contact.id, createdBy } }),
     () => prisma.conversation.findUnique({ where: conversationKey }),
   );
-  const startedNow = !existing && !lostRace;
+  const startedNow = (!existing && !lostRace) || (wasDeleted && !lostRace);
   if (startedNow) emitToWorkspace(workspaceId, 'conversation:started', { conversationId: conversation.id, contactName: contact.name || `+${waId}` });
   return { ...conversation, startedNow };
 }

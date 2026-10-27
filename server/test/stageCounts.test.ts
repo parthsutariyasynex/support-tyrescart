@@ -31,8 +31,10 @@ test('stage counts in the left menu match what each stage link lists; settings c
   const other = defaultStage === first ? second : first;
 
   // move one chat to another stage (as the profile panel does), delete another contact
+  // (a direct soft delete, not the deleteContact mutation, so it can be restored below: deleteContact now removes
+  // the contact outright)
   await gql(`mutation($id: ID!, $i: ContactInput!) { updateContact(id: $id, input: $i) { id } }`, { id: contacts[1].id, i: { leadStage: other } }, o.token);
-  await gql(`mutation($id: ID!) { deleteContact(id: $id) }`, { id: contacts[2].id }, o.token);
+  await prisma.contact.update({ where: { id: contacts[2].id }, data: { deletedAt: new Date() } });
 
   const counts = async (chats?: boolean) =>
     Object.fromEntries(

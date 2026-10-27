@@ -53,7 +53,9 @@ test('workspace preferences: defaults, admins only, validated, in "me", applied'
   await gql(SET, { i: { reminderMinutes: 5 } }, o.token);
   assert.ok((await remind()) >= 1);
 
-  await gql(`mutation($id: ID!) { deleteContact(id: $id) }`, { id: cid }, o.token);
+  // deleteContact itself now removes the contact outright (no retention window); the retention setting only governs
+  // contacts already marked deleted (e.g. by the purge job's own bookkeeping), so simulate that state directly
+  await prisma.contact.update({ where: { id: cid }, data: { deletedAt: new Date() } });
   const d = (await gql(`{ deletedContacts { deletedAt purgeAt } deletedContactsRetentionDays }`, {}, o.token));
   assert.equal(d.deletedContactsRetentionDays, 30);
   assert.equal(new Date(d.deletedContacts[0].purgeAt).getTime() - new Date(d.deletedContacts[0].deletedAt).getTime(), 30 * 86_400_000);

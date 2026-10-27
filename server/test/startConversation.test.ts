@@ -65,12 +65,44 @@ describe('Start a new conversation', () => {
     assert.equal(await prisma.conversation.count({ where: { workspaceId: ws, contact: { waId: '919016312927' } } }), 1);
   });
 
-  test('a deleted contact comes back instead of being duplicated', async () => {
+  test('a deleted contact comes back instead of being duplicated, as a fresh start (not "already has a chat")', async () => {
     const c = await prisma.contact.findFirstOrThrow({ where: { workspaceId: ws, waId: '971501234567' } });
     await prisma.contact.update({ where: { id: c.id }, data: { deletedAt: new Date() } });
     const back = (await gql(START, { i: { waId: '971501234567' } }, owner)).data.startConversation;
     assert.equal(back.contact.id, c.id);
+    assert.equal(back.startedNow, true); // revived from deletion: the team should see this as new, not a duplicate
     assert.equal((await prisma.contact.findUniqueOrThrow({ where: { id: c.id } })).deletedAt, null);
+    assert.equal(await prisma.contact.count({ where: { workspaceId: ws, waId: '971501234567' } }), 1); // never a second row
+  });
+
+  test('deleting a contact (the real admin mutation) removes it for good; the same number starting again is a brand-new contact', async () => {
+    const waId = '971555000111';
+    const started = (await gql(START, { i: { waId, name: 'Nadia' } }, owner)).data.startConversation;
+    const contactId = started.contact.id;
+    const conversationId = started.id;
+    await prisma.message.create({ data: { conversationId, direction: 'in', type: 'text', body: 'Hello there', status: 'received' } });
+
+    const del = await gql(`mutation($id: ID!) { deleteContact(id: $id) }`, { id: contactId }, owner);
+    assert.equal(del.errors, undefined, JSON.stringify(del.errors));
+    // Hard delete: the contact, its chat and its messages are gone outright, not just hidden
+    assert.equal(await prisma.contact.count({ where: { id: contactId } }), 0);
+    assert.equal(await prisma.conversation.count({ where: { id: conversationId } }), 0);
+    assert.equal(await prisma.message.count({ where: { conversationId } }), 0);
+
+    // The number can be started again: a brand-new contact and chat, with no memory of the deleted one
+    const again = await gql(START, { i: { waId, name: 'Nadia' } }, owner);
+    assert.equal(again.errors, undefined, JSON.stringify(again.errors));
+    const revived = again.data.startConversation;
+    assert.notEqual(revived.contact.id, contactId); // a new row, not the deleted one coming back
+    assert.notEqual(revived.id, conversationId); // a new chat, with no prior history
+    assert.equal(revived.startedNow, true);
+    assert.equal(await prisma.contact.count({ where: { workspaceId: ws, waId } }), 1); // exactly one row, the new one
+
+    // Duplicate prevention for ACTIVE contacts is unaffected: a second row for the same number is still rejected
+    await assert.rejects(
+      prisma.contact.create({ data: { workspaceId: ws, waId, name: 'Someone else', leadStage: 'new' } }),
+      /Unique constraint/i,
+    );
   });
 
   test('a new chat appears in everyone\'s inbox live (conversation:started); reusing one sends nothing', async () => {

@@ -9,10 +9,10 @@ import { requireAdmin } from './permissions.js';
 import { DEFAULTS, settingsOf } from './workspaceSettings.js';
 import { logFailure } from './logging.js';
 
-// Deleting a contact (admins): it and its chat leave the app at once but are kept for RETENTION_DAYS in Settings →
-// Recently deleted contacts, where an admin can restore them. After that they are removed for good, with the chat,
-// its messages and stored files. A deleted contact who messages the business again comes back (see saveIncoming),
-// so no customer message is ever lost.
+// Deleting a contact (admins): it, its chat, messages and stored files are removed for good immediately — no
+// retention window. (Older rows soft-deleted before this change still go through restoreContact/purgeDeletedContacts
+// below until they age out.) A contact who messages the business again afterwards comes back as a new contact (see
+// saveIncoming), so no customer message is ever lost.
 export const RETENTION_DAYS = DEFAULTS.deletedContactRetentionDays; // default; each workspace can change it
 const DAY_MS = 86_400_000;
 
@@ -24,11 +24,16 @@ export async function deleteContact(auth: AuthPayload, id: string) {
   await requireAdmin(auth);
   const contact = await prisma.contact.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
   if (!contact) throw notFound('Contact');
-  const deletedAt = new Date();
-  await prisma.contact.update({ where: { id }, data: { deletedAt, deletedBy: auth.userId, updatedBy: auth.userId } });
-  emitToWorkspace(auth.workspaceId, 'contact:deleted', { contactId: id, conversationId: await conversationOf(auth.workspaceId, id) });
-  const days = (await settingsOf(auth.workspaceId)).deletedContactRetentionDays;
-  return { id, deletedAt, purgeAt: new Date(deletedAt.getTime() + days * DAY_MS) };
+  const conversationId = await conversationOf(auth.workspaceId, id);
+  const files = await prisma.message.findMany({ where: { conversation: { contactId: id }, mediaPath: { not: null } }, select: { mediaPath: true } });
+  await prisma.contact.delete({ where: { id } }); // chat, messages, remarks… go with it
+  for (const f of files) {
+    const full = path.resolve(env.uploadsDir, f.mediaPath!);
+    if (full.startsWith(env.uploadsDir + path.sep))
+      await rm(full, { force: true }).catch((err) => logFailure('file.remove_failed', "Couldn't remove a deleted chat's file", err, { level: 'WARNING', data: { path: f.mediaPath } }));
+  }
+  emitToWorkspace(auth.workspaceId, 'contact:deleted', { contactId: id, conversationId });
+  return true;
 }
 
 export async function restoreContact(auth: AuthPayload, id: string) {

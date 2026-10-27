@@ -224,8 +224,9 @@ export function AppShell({
       showToast(t.key, e.conversationId, t.message, t.detail);
     });
     // Left menu → Lifecycle stages: its chat counts follow new chats, stage changes and deleted/restored contacts
+    // (conversation:started covers both a brand-new manual chat and a deleted contact's chat coming back)
     const stageCountsChanged = () => window.dispatchEvent(new Event(STAGE_COUNTS_EVENT));
-    for (const ev of ['chat:new', 'contact:updated', 'contact:deleted', 'contact:restored']) socket.on(ev, stageCountsChanged);
+    for (const ev of ['chat:new', 'conversation:started', 'contact:updated', 'contact:deleted', 'contact:restored']) socket.on(ev, stageCountsChanged);
     socket.on('assignment:reminder', (e: ReminderEvent) => {
       if (!e?.chats?.length) return;
       const t = reminderText(e);

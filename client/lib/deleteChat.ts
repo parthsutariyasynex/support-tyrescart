@@ -1,6 +1,7 @@
-// "Delete chat" (like WhatsApp): for the person who deletes it only. Choosing Delete chat only asks; nothing is sent
-// until they press Delete in the confirmation. Cancel (or Esc, or clicking outside) leaves everything as it was.
-// The server keeps the chat, its messages and files; it just leaves this person's list until a newer message.
+// "Delete chat" (admin-only): permanently deletes the contact behind this chat — not just this user's view of it.
+// Choosing Delete chat only asks; nothing is sent until Delete is pressed in the confirmation. Cancel (or Esc, or
+// clicking outside) leaves everything as it was. Once confirmed it cannot be undone: the contact, this chat, its
+// messages and files are gone for the whole workspace, not just the admin's own list.
 
 export type DeleteChatState = {
   // The chat waiting for confirmation (null: no dialog)
@@ -60,6 +61,6 @@ export const withoutChat = <T extends { id: string }>(list: T[], conversationId:
 export function deleteChatText(name: string) {
   return {
     title: `Delete chat with ${name}?`,
-    body: "The chat will be removed from your chat list only. Messages, files and history are kept, and your teammates still see the chat. It comes back if a new message arrives.",
+    body: `${name} and their entire chat history — messages and files — will be permanently deleted for the whole workspace. This cannot be undone.`,
   };
 }

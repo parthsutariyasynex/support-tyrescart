@@ -89,9 +89,9 @@ test('the deleted chat leaves the list; the others stay in order', () => {
   assert.deepEqual(withoutChat(list, 'x'), list);
 });
 
-test('the confirmation says it is only for you and nothing is lost', () => {
+test('the confirmation warns it is permanent and workspace-wide', () => {
   const t = deleteChatText('Asha');
   assert.equal(t.title, 'Delete chat with Asha?');
-  assert.match(t.body, /your chat list only/);
-  assert.match(t.body, /teammates still see/);
+  assert.match(t.body, /permanently deleted/);
+  assert.match(t.body, /cannot be undone/);
 });

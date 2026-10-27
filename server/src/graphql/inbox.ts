@@ -87,7 +87,7 @@ export const typeDefs = /* GraphQL */ `
 
   type Conversation {
     id: ID!
-    "Only on startConversation: true when this started a new chat, false when the number already had one (reused)"
+    "Only on startConversation: true when this started a new chat, or brought back a deleted one; false when an active chat already existed (reused)"
     startedNow: Boolean
     contact: Contact!
     unread: Int!

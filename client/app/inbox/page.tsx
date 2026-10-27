@@ -27,7 +27,6 @@ import {
   needsAttention,
   newerMessage,
   clearConversation,
-  deleteConversationForMe,
   restoreMessage,
   setConversationStatus,
   sendTextMessage,
@@ -69,7 +68,7 @@ import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
 import { ACCEPT, CHAT_ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
-import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
+import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, deleteContact, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
 import { AssignDropdown, AssigneeAvatar } from './assign';
 import { CollaboratorsButton } from './CollaboratorsButton';
@@ -351,6 +350,8 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   const [unreadTotal, setUnreadTotal] = useState(cachedUnreadTotal);
   permissionsRef.current = permissions;
   const canManage = !!permissions?.canManageLabels;
+  // Gates "Delete chat" (now a permanent, workspace-wide contact delete, not just hiding it from one person's list)
+  const isAdmin = !!permissions && ['owner', 'admin'].includes(permissions.role);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const conversationsRef = useRef(conversations);
@@ -655,10 +656,21 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   );
   const onChatDeletedRef = useRef(onChatDeleted);
   onChatDeletedRef.current = onChatDeleted;
-  // Delete chat asks first (lib/deleteChat.ts): nothing is sent until Delete is pressed in the dialog
+  // Delete chat asks first (lib/deleteChat.ts): nothing is sent until Delete is pressed in the dialog.
+  // Admin-only action (menu item is hidden otherwise): permanently deletes the contact behind this chat, not just
+  // this user's view of it — see deleteContact in lib/contacts.ts.
   const [deleteState, setDeleteState] = useState(NO_DELETE);
   const deleteFlow = useMemo(
-    () => createDeleteChat({ remove: deleteConversationForMe, onDeleted: (id) => onChatDeletedRef.current(id), onChange: setDeleteState }),
+    () =>
+      createDeleteChat({
+        remove: (conversationId) => {
+          const c = conversationsRef.current.find((x) => x.id === conversationId) ?? lastActiveRef.current;
+          if (!c) return Promise.reject(new Error("Couldn't find this chat's contact"));
+          return deleteContact(c.contact.id);
+        },
+        onDeleted: (id) => onChatDeletedRef.current(id),
+        onChange: setDeleteState,
+      }),
     [],
   );
 
@@ -1164,6 +1176,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       <ConversationList
         conversations={filteredConversations}
         onDeleteChat={(id) => deleteFlow.ask(id)}
+        canDeleteChat={isAdmin}
         sortOrder={sortOrder}
         onSortChange={onSortOrderChange}
         statusFilter={statusFilter}
@@ -1382,9 +1395,11 @@ function ConversationList({
   unassignedCount,
   stageBar,
   onDeleteChat,
+  canDeleteChat,
 }: {
-  // Delete chat from the row's ⋮ menu (asks first)
+  // Delete chat from the row's ⋮ menu (asks first); admin-only, so the item is hidden when canDeleteChat is false
   onDeleteChat: (conversationId: string) => void;
+  canDeleteChat: boolean;
   stageBar?: React.ReactNode; // the lifecycle stage being shown (left menu), with a way back to all chats
   conversations: Conversation[];
   totalCount: number;
@@ -1727,14 +1742,16 @@ function ConversationList({
                       )}
                     </span>
                   </button>
-                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens) */}
-                  <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
-                    <ChatOptionsMenu
-                      small
-                      label={`Chat options for ${contactName}`}
-                      options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
-                    />
-                  </div>
+                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens); admin-only (Delete chat is its only item) */}
+                  {canDeleteChat && (
+                    <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
+                      <ChatOptionsMenu
+                        small
+                        label={`Chat options for ${contactName}`}
+                        options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
+                      />
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -2677,15 +2694,15 @@ function ChatPanel({
               <path d="M12 16v-4M12 8h.01" />
             </svg>
           </button>
-          {/* A closed chat offers only Delete chat (the rest needs it open) */}
-          <ChatOptionsMenu
-            disabled={statusBusy}
-            busy={statusBusy}
-            options={[
+          {/* A closed chat offers only Delete chat (the rest needs it open); Delete chat itself is admin-only, since
+              it now permanently deletes the contact rather than just hiding the chat from one person's list */}
+          {(() => {
+            const headerMenuOptions = [
               ...(isClosed ? [] : chatMenuOptions()),
-              { label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: onDelete },
-            ]}
-          />
+              ...(viewer?.isAdmin ? [{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: onDelete }] : []),
+            ];
+            return headerMenuOptions.length > 0 ? <ChatOptionsMenu disabled={statusBusy} busy={statusBusy} options={headerMenuOptions} /> : null;
+          })()}
           {/* {process.env.NODE_ENV !== 'production' && (
             <button
               onClick={async () => {
