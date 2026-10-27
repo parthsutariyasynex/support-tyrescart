@@ -170,6 +170,9 @@ describe('a customer WhatsApp message', () => {
     assert.deepEqual(m.notification, { title: 'Asha', body });
     assert.deepEqual(m.data, { conversationId, kind: 'message' });
     assert.equal(m.android.priority, 'high');
+    // The app icon's number: the workspace's unread customer messages (this is the first, so 1)
+    assert.equal((m.android as any).notification.notificationCount, 1);
+    assert.equal((m as any).apns.payload.aps.badge, 1);
     assert.equal(m.android.collapseKey, conversationId);
     // The log has counts only: no message text, no tokens
     const log = await prisma.logEntry.findFirst({ where: { workspaceId: ws, event: 'push.sent' }, orderBy: { createdAt: 'desc' } });
@@ -187,6 +190,7 @@ describe('a customer WhatsApp message', () => {
     await settle();
     assert.deepEqual(to(), tokens('owner', 'sup', 'agentA', 'agentB'));
     assert.equal((sent[0] as any).notification.body, '📷 Photo');
+    assert.equal((sent[0] as any).android.notification.notificationCount, 2, 'the count grows with each unread message');
     await prisma.conversationCollaborator.deleteMany({ where: { conversationId } });
     sent = [];
     await saveIncoming(ws, { waId: number(1), type: 'text', body: 'hello again', waMessageId: `wamid.push-${run}-3` });

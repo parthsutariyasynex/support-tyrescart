@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AuthPayload } from '../auth.js';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
+import { unreadTotal } from './activity.js';
 import { logEvent, redactText } from './logging.js';
 import { isSupervisorOrAbove } from './roles.js';
 import { parse } from './validate.js';
@@ -181,7 +182,10 @@ export function safeFcmError(err: unknown, token: string, notice: { title?: stri
 }
 
 /** Sends one notification to one phone. Exported for tests. */
-export async function sendOne(send: Sender, token: string, n: PushNotice): Promise<SendResult> {
+// badge: unread customer messages in the workspace, shown as the number on the app icon (Android launchers that show
+// counts, e.g. Samsung and Xiaomi; iOS). 0 or less: no number.
+export async function sendOne(send: Sender, token: string, n: PushNotice, badge = 0): Promise<SendResult> {
+  const count = badge > 0 ? badge : undefined;
   const message: Message = {
     token,
     notification: { title: truncate(n.title, 100), body: truncate(n.body, 240) },
@@ -190,11 +194,11 @@ export async function sendOne(send: Sender, token: string, n: PushNotice): Promi
     android: {
       priority: 'high',
       collapseKey: n.collapseKey,
-      notification: { channelId: 'messages', tag: n.collapseKey, sound: 'default' },
+      notification: { channelId: 'messages', tag: n.collapseKey, sound: 'default', ...(count ? { notificationCount: count } : {}) },
     },
     apns: {
       headers: { 'apns-priority': '10', 'apns-collapse-id': n.collapseKey.slice(0, 64) },
-      payload: { aps: { sound: 'default', threadId: n.conversationId } },
+      payload: { aps: { sound: 'default', threadId: n.conversationId, ...(count ? { badge: count } : {}) } },
     },
   };
   try {
@@ -234,7 +238,9 @@ export async function pushToUsers(workspaceId: string, userIds: Iterable<string>
     const devices = await prisma.pushDevice.findMany({ where: { workspaceId, userId: { in: active.map((m) => m.userId) } }, select: { token: true } });
     if (!devices.length) return;
     const started = Date.now();
-    const results = await Promise.all(devices.map(async (d) => ({ token: d.token, ...(await sendOne(send, d.token, notice)) })));
+    // The app icon's number: unread customer messages (shared by the team, like the browser tab's title)
+    const badge = await unreadTotal(workspaceId);
+    const results = await Promise.all(devices.map(async (d) => ({ token: d.token, ...(await sendOne(send, d.token, notice, badge)) })));
     const gone = results.filter((x) => x.r === 'gone').map((x) => x.token);
     if (gone.length) await prisma.pushDevice.deleteMany({ where: { token: { in: gone } } });
     const count = (r: SendResult['r']) => results.filter((x) => x.r === r).length;
