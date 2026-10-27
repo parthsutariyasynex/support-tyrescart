@@ -1,4 +1,4 @@
-import { isValidPhoneNumber } from 'libphonenumber-js/max';
+import { type CountryCode, getCountryCallingCode, isSupportedCountry, isValidPhoneNumber } from 'libphonenumber-js/max';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { saveIncoming } from '../messages.js';
@@ -40,6 +40,9 @@ const conversationPageSchema = pageSchema.extend({
   leadStage: z.string().trim().min(1).max(20).optional(),
   // "Filter by" menu → Stage: customer at any of these stages
   leadStages: z.array(z.string().trim().min(1).max(20)).max(100).optional(),
+  // "Filter by" menu → Country code: customers whose WhatsApp number has one of these countries' calling codes
+  // (ISO codes, e.g. "AE"; countries sharing a code, like US and Canada, match the same numbers)
+  countries: z.array(z.string().refine((c) => isSupportedCountry(c), 'Unknown country code')).max(300).optional(),
   assigneeIds: z.array(z.string().min(1).max(64)).max(100).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
@@ -105,12 +108,16 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   };
   if (page === undefined) return prisma.conversation.findMany(query);
 
-  const { first, after, labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, leadStages } = parse(conversationPageSchema, page);
+  const { first, after, labelId, assignee, status, search, sort, labelIds, assigneeIds, from, to, leadStage, leadStages, countries } = parse(conversationPageSchema, page);
   if (from && to && from > to) throw new AppError('"from" must be before "to"', 400, 'BAD_USER_INPUT');
   const memberIds = (assigneeIds ?? []).filter((a) => a !== 'unassigned');
   const menuFilters: Prisma.ConversationWhereInput[] = [
     ...(labelIds?.length ? [{ labels: { some: { labelId: { in: labelIds } } } }] : []),
     ...(leadStages?.length ? [{ contact: { leadStage: { in: leadStages } } }] : []),
+    // Calling codes never start with another one (E.164), so a prefix match picks out exactly that country code
+    ...(countries?.length
+      ? [{ OR: [...new Set(countries.map((c) => getCountryCallingCode(c as CountryCode) as string))].map((code) => ({ contact: { waId: { startsWith: code } } })) }]
+      : []),
     ...(assigneeIds?.length
       ? [{ OR: [...(memberIds.length ? [{ assignedToId: { in: memberIds } }] : []), ...(assigneeIds.includes('unassigned') ? [{ assignedToId: null }] : [])] }]
       : []),

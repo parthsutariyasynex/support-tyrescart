@@ -1,7 +1,7 @@
 // Run: npm test --workspace=client
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { EMPTY_MENU_FILTERS, activeFilterCount, dayEnd, dayStart, matchesMenuFilters, toServerFilter, toggle } from './chatFilters';
+import { EMPTY_MENU_FILTERS, GULF_COUNTRIES, activeFilterCount, callingCodesOf, countryFilterList, dayEnd, dayStart, matchesCountryQuery, matchesMenuFilters, toServerFilter, toggle } from './chatFilters';
 
 // Device time zones the result must not depend on (UTC, India, US west coast, UTC+14)
 function inEveryMachineZone(check: () => void) {
@@ -29,7 +29,7 @@ describe('chat list "Filter by" menu', () => {
   test('nothing selected matches everything and counts zero', () => {
     assert.equal(matchesMenuFilters(chat, EMPTY_MENU_FILTERS), true);
     assert.equal(activeFilterCount(EMPTY_MENU_FILTERS), 0);
-    assert.deepEqual(toServerFilter(EMPTY_MENU_FILTERS), { labelIds: null, assigneeIds: null, from: null, to: null, leadStages: null });
+    assert.deepEqual(toServerFilter(EMPTY_MENU_FILTERS), { labelIds: null, assigneeIds: null, from: null, to: null, leadStages: null, countries: null });
   });
   test('labels: any of the chosen', () => {
     assert.equal(matchesMenuFilters(chat, f({ labelIds: ['l-vip'] })), true);
@@ -46,7 +46,7 @@ describe('chat list "Filter by" menu', () => {
     inEveryMachineZone(() => {
       assert.equal(dayStart('2026-10-21'), '2026-10-20T20:00:00.000Z');
       assert.equal(dayEnd('2026-10-21'), '2026-10-21T19:59:59.999Z');
-      assert.deepEqual(toServerFilter(f({ from: '2026-10-01', to: '2026-10-02' })), { labelIds: null, assigneeIds: null, from: '2026-09-30T20:00:00.000Z', to: '2026-10-02T19:59:59.999Z', leadStages: null });
+      assert.deepEqual(toServerFilter(f({ from: '2026-10-01', to: '2026-10-02' })), { labelIds: null, assigneeIds: null, from: '2026-09-30T20:00:00.000Z', to: '2026-10-02T19:59:59.999Z', leadStages: null, countries: null });
       // 00:30 on 11 Oct in Dubai (still the 10th in UTC, and already 02:00 on the 11th in India)
       const late = { ...chat, lastMessageAt: '2026-10-10T20:30:00.000Z' };
       assert.equal(matchesMenuFilters(late, f({ from: '2026-10-11', to: '2026-10-11' })), true);
@@ -75,5 +75,42 @@ describe('chat list "Filter by" menu', () => {
     assert.equal(activeFilterCount(f({ labelIds: ['a', 'b'], assigneeIds: ['c'], from: '2026-10-01' })), 3);
     assert.deepEqual(toggle(['a'], 'b'), ['a', 'b']);
     assert.deepEqual(toggle(['a', 'b'], 'a'), ['b']);
+  });
+});
+
+describe('Filter by → Country code', () => {
+  test('Gulf countries first (UAE, Saudi Arabia, Qatar, Kuwait, Bahrain, Oman), then every other country A–Z', () => {
+    const { gulf, others } = countryFilterList();
+    assert.deepEqual(gulf.map((c) => c.code), ['AE', 'SA', 'QA', 'KW', 'BH', 'OM']);
+    assert.deepEqual(gulf.map((c) => c.dial), ['971', '966', '974', '965', '973', '968']);
+    assert.ok(others.length > 200);
+    assert.ok(!others.some((c) => (GULF_COUNTRIES as readonly string[]).includes(c.code)), 'not listed twice');
+    const names = others.map((c) => c.name);
+    assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b)));
+    assert.ok(others.some((c) => c.code === 'IN' && c.dial === '91' && c.flag === '🇮🇳'));
+  });
+
+  test('search by name, ISO code or calling code', () => {
+    const { gulf, others } = countryFilterList();
+    const all = [...gulf, ...others];
+    const find = (q: string) => all.filter((c) => matchesCountryQuery(c, q)).map((c) => c.code);
+    assert.deepEqual(find('saudi'), ['SA']);
+    assert.ok(find('ae').includes('AE'));
+    assert.deepEqual(find('+971'), ['AE']);
+    assert.deepEqual(find('9665'), []); // a code plus more digits isn't a country code
+    assert.ok(find('97').includes('AE') && find('97').includes('QA'));
+    assert.equal(find('  ').length, all.length);
+  });
+
+  test("a chat matches when the customer's number starts with a chosen country's code", () => {
+    const chat = (waId: string) => ({ labels: [], assignee: null, lastMessageAt: '2026-10-01T10:00:00.000Z', contact: { waId, leadStage: null } }) as any;
+    const f = { ...EMPTY_MENU_FILTERS, countries: ['AE', 'SA'] };
+    assert.equal(matchesMenuFilters(chat('971501234567'), f), true);
+    assert.equal(matchesMenuFilters(chat('966501234567'), f), true);
+    assert.equal(matchesMenuFilters(chat('919274834118'), f), false);
+    assert.equal(matchesMenuFilters(chat('919274834118'), EMPTY_MENU_FILTERS), true);
+    assert.equal(activeFilterCount(f), 1);
+    assert.deepEqual(toServerFilter(f).countries, ['AE', 'SA']);
+    assert.deepEqual(callingCodesOf(['US', 'CA', 'XX']), ['1']); // shared code once; unknown ignored
   });
 });

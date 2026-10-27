@@ -129,10 +129,11 @@ export async function fetchConversations(
     to?: string | null;
     leadStage?: string | null; // a lifecycle stage's value (left menu)
     leadStages?: string[] | null; // any of these stage values ("Filter by" → Stage)
+    countries?: string[] | null; // customers whose number has one of these countries' calling codes ("Filter by" → Country code)
   } = {},
 ) {
-  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime, $leadStage: String, $leadStages: [String!]) {
-    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to, leadStage: $leadStage, leadStages: $leadStages) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
+  const query = `query Conversations($first: Int, $after: String, $labelId: ID, $assignee: ID, $status: String, $search: String, $sort: String, $labelIds: [ID!], $assigneeIds: [ID!], $from: DateTime, $to: DateTime, $leadStage: String, $leadStages: [String!], $countries: [String!]) {
+    conversations(first: $first, after: $after, labelId: $labelId, assignee: $assignee, status: $status, search: $search, sort: $sort, labelIds: $labelIds, assigneeIds: $assigneeIds, from: $from, to: $to, leadStage: $leadStage, leadStages: $leadStages, countries: $countries) { nodes { ${CONVERSATION_FIELDS} } pageInfo { hasNextPage endCursor } }
   }`;
   return (await gql<{ conversations: Connection<Conversation> }>(query, { first: PAGE_SIZE, after, ...filter }))
     .conversations;

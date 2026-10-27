@@ -4804,6 +4804,23 @@ describe('chat list "Filter by": labels, collaborator, date range', () => {
     assert.deepEqual(await stageNames({ st: ['won', 'contacted'], one: 'won' }), ['F 1']);
     assert.deepEqual(await stageNames({ st: ['won'] }, B.token), []);
   });
+  test("country code: customers whose number starts with any chosen country's calling code; combines with the other groups", async () => {
+    const COUNTRIES = `query($c: [String!], $l: [ID!]) { conversations(countries: $c, labelIds: $l) { nodes { contact { name } } } }`;
+    const setNumber = async (n: string, waId: string) =>
+      prisma.contact.update({ where: { id: (await prisma.conversation.findUniqueOrThrow({ where: { id: chat[n] } })).contactId }, data: { waId } });
+    await setNumber('F 1', `97150${String(run).slice(-7)}`); // UAE
+    await setNumber('F 2', `96650${String(run).slice(-7)}`); // Saudi Arabia
+    await setNumber('F 3', `9198${String(run).slice(-8)}`); // India
+    const byCountry = async (v: object, token = ws.token) => (await ok(COUNTRIES, v, token)).conversations.nodes.map((c: any) => c.contact.name).sort();
+    assert.deepEqual(await byCountry({ c: ['AE'] }), ['F 1']);
+    assert.deepEqual(await byCountry({ c: ['AE', 'SA'] }), ['F 1', 'F 2']);
+    assert.deepEqual(await byCountry({ c: ['IN'] }), ['F 3']);
+    assert.deepEqual(await byCountry({ c: ['QA'] }), []);
+    assert.deepEqual(await byCountry({ c: [] }), ['F 1', 'F 2', 'F 3']);
+    assert.deepEqual(await byCountry({ c: ['AE', 'SA'], l: [label.Lead] }), ['F 2']);
+    assert.deepEqual(await byCountry({ c: ['AE'] }, B.token), []);
+    assert.equal(await errorCode(COUNTRIES, { c: ['XX'] }, ws.token), 'BAD_USER_INPUT');
+  });
 });
 
 describe('snooze: snoozed chats come back on time or when the customer writes', () => {

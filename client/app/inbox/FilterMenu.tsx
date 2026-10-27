@@ -5,11 +5,12 @@ import { type MenuFilters, EMPTY_MENU_FILTERS, activeFilterCount, toggle } from 
 import type { Assignee } from '@/lib/assignees';
 import type { Label } from '@/lib/labels';
 import { CollaboratorPanel } from './CollaboratorPanel';
+import { CountryPanel } from './CountryPanel';
 import { DateRangePanel } from './DateRangePanel';
 import { LabelsPanel } from './LabelsPanel';
 import { StagePanel } from './StagePanel';
 
-type Section = 'channel' | 'labels' | 'stage' | 'assign' | 'date';
+type Section = 'channel' | 'labels' | 'stage' | 'assign' | 'country' | 'date';
 
 const SECTIONS: { key: Section; label: string; icon: React.ReactNode }[] = [
   { key: 'channel', label: 'Channel', icon: <path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M19.1 4.9a10 10 0 0 1 0 14.2M12 12h.01" /> },
@@ -17,6 +18,8 @@ const SECTIONS: { key: Section; label: string; icon: React.ReactNode }[] = [
   { key: 'stage', label: 'Stage', icon: <path d="M3 3v18h18M7 16l4-4 4 4 5-6" /> },
   // Who the chat is assigned to
   { key: 'assign', label: 'Assign', icon: <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M16 11l2 2 4-4" /> },
+  // The customer's WhatsApp number's country calling code (Gulf countries first)
+  { key: 'country', label: 'Country code', icon: <path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10" /> },
   { key: 'date', label: 'Date range', icon: <path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /> },
 ];
 
@@ -26,7 +29,7 @@ const Icon = ({ children }: { children: React.ReactNode }) => (
   </svg>
 );
 
-// "Filter" button + "Filter by" menu (Channel, Labels, Stage, Assign, Date range) with Clear all
+// "Filter" button + "Filter by" menu (Channel, Labels, Stage, Assign, Country code, Date range) with Clear all
 export function FilterMenu({
   value,
   onChange,
@@ -56,7 +59,7 @@ export function FilterMenu({
   }, [open]);
 
   const selectedIn = (s: Section) =>
-    s === 'labels' ? value.labelIds.length : s === 'stage' ? value.leadStages.length : s === 'assign' ? value.assigneeIds.length : s === 'date' ? (value.from || value.to ? 1 : 0) : 0;
+    s === 'labels' ? value.labelIds.length : s === 'stage' ? value.leadStages.length : s === 'assign' ? value.assigneeIds.length : s === 'country' ? value.countries.length : s === 'date' ? (value.from || value.to ? 1 : 0) : 0;
 
   const check = (checked: boolean, onClick: () => void, children: React.ReactNode, key: string) => (
     <li key={key}>
@@ -131,6 +134,7 @@ export function FilterMenu({
             <CollaboratorPanel assignees={assignees} selected={value.assigneeIds} onChange={(ids) => onChange({ ...value, assigneeIds: ids })} />
           )}
           {section === 'labels' && <LabelsPanel labels={labels} selected={value.labelIds} onChange={(ids) => onChange({ ...value, labelIds: ids })} />}
+          {section === 'country' && <CountryPanel selected={value.countries} onChange={(codes) => onChange({ ...value, countries: codes })} />}
           {section === 'stage' && <StagePanel selected={value.leadStages} onChange={(v) => onChange({ ...value, leadStages: v })} />}
           {section === 'channel' && (
             <div className="ml-1 max-h-80 w-56 overflow-y-auto rounded-2xl border border-line bg-surface p-2 shadow-xl">
