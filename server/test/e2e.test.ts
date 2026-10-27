@@ -138,6 +138,9 @@ describe('authentication', () => {
     `{ unreadTotal }`,
     `mutation { markNotificationsSeen }`,
     `mutation { clearConversation(id: "x") }`,
+    `{ pushConfigured }`,
+    `mutation { registerPushDevice(token: "x", platform: "android") }`,
+    `mutation { unregisterPushDevice(token: "x") }`,
     `mutation { deleteConversationForMe(id: "x") }`,
   ];
   for (const op of protectedOps)

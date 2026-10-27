@@ -18,6 +18,10 @@ export const env = {
   isProd: process.env.NODE_ENV === 'production',
   // Meta's Graph API (overridable only so tests can point it at a mock; nothing to set in normal use)
   graphBase: (process.env.GRAPH_API_BASE || 'https://graph.facebook.com').replace(/\/$/, ''),
+  // Push notifications (Firebase Cloud Messaging). Off unless a Firebase service account is given: the JSON itself
+  // (FIREBASE_SERVICE_ACCOUNT) or the path to its file (FIREBASE_SERVICE_ACCOUNT_FILE). Secret: server only.
+  firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT || '',
+  firebaseServiceAccountFile: process.env.FIREBASE_SERVICE_ACCOUNT_FILE || '',
   // Meta app id: only needed to create templates with an image/video/document header (Meta wants a sample file,
   // uploaded through the app's Resumable Upload API). Optional.
   metaAppId: process.env.META_APP_ID || '',

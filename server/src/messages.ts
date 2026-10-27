@@ -6,6 +6,7 @@ import { withSender } from './services/senders.js';
 import { cleanIncomingName, cleanMime, fetchIncomingMedia } from './services/incomingMedia.js';
 import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
+import { pushCustomerMessage } from './services/push.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
 import { errorCodeOf, errorDetailsOf, fitText, logEvent } from './services/logging.js';
 import { explainMetaError } from './services/metaErrors.js';
@@ -193,6 +194,8 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
       void logEvent({ level: 'ERROR', category: 'message', event: 'message.media_failed', message: `Couldn't download the customer's file: ${(err as Error)?.message ?? err}`, direction: 'in', workspaceId, messageId: message.id, waMessageId: m.waMessageId ?? null, conversationId: conversation.id, errorCode: errorCodeOf(err), errorDetails: errorDetailsOf(err), data: { type: m.type } });
     });
   emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(message) });
+  // Phones with the app in the background or closed: the same people the live alert goes to (in the background)
+  void pushCustomerMessage(workspaceId, conversation, message);
   // A brand-new chat: tell every connected member (toast). Only the customer's name, never the message text.
   if (!existed) emitToWorkspace(workspaceId, 'chat:new', { conversationId: conversation.id, contactName: conversation.contact.name || `+${conversation.contact.waId}` });
   // A snoozed chat wakes up as soon as the customer writes (closed chats stay closed)

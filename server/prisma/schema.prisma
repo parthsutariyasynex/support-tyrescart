@@ -697,3 +697,22 @@ model LogEntry {
   @@index([level, createdAt])
   @@index([requestId])
 }
+
+// Push notifications (Firebase Cloud Messaging, services/push.ts): one row per phone app install, registered by the
+// signed-in person (registerPushDevice) for the workspace they're signed in to. A token moves to whoever signs in on
+// that phone next; signing out removes it; tokens Firebase reports as gone are deleted when a send fails.
+// Matches the PushDevice table as it already exists in the development database (text id, no createdBy/updatedBy),
+// so nothing there changes. A database without it needs the table created (CREATE TABLE only; nothing else changes).
+model PushDevice {
+  id          String   @id @default(cuid())
+  // FCM registration token (Firebase's id for this app install)
+  token       String   @unique @db.VarChar(512)
+  userId      String
+  workspaceId String
+  // android | ios
+  platform    String   @db.VarChar(16)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([workspaceId, userId])
+}

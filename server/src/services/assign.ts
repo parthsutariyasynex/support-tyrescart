@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
 import { emitToUser, emitToWorkspace } from '../realtime.js';
+import { pushToUsers } from './push.js';
 import { AppError, notFound } from './errors.js';
 import { recordActivity } from './activity.js';
 import { requireConversation } from './inbox.js';
@@ -201,7 +202,15 @@ export async function assignConversation(
       contactName: before.contact.name || `+${before.contact.waId}`,
       previous: previous?.user.name ?? null,
     };
-    if (notifyNew) emitToUser(workspaceId, notifyNew, 'assignment:you', event);
+    if (notifyNew) {
+      emitToUser(workspaceId, notifyNew, 'assignment:you', event);
+      void pushToUsers(
+        workspaceId,
+        [notifyNew],
+        { title: 'Chat assigned to you', body: `${event.contactName}${event.actorName ? ` · by ${event.actorName}` : ''}`, conversationId, kind: 'assigned', collapseKey: `assigned:${conversationId}` },
+        `assigned:${conversationId}:${Date.now()}`,
+      );
+    }
     if (notifyPrevious) emitToUser(workspaceId, notifyPrevious, 'assignment:removed', event);
     const admins = await prisma.member.findMany({ where: { workspaceId, active: true }, select: { userId: true, role: true } });
     for (const a of admins) {

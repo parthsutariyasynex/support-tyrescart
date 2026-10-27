@@ -12,6 +12,11 @@ node_modules/
 .env.production
 !.env.example
 
+# Firebase service account keys (push notifications): kept on the server only, never committed
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+
 # Next.js & Build outputs
 .next/
 out/

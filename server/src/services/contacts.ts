@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AuthPayload } from '../auth.js';
 import { prisma } from '../prisma.js';
 import { emitToUser, emitToWorkspace } from '../realtime.js';
+import { pushToUsers } from './push.js';
 import { clearedAt } from './conversationClear.js';
 import { previewOf, recordActivity } from './activity.js';
 import { AppError, notFound } from './errors.js';
@@ -175,6 +176,12 @@ async function mentionPeople(auth: AuthPayload, conversationId: string, contact:
   for (const p of people) {
     await recordActivity({ workspaceId: auth.workspaceId, conversationId, actorId: auth.userId, type: 'note_mention', data: { remarkId, mentionedUserId: p.id, text: preview } });
     emitToUser(auth.workspaceId, p.id, 'mention:you', event);
+    void pushToUsers(
+      auth.workspaceId,
+      [p.id],
+      { title: `${event.actorName ?? 'A teammate'} mentioned you in a note`, body: `${event.contactName} · ${preview}`, conversationId, kind: 'mention', collapseKey: `mention:${remarkId}` },
+      `mention:${remarkId}`,
+    );
   }
 }
 
