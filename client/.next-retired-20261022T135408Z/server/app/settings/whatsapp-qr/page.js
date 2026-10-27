@@ -1,0 +1,13 @@
+var R=require("../../../chunks/ssr/[turbopack]_runtime.js")("server/app/settings/whatsapp-qr/page.js")
+R.c("server/chunks/ssr/[root-of-the-server]__1foy6i8jsrl1t._.js")
+R.c("server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_1a7p1tg759dn8.js")
+R.c("server/chunks/ssr/[root-of-the-server]__15m21_kxrltjw._.js")
+R.c("server/chunks/ssr/[root-of-the-server]__0_1n4t6a0-h5a._.js")
+R.c("server/chunks/ssr/[root-of-the-server]__1djv8-c_twon1._.js")
+R.c("server/chunks/ssr/node_modules_next_dist_client_components_0wpq8j32_ibz4._.js")
+R.c("server/chunks/ssr/node_modules_next_dist_client_components_builtin_forbidden_0symwr9mbf-fh.js")
+R.c("server/chunks/ssr/node_modules_next_dist_client_components_builtin_unauthorized_0l_sp0xky89qu.js")
+R.c("server/chunks/ssr/node_modules_next_dist_1c5t_vsn6u8fr._.js")
+R.c("server/chunks/ssr/client__next-internal_server_app_settings_whatsapp-qr_page_actions_0u702hp9l-9le.js")
+R.m(33285)
+module.exports=R.m(33285).exports

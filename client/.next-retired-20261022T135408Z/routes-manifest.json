@@ -1,0 +1,315 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "onMatchHeaders": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [
+      {
+        "source": "/graphql",
+        "destination": "http://127.0.0.1:5000/graphql",
+        "regex": "^/graphql(?:/)?$"
+      },
+      {
+        "source": "/auth/:path*",
+        "destination": "http://127.0.0.1:5000/auth/:path*",
+        "regex": "^/auth(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+      },
+      {
+        "source": "/webhook",
+        "destination": "http://127.0.0.1:5000/webhook",
+        "regex": "^/webhook(?:/)?$"
+      },
+      {
+        "source": "/webhook/:path*",
+        "destination": "http://127.0.0.1:5000/webhook/:path*",
+        "regex": "^/webhook(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+      },
+      {
+        "source": "/socket.io",
+        "destination": "http://127.0.0.1:5000/socket.io/",
+        "regex": "^/socket\\.io(?:/)?$"
+      },
+      {
+        "source": "/socket.io/:path*",
+        "destination": "http://127.0.0.1:5000/socket.io/:path*",
+        "regex": "^/socket\\.io(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+      },
+      {
+        "source": "/inbox/conversations/:id/images",
+        "destination": "http://127.0.0.1:5000/inbox/conversations/:id/images",
+        "regex": "^/inbox/conversations(?:/([^/]+?))/images(?:/)?$"
+      },
+      {
+        "source": "/inbox/conversations/:id/documents",
+        "destination": "http://127.0.0.1:5000/inbox/conversations/:id/documents",
+        "regex": "^/inbox/conversations(?:/([^/]+?))/documents(?:/)?$"
+      },
+      {
+        "source": "/inbox/conversations/:id/voice",
+        "destination": "http://127.0.0.1:5000/inbox/conversations/:id/voice",
+        "regex": "^/inbox/conversations(?:/([^/]+?))/voice(?:/)?$"
+      },
+      {
+        "source": "/inbox/conversations/:id/template",
+        "destination": "http://127.0.0.1:5000/inbox/conversations/:id/template",
+        "regex": "^/inbox/conversations(?:/([^/]+?))/template(?:/)?$"
+      },
+      {
+        "source": "/templates",
+        "destination": "http://127.0.0.1:5000/templates",
+        "regex": "^/templates(?:/)?$"
+      },
+      {
+        "source": "/templates/:id",
+        "destination": "http://127.0.0.1:5000/templates/:id",
+        "regex": "^/templates(?:/([^/]+?))(?:/)?$"
+      },
+      {
+        "source": "/inbox/messages/:id/media",
+        "destination": "http://127.0.0.1:5000/inbox/messages/:id/media",
+        "regex": "^/inbox/messages(?:/([^/]+?))/media(?:/)?$"
+      },
+      {
+        "source": "/me/avatar",
+        "destination": "http://127.0.0.1:5000/me/avatar",
+        "regex": "^/me/avatar(?:/)?$"
+      },
+      {
+        "source": "/health",
+        "destination": "http://127.0.0.1:5000/health",
+        "regex": "^/health(?:/)?$"
+      },
+      {
+        "source": "/reports/:path+",
+        "destination": "http://127.0.0.1:5000/reports/:path+",
+        "regex": "^/reports(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))(?:/)?$"
+      }
+    ],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/contacts/[id]",
+      "regex": "^/contacts/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/contacts/(?<nxtPid>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/account",
+      "regex": "^/account(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/account(?:/)?$"
+    },
+    {
+      "page": "/collaborations",
+      "regex": "^/collaborations(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/collaborations(?:/)?$"
+    },
+    {
+      "page": "/forgot-password",
+      "regex": "^/forgot\\-password(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/forgot\\-password(?:/)?$"
+    },
+    {
+      "page": "/inbox",
+      "regex": "^/inbox(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/inbox(?:/)?$"
+    },
+    {
+      "page": "/leads",
+      "regex": "^/leads(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/leads(?:/)?$"
+    },
+    {
+      "page": "/login",
+      "regex": "^/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/login(?:/)?$"
+    },
+    {
+      "page": "/my-chats",
+      "regex": "^/my\\-chats(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/my\\-chats(?:/)?$"
+    },
+    {
+      "page": "/register",
+      "regex": "^/register(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/register(?:/)?$"
+    },
+    {
+      "page": "/reports",
+      "regex": "^/reports(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/reports(?:/)?$"
+    },
+    {
+      "page": "/reset-password",
+      "regex": "^/reset\\-password(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/reset\\-password(?:/)?$"
+    },
+    {
+      "page": "/settings",
+      "regex": "^/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings(?:/)?$"
+    },
+    {
+      "page": "/settings/automations",
+      "regex": "^/settings/automations(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/automations(?:/)?$"
+    },
+    {
+      "page": "/settings/company",
+      "regex": "^/settings/company(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/company(?:/)?$"
+    },
+    {
+      "page": "/settings/contact-properties",
+      "regex": "^/settings/contact\\-properties(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/contact\\-properties(?:/)?$"
+    },
+    {
+      "page": "/settings/deleted-contacts",
+      "regex": "^/settings/deleted\\-contacts(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/deleted\\-contacts(?:/)?$"
+    },
+    {
+      "page": "/settings/labels",
+      "regex": "^/settings/labels(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/labels(?:/)?$"
+    },
+    {
+      "page": "/settings/lifecycle",
+      "regex": "^/settings/lifecycle(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/lifecycle(?:/)?$"
+    },
+    {
+      "page": "/settings/lists",
+      "regex": "^/settings/lists(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/lists(?:/)?$"
+    },
+    {
+      "page": "/settings/notifications",
+      "regex": "^/settings/notifications(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/notifications(?:/)?$"
+    },
+    {
+      "page": "/settings/reports",
+      "regex": "^/settings/reports(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/reports(?:/)?$"
+    },
+    {
+      "page": "/settings/roles",
+      "regex": "^/settings/roles(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/roles(?:/)?$"
+    },
+    {
+      "page": "/settings/saved-replies",
+      "regex": "^/settings/saved\\-replies(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/saved\\-replies(?:/)?$"
+    },
+    {
+      "page": "/settings/templates",
+      "regex": "^/settings/templates(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/templates(?:/)?$"
+    },
+    {
+      "page": "/settings/users",
+      "regex": "^/settings/users(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/users(?:/)?$"
+    },
+    {
+      "page": "/settings/whatsapp-qr",
+      "regex": "^/settings/whatsapp\\-qr(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/whatsapp\\-qr(?:/)?$"
+    },
+    {
+      "page": "/settings/workspace",
+      "regex": "^/settings/workspace(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/workspace(?:/)?$"
+    },
+    {
+      "page": "/teams",
+      "regex": "^/teams(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/teams(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}

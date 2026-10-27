@@ -1,0 +1,3 @@
+module.exports=[30304,a=>{"use strict";var b=a.i(87924),c=a.i(50944),d=a.i(72131),e=a.i(88966),f=a.i(93326),g=a.i(81376);function h({me:a}){let f=(0,c.useRouter)(),i=(0,e.z)(a.role);return((0,d.useEffect)(()=>{i||f.replace("/inbox")},[i,f]),i)?(0,b.jsx)("div",{className:"h-full overflow-y-auto bg-page/40 p-4 sm:p-6 lg:p-8",style:{scrollbarGutter:"stable"},children:(0,b.jsx)("div",{className:"mx-auto w-full max-w-6xl space-y-6",children:(0,b.jsx)(g.f,{})})}):null}a.s(["default",0,function(){return(0,b.jsx)(f.O,{children:a=>(0,b.jsx)(h,{me:a})})}])}];
+
+//# sourceMappingURL=client_app_reports_page_tsx_1-500or-md_af._.js.map

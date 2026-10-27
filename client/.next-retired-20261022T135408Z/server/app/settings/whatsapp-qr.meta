@@ -1,0 +1,39 @@
+{
+  "headers": {
+    "x-nextjs-stale-time": "300",
+    "x-nextjs-prerender": "1",
+    "x-next-cache-tags": "_N_T_/layout,_N_T_/settings/layout,_N_T_/settings/whatsapp-qr/layout,_N_T_/settings/whatsapp-qr/page,_N_T_/settings/whatsapp-qr"
+  },
+  "segmentPaths": [
+    "/_tree",
+    "/_full",
+    "/settings/whatsapp-qr/__PAGE__"
+  ],
+  "prefetchHints": {
+    "hints": 64,
+    "slots": {
+      "children": {
+        "hints": 96,
+        "slots": {
+          "children": {
+            "hints": 96,
+            "slots": {
+              "children": {
+                "hints": 160,
+                "slots": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "routeCache": {
+    "key": "/route-cache/APP_PAGE/c125767ea4fccf6ddbaed5d224ca36f0ac0f04bd59595ee4984a6b5262253a39/$/settings/whatsapp-qr",
+    "owner": {
+      "kind": "APP_PAGE",
+      "sourceRoute": "/settings/whatsapp-qr/page"
+    },
+    "isFallback": false
+  }
+}

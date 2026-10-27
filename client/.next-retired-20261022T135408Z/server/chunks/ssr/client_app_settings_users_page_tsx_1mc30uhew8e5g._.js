@@ -1,0 +1,3 @@
+module.exports=[41777,a=>{"use strict";var b=a.i(87924),c=a.i(50944),d=a.i(72131),e=a.i(88966),f=a.i(93326),g=a.i(93750),h=a.i(6705);function i({me:a}){let f=(0,c.useRouter)(),g=(0,e.z)(a.role);return((0,d.useEffect)(()=>{g||f.replace("/settings")},[g,f]),g)?(0,b.jsx)("div",{className:"max-w-6xl",children:(0,b.jsx)(h.f,{meId:a.user.id,role:a.role})}):null}a.s(["default",0,function(){return(0,b.jsx)(f.O,{children:a=>(0,b.jsx)(g.f,{me:a,section:"Company settings",title:"User management",children:(0,b.jsx)(i,{me:a})})})}])}];
+
+//# sourceMappingURL=client_app_settings_users_page_tsx_1mc30uhew8e5g._.js.map

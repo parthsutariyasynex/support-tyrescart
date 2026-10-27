@@ -44,3 +44,7 @@ Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# Private Firebase credentials
+tyrescart-support-054e6473a70f.json
+client-next-backups/

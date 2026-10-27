@@ -1,0 +1,34 @@
+{
+  "headers": {
+    "x-nextjs-stale-time": "300",
+    "x-nextjs-prerender": "1",
+    "x-next-cache-tags": "_N_T_/layout,_N_T_/my-chats/layout,_N_T_/my-chats/page,_N_T_/my-chats"
+  },
+  "segmentPaths": [
+    "/_tree",
+    "/_full",
+    "/my-chats/__PAGE__"
+  ],
+  "prefetchHints": {
+    "hints": 64,
+    "slots": {
+      "children": {
+        "hints": 96,
+        "slots": {
+          "children": {
+            "hints": 160,
+            "slots": null
+          }
+        }
+      }
+    }
+  },
+  "routeCache": {
+    "key": "/route-cache/APP_PAGE/78259ad5d7640dcae58377c5f0ff005dd5d5367f457c59d222322451affecbe3/$/my-chats",
+    "owner": {
+      "kind": "APP_PAGE",
+      "sourceRoute": "/my-chats/page"
+    },
+    "isFallback": false
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "headers": {
+    "x-nextjs-stale-time": "300",
+    "x-nextjs-prerender": "1",
+    "x-next-cache-tags": "_N_T_/layout,_N_T_/settings/layout,_N_T_/settings/contact-properties/layout,_N_T_/settings/contact-properties/page,_N_T_/settings/contact-properties"
+  },
+  "segmentPaths": [
+    "/_tree",
+    "/_full",
+    "/settings/contact-properties/__PAGE__"
+  ],
+  "prefetchHints": {
+    "hints": 64,
+    "slots": {
+      "children": {
+        "hints": 96,
+        "slots": {
+          "children": {
+            "hints": 96,
+            "slots": {
+              "children": {
+                "hints": 160,
+                "slots": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "routeCache": {
+    "key": "/route-cache/APP_PAGE/177a66e60a68b51b03897bdffb16dcdb916c146e2cb852f420df7b51af5d3851/$/settings/contact-properties",
+    "owner": {
+      "kind": "APP_PAGE",
+      "sourceRoute": "/settings/contact-properties/page"
+    },
+    "isFallback": false
+  }
+}
