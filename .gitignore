@@ -16,9 +16,14 @@ node_modules/
 *firebase-adminsdk*.json
 *service-account*.json
 *serviceAccount*.json
+tyrescart-support-*.json
 
-# Next.js & Build outputs
+# Private notes with production credentials: never committed
+test.txt
+
+# Next.js & Build outputs (.next-*/: retired build folders, e.g. client/.next-retired-20261022T135408Z/)
 .next/
+.next-*/
 out/
 dist/
 build/
@@ -45,6 +50,12 @@ Thumbs.db
 .idea/
 .claude/
 
-# Private Firebase credentials
-tyrescart-support-054e6473a70f.json
 client-next-backups/
+
+# Screenshots and pictures dropped in the project's top folder (app images live under client/)
+/*.png
+/*.jpg
+/*.jpeg
+
+# Database dumps and migration backups (real emails and password hashes); also in server/.gitignore
+server/backups/

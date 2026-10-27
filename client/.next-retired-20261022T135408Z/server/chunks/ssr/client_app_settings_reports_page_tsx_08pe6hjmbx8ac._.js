@@ -1,3 +1,0 @@
-module.exports=[3111,a=>{"use strict";var b=a.i(87924),c=a.i(50944),d=a.i(72131),e=a.i(88966),f=a.i(93326),g=a.i(81376),h=a.i(93750);function i({me:a}){let f=(0,c.useRouter)(),h=(0,e.z)(a.role);return((0,d.useEffect)(()=>{h||f.replace("/settings")},[h,f]),h)?(0,b.jsx)("div",{className:"max-w-6xl space-y-6",children:(0,b.jsx)(g.f,{})}):null}a.s(["default",0,function(){return(0,b.jsx)(f.O,{children:a=>(0,b.jsx)(h.f,{me:a,section:"Company settings",title:"Reports",children:(0,b.jsx)(i,{me:a})})})}])}];
-
-//# sourceMappingURL=client_app_settings_reports_page_tsx_08pe6hjmbx8ac._.js.map
