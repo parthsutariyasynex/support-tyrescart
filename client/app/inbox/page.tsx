@@ -1882,9 +1882,9 @@ function ChatPanel({
   const [voiceMode, setVoiceMode] = useState(false);
   useEffect(() => setVoiceMode(false), [conversation.id]);
   // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
-  // to the customer's Remarks in the profile panel), or AI Assistant (AiAssistant.tsx: AI Summary and AI Reply; only
-  // when the server has AI set up). Each chat opens on Reply.
-  const [mode, setMode] = useState<'reply' | 'note' | 'ai'>('reply');
+  // to the customer's Remarks in the profile panel), AI Reply or AI Summary (AiAssistant.tsx; only when the server has
+  // AI set up; AI Summary for owners, admins and supervisors). Each chat opens on Reply.
+  const [mode, setMode] = useState<'reply' | 'note' | 'ai-reply' | 'ai-summary'>('reply');
   const [aiOn, setAiOn] = useState(false);
   useEffect(() => void fetchAiConfigured().then(setAiOn), []);
   // An AI-written reply in the message box: sending it asks for confirmation first (aiConfirm: the text to confirm).
@@ -1944,7 +1944,8 @@ function ChatPanel({
   };
   const [editing, setEditing] = useState<Message | null>(null);
   const noting = mode === 'note' && !editing; // editing a message is always a reply
-  const assisting = mode === 'ai' && !editing;
+  const assisting = (mode === 'ai-reply' || mode === 'ai-summary') && !editing;
+  const canSummarize = !!viewer?.isAdmin || viewer?.role === 'supervisor';
   useEffect(() => {
     if (!text) setAiReply(false);
   }, [text]);
@@ -2523,7 +2524,9 @@ function ChatPanel({
 
   // Each step is reported to the server's logs under one request id, which the send itself also carries
   // (X-Request-Id): the browser's steps, the API's handling, the call to Meta and the saved message all share it
-  async function send(body: string) {
+  // Replaced (aiGenerated added): async function send(body: string) {
+  // aiGenerated: sent from "Send this AI reply?" (the text came from AI Reply)
+  async function send(body: string, aiGenerated = false) {
     setError('');
     const quoted = replyTo;
     const conversationId = conversation.id;
@@ -2532,7 +2535,8 @@ function ChatPanel({
     dispatchPending({ type: 'start', send: { requestId, conversationId, body, startedAt: started } });
     void reportClient({ event: 'send_started', requestId, conversationId, content: body, replyToId: quoted?.id ?? null });
     try {
-      const m = await sendTextMessage(conversationId, body, quoted?.id, { requestId, timeoutMs: SEND_TIMEOUT_MS, reported: true });
+      // Replaced (aiGenerated passed on): const m = await sendTextMessage(conversationId, body, quoted?.id, { requestId, timeoutMs: SEND_TIMEOUT_MS, reported: true });
+      const m = await sendTextMessage(conversationId, body, quoted?.id, { requestId, timeoutMs: SEND_TIMEOUT_MS, reported: true }, aiGenerated);
       dispatchPending({ type: 'done', requestId });
       onSent(m);
       setReplyTo((r) => (r?.id === quoted?.id ? null : r)); // sent as a reply: the bar goes away
@@ -3021,26 +3025,27 @@ function ChatPanel({
             text={aiConfirm}
             onCancel={() => setAiConfirm(null)}
             onConfirm={() => {
-              send(aiConfirm);
+              // Replaced (marked as an AI reply): send(aiConfirm);
+              send(aiConfirm, true);
               setText('');
               setAiReply(false);
               setAiConfirm(null);
             }}
           />
         )}
-        {/* Reply / Add note / AI Assistant, Template, and the number replies go out from */}
+        {/* Reply / Add note / AI Reply / AI Summary, Template, and the number replies go out from. The tabs wrap on a
+            narrow screen. */}
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-          <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
+          <div role="tablist" aria-label="Message type" className="flex max-w-full flex-wrap items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
             {(
               [
                 { key: 'reply', label: 'Reply', icon: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /> },
                 { key: 'note', label: 'Add note', icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /> },
-                ...(aiOn
-                  ? [{ key: 'ai' as const, label: 'AI Assistant', icon: <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /> }]
-                  : []),
+                ...(aiOn ? [{ key: 'ai-reply' as const, label: 'AI Reply', icon: <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /> }] : []),
+                ...(aiOn && canSummarize ? [{ key: 'ai-summary' as const, label: 'AI Summary', icon: <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5" /> }] : []),
               ] as const
             ).map((t) => {
-              const on = t.key === 'note' ? noting : t.key === 'ai' ? assisting : !noting && !assisting;
+              const on = t.key === 'note' ? noting : t.key === 'reply' ? !noting && !assisting : assisting && mode === t.key;
               return (
                 <button
                   key={t.key}
@@ -3054,9 +3059,9 @@ function ChatPanel({
                       setReplyTo(null);
                       setTemplate(null);
                     }
-                    if (t.key !== 'ai') requestAnimationFrame(() => inputRef.current?.focus());
+                    if (t.key === 'reply' || t.key === 'note') requestAnimationFrame(() => inputRef.current?.focus());
                   }}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
+                  className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
                     on ? (t.key === 'note' ? 'bg-warning-soft-hover text-warning shadow-xs' : 'bg-surface text-primary shadow-xs') : 'text-muted hover:text-body'
                   }`}
                 >
@@ -3095,8 +3100,9 @@ function ChatPanel({
         )}
         {assisting ? (
           <AiAssistantPanel
+            view={mode === 'ai-summary' ? 'summary' : 'reply'}
             conversationId={conversation.id}
-            canSummarize={!!viewer?.isAdmin || viewer?.role === 'supervisor'}
+            canSummarize={canSummarize}
             canReply
             replyBlocked={windowClosed ? '24-hour window closed: only an approved template can be sent until the customer writes again.' : null}
             onUseReply={(reply) => {

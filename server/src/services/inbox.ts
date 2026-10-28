@@ -228,7 +228,10 @@ export async function openConversation(workspaceId: string, id: string, viewerId
 }
 
 export const sendSchema = z.union([
-  z.object({ type: z.literal('text'), body: z.string().min(1).max(4096), replyToId: z.string().min(1).nullish() }),
+  // Replaced (aiGenerated added below):
+  // z.object({ type: z.literal('text'), body: z.string().min(1).max(4096), replyToId: z.string().min(1).nullish() }),
+  // aiGenerated: the text came from AI Reply (confirmed by the person, maybe edited); saved as automation "ai_reply"
+  z.object({ type: z.literal('text'), body: z.string().min(1).max(4096), replyToId: z.string().min(1).nullish(), aiGenerated: z.boolean().nullish() }),
   // language: omit to use the one the template is approved in
   z.object({ type: z.literal('template'), name: z.string().min(1), language: z.string().min(1).optional() }),
 ]);
@@ -490,8 +493,14 @@ export async function sendMessage(workspaceId: string, conversationId: string, r
   const quoted = await replyTarget(conversationId, input.replyToId);
 
   const body = input.body;
+  // Replaced (an AI Reply text is marked, below):
+  // const message = await prisma.message.create({
+  //   data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById, replyToId: quoted?.id ?? null },
+  // });
+  // Sent from AI Reply: marked automation "ai_reply" (still sent by this person, shown with their name), so the next AI
+  // Reply knows it was the AI's suggestion and not a person's own answer (services/ai.ts)
   const message = await prisma.message.create({
-    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById, replyToId: quoted?.id ?? null },
+    data: { conversationId, direction: 'out', type: input.type, body, status: 'pending', sentById, replyToId: quoted?.id ?? null, ...('aiGenerated' in input && input.aiGenerated ? { automation: 'ai_reply' } : {}) },
   });
 
   let saved;

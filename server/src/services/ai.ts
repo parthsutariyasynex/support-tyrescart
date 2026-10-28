@@ -51,16 +51,28 @@ const SYSTEM: Record<AiKind, string> = {
     "Reply in the customer's language, friendly and short, like a WhatsApp message (no subject line, no signature, no markdown).",
     'Never invent prices, stock, delivery dates, order details or promises: when the chat',
     "doesn't say, ask the customer for what is missing or say the team will check. Output only the message text.",
-    "When there is a <team_replies_since> block, the team already wrote after the customer's latest message. If those messages",
-    'already answer or settle it, output exactly ALREADY_ANSWERED and nothing else. A short answer such as "Yes", "Confirmed", "Done" or',
-    '"Sent" settles a yes/no question or a request for something to be done (e.g. "Can you confirm?", "Please send the invoice"), but',
-    'not a question asking for information (a price, size, date, stock or address), which needs that information. If they don\'t answer',
-    'it (only a greeting, a thank-you, "we will check", or an answer to something else), write the reply to what is still unanswered,',
-    'without repeating what the team already said.',
+    // Replaced (team replies before the latest message, and AI-suggested replies, never count; see below):
+    // "When there is a <team_replies_since> block, the team already wrote after the customer's latest message. If those messages",
+    // Replaced (AI Reply now always writes a new reply; replies since are context only, see below):
+    // 'Team messages in <conversation> before the latest customer message answered earlier messages: they never count as answering the',
+    // 'latest one, even on the same topic. Only the team messages listed in <team_replies_since>, written by a team member after the latest',
+    // 'customer message, can answer it. When it says (none), always write the reply. Messages in <ai_replies_since> were sent after it from',
+    // "earlier AI suggestions: they never count as answering it (the team asked for a new reply), so write a fresh reply that moves the",
+    // 'conversation on, without repeating them. If the <team_replies_since> messages',
+    // 'already answer or settle it, output exactly ALREADY_ANSWERED and nothing else. A short answer such as "Yes", "Confirmed", "Done" or',
+    // '"Sent" settles a yes/no question or a request for something to be done (e.g. "Can you confirm?", "Please send the invoice"), but',
+    // 'not a question asking for information (a price, size, date, stock or address), which needs that information. If they don\'t answer',
+    // 'it (only a greeting, a thank-you, "we will check", or an answer to something else), write the reply to what is still unanswered,',
+    // 'without repeating what the team already said.',
+    'Every team message, before or after the latest customer message, is context only: in <team_replies_since> (written by a team',
+    'member after it) and <ai_replies_since> (sent after it from earlier AI suggestions). Always write a new reply to the latest customer',
+    'message, even when the team has already replied to it: build on what was already said and move the conversation on, without',
+    'repeating it. Never refuse, never say it was already answered, and never output anything but the reply text.',
   ].join(' '),
 };
 
-// The AI's answer when the team's messages since already answered the customer's latest message (AI Reply)
+// Replaced: // The AI's answer when the team's messages since already answered the customer's latest message (AI Reply)
+// An "already answered" from the AI instead of a reply (no longer asked for: AI Reply always writes one; guarded against)
 const ALREADY_ANSWERED = /^\W*ALREADY_ANSWERED\W*$/;
 
 // Continuing a summary (Regenerate, or the next batch of a long chat)
@@ -146,8 +158,11 @@ function requireConfigured() {
 
 // One message as the AI reads it: "Customer:" or "Team:", then its text, or its type (and file name) for media.
 // No names, numbers or ids.
-type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null };
-const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true } as const;
+// Replaced (automation added: whether a team message was sent from AI Reply):
+// type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null };
+// const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true } as const;
+type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null; automation: string | null };
+const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true, automation: true } as const;
 function lineOf(m: ChatLine) {
   const who = m.direction === 'in' ? 'Customer' : 'Team';
   const body = m.body.trim().slice(0, MESSAGE_CHARS);
@@ -161,35 +176,78 @@ const MESSAGE_ORDER = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
 const after = (c: Checkpoint) => ({ OR: [{ createdAt: { gt: c.createdAt } }, { createdAt: c.createdAt, id: { gt: c.id } }] });
 const before = (c: Checkpoint) => ({ OR: [{ createdAt: { lt: c.createdAt } }, { createdAt: c.createdAt, id: { lt: c.id } }] });
 
+// Replaced by the replyContext below (AI-suggested team replies told apart from a person's own):
+// // AI Reply's context: the messages (not deleted ones) right before the customer's latest message, nearest first, until
+// // REPLY_CONTEXT_CHARS of text, then that message, then the team's messages after it (so the reply doesn't repeat them),
+// // up to the same amount. Read a page at a time: a long chat is never loaded or sent whole. Oldest first.
+// // later: the team's messages since the target (only the team's: the target is the customer's latest message).
+// export async function replyContext(conversationId: string, target: ChatLine) {
+//   const collect = async (direction: 'before' | 'after') => {
+//     const lines: string[] = [];
+//     let size = 0;
+//     let cursor: Checkpoint = target;
+//     for (;;) {
+//       const rows: ChatLine[] = await prisma.message.findMany({
+//         where: { conversationId, deletedAt: null, ...(direction === 'before' ? before(cursor) : after(cursor)) },
+//         orderBy: direction === 'before' ? [{ createdAt: 'desc' }, { id: 'desc' }] : MESSAGE_ORDER,
+//         take: REPLY_PAGE,
+//         select: LINE_FIELDS,
+//       });
+//       for (const m of rows) {
+//         const line = lineOf(m);
+//         if (size + line.length > REPLY_CONTEXT_CHARS.value) return lines;
+//         lines.push(line);
+//         size += line.length + 1;
+//       }
+//       if (rows.length < REPLY_PAGE) return lines;
+//       cursor = rows[rows.length - 1];
+//     }
+//   };
+//   const earlier = (await collect('before')).reverse();
+//   const later = await collect('after');
+//   return { lines: [...earlier, lineOf(target), ...later], later };
+// }
+
+// A message sent from AI Reply (inbox.ts sendMessage, aiGenerated)
+const AI_REPLY = 'ai_reply';
+// In AI Reply's context a team message sent from an AI suggestion says so
+const replyLineOf = (m: ChatLine) => (m.direction === 'out' && m.automation === AI_REPLY ? lineOf(m).replace(/^Team:/, 'Team (sent from an AI suggestion):') : lineOf(m));
+
 // AI Reply's context: the messages (not deleted ones) right before the customer's latest message, nearest first, until
 // REPLY_CONTEXT_CHARS of text, then that message, then the team's messages after it (so the reply doesn't repeat them),
 // up to the same amount. Read a page at a time: a long chat is never loaded or sent whole. Oldest first.
-// later: the team's messages since the target (only the team's: the target is the customer's latest message).
+// The team's messages since the target (only the team's: the target is the customer's latest message) come split:
+// later: the ones a person wrote (they may answer it); aiLater: the ones sent from AI Reply (context only, never an
+// answer: asking for AI Reply again means a new reply is wanted).
 export async function replyContext(conversationId: string, target: ChatLine) {
   const collect = async (direction: 'before' | 'after') => {
-    const lines: string[] = [];
+    const rows: ChatLine[] = [];
     let size = 0;
     let cursor: Checkpoint = target;
     for (;;) {
-      const rows: ChatLine[] = await prisma.message.findMany({
+      const page: ChatLine[] = await prisma.message.findMany({
         where: { conversationId, deletedAt: null, ...(direction === 'before' ? before(cursor) : after(cursor)) },
         orderBy: direction === 'before' ? [{ createdAt: 'desc' }, { id: 'desc' }] : MESSAGE_ORDER,
         take: REPLY_PAGE,
         select: LINE_FIELDS,
       });
-      for (const m of rows) {
-        const line = lineOf(m);
-        if (size + line.length > REPLY_CONTEXT_CHARS.value) return lines;
-        lines.push(line);
+      for (const m of page) {
+        const line = replyLineOf(m);
+        if (size + line.length > REPLY_CONTEXT_CHARS.value) return rows;
+        rows.push(m);
         size += line.length + 1;
       }
-      if (rows.length < REPLY_PAGE) return lines;
-      cursor = rows[rows.length - 1];
+      if (page.length < REPLY_PAGE) return rows;
+      cursor = page[page.length - 1];
     }
   };
   const earlier = (await collect('before')).reverse();
-  const later = await collect('after');
-  return { lines: [...earlier, lineOf(target), ...later], later };
+  const since = await collect('after');
+  return {
+    lines: [...earlier, target, ...since].map(replyLineOf),
+    later: since.filter((m) => m.automation !== AI_REPLY).map(replyLineOf),
+    aiLater: since.filter((m) => m.automation === AI_REPLY).map(replyLineOf),
+  };
 }
 
 // AI Summary: every message after the checkpoint (all of them without one) up to `until`, in order, a page at a time
@@ -208,13 +266,36 @@ async function* messagesAfter(conversationId: string, from: Checkpoint | null, u
   }
 }
 
-async function ask(kind: AiKind, auth: AuthPayload, conversationId: string, content: string, count: number) {
+// Replaced (teamRepliedSince added: an "answered" is logged as such only when a person replied since):
+// async function ask(kind: AiKind, auth: AuthPayload, conversationId: string, content: string, count: number) {
+//   ...
+//     const answered = kind === 'reply' && ALREADY_ANSWERED.test(text);
+//     const message = kind === 'summary' ? 'AI Summary written' : answered ? "No AI reply: the team already answered the customer's latest message" : 'AI reply suggested (not sent)';
+//     void logEvent({ ..., message, outcome: answered ? 'already_answered' : 'completed', ... });
+// teamRepliedSince (AI Reply): whether a team member wrote after the customer's latest message, the only case where
+// the AI may say it's already answered
+async function ask(kind: AiKind, auth: AuthPayload, conversationId: string, content: string, count: number, teamRepliedSince = false) {
   const started = Date.now();
   try {
     const text = await (fake ?? (env.openRouterApiKey ? askOpenRouter : askClaude))(kind, SYSTEM[kind], content);
-    const answered = kind === 'reply' && ALREADY_ANSWERED.test(text);
-    const message = kind === 'summary' ? 'AI Summary written' : answered ? "No AI reply: the team already answered the customer's latest message" : 'AI reply suggested (not sent)';
-    void logEvent({ level: 'SUCCESS', category: 'system', event: `ai.${kind}`, message, outcome: answered ? 'already_answered' : 'completed', workspaceId: auth.workspaceId, userId: auth.userId, conversationId, durationMs: Date.now() - started, data: { messages: count, chars: text.length, model: fake ? 'test' : env.aiModel } });
+    const marked = kind === 'reply' && ALREADY_ANSWERED.test(text);
+    // Replaced (AI Reply always writes a new reply: an "already answered" is never accepted):
+    // const [message, outcome] =
+    //   kind === 'summary'
+    //     ? ['AI Summary written', 'completed']
+    //     : !marked
+    //       ? ['AI reply suggested (not sent)', 'completed']
+    //       : teamRepliedSince
+    //         ? ["No AI reply: the team already answered the customer's latest message", 'already_answered']
+    //         : ["The AI said 'already answered' though no team member has replied since the customer's latest message: not accepted", 'rejected'];
+    void teamRepliedSince; // kept for callers; no longer changes the outcome
+    const [message, outcome] =
+      kind === 'summary'
+        ? ['AI Summary written', 'completed']
+        : !marked
+          ? ['AI reply suggested (not sent)', 'completed']
+          : ["The AI said 'already answered' instead of writing a reply: not accepted (a new reply is always written)", 'rejected'];
+    void logEvent({ level: 'SUCCESS', category: 'system', event: `ai.${kind}`, message, outcome, workspaceId: auth.workspaceId, userId: auth.userId, conversationId, durationMs: Date.now() - started, data: { messages: count, chars: text.length, model: fake ? 'test' : env.aiModel } });
     return text;
   } catch (err) {
     const status = err instanceof Anthropic.APIError || err instanceof AiHttpError ? err.status : null;
@@ -330,25 +411,58 @@ async function summarize(auth: AuthPayload, conversationId: string) {
 // sending: open chat, 24-hour window, agents only after Assign to Me). Nothing is stored or sent. The target is the
 // customer's latest message (not deleted), found directly, however long the chat; the AI gets it on its own to answer,
 // and the chat around it as context (replyContext). One request; the chat is never summarized here.
-// When the team wrote after that message, the AI also gets those messages on their own (<team_replies_since>) and
-// decides whether they already answer it ("Can you confirm?" → "Yes, confirmed"): then no reply is suggested and the
-// person is told so (ALREADY_ANSWERED, shown as a note, not an error). Otherwise it answers what is still open.
+// Replaced (a reply is now always written):
+// // When the team wrote after that message, the AI also gets those messages on their own (<team_replies_since>) and
+// // decides whether they already answer it ("Can you confirm?" → "Yes, confirmed"): then no reply is suggested and the
+// // person is told so (ALREADY_ANSWERED, shown as a note, not an error). Otherwise it answers what is still open.
+// The team's messages since it (typed: <team_replies_since>; sent from AI suggestions: <ai_replies_since>) and the chat
+// before it are context only: a new reply is always suggested, even when the team already replied.
 export async function suggestReply(auth: AuthPayload, conversationId: string) {
   await checkCanSend(auth.workspaceId, conversationId, auth.userId, true);
   requireConfigured();
   const latest = await prisma.message.findFirst({ where: { conversationId, direction: 'in', deletedAt: null }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: LINE_FIELDS });
   if (!latest) throw new AppError("The customer hasn't written anything to reply to yet.", 400, 'NO_MESSAGES');
-  const { lines, later } = await replyContext(conversationId, latest);
+  // Replaced (below: <team_replies_since> always present, "(none)" when no team member wrote since; AI-suggested replies
+  // since go in <ai_replies_since> and never count as an answer; a wrong "answered" is asked once more):
+  // const { lines, later } = await replyContext(conversationId, latest);
+  // const content = [
+  //   conversationBlock(lines),
+  //   `<latest_customer_message>\n${lineOf(latest)}\n</latest_customer_message>`,
+  //   ...(later.length ? [`<team_replies_since>\n${later.join('\n')}\n</team_replies_since>`] : []),
+  // ].join('\n\n');
+  // const text = await ask('reply', auth, conversationId, content, lines.length);
+  // if (ALREADY_ANSWERED.test(text)) {
+  //   // Only possible when the team did write after it; otherwise the AI answered wrongly and nothing usable came back
+  //   if (!later.length) throw new AppError('The AI gave an unusable answer. Try again.', 502, 'AI_UNAVAILABLE');
+  //   throw new AppError("The team has already replied to the customer's latest message. There's nothing new to answer.", 409, 'ALREADY_ANSWERED');
+  // }
+  // return text;
+  const { lines, later, aiLater } = await replyContext(conversationId, latest);
   const content = [
     conversationBlock(lines),
     `<latest_customer_message>\n${lineOf(latest)}\n</latest_customer_message>`,
-    ...(later.length ? [`<team_replies_since>\n${later.join('\n')}\n</team_replies_since>`] : []),
+    `<team_replies_since>\n${later.length ? later.join('\n') : '(none)'}\n</team_replies_since>`,
+    ...(aiLater.length ? [`<ai_replies_since>\n${aiLater.join('\n')}\n</ai_replies_since>`] : []),
   ].join('\n\n');
-  const text = await ask('reply', auth, conversationId, content, lines.length);
+  // Replaced (AI Reply always writes a new reply, even when a team member already replied; below):
+  // let text = await ask('reply', auth, conversationId, content, lines.length, later.length > 0);
+  // if (ALREADY_ANSWERED.test(text) && !later.length) {
+  //   // No team member has written since the latest message (a reply to an earlier message, or one sent from an AI
+  //   // suggestion, never counts), so it can't be answered yet: asked once more, plainly; never skipped
+  //   const again = aiLater.length
+  //     ? 'No team member has written their own reply since the latest customer message (replies sent from AI suggestions do not count), so ALREADY_ANSWERED is not possible here: write a fresh reply to it.'
+  //     : 'The team has not replied since the latest customer message, so ALREADY_ANSWERED is not possible here: write the reply to it.';
+  //   text = await ask('reply', auth, conversationId, `${content}\n\n${again}`, lines.length);
+  //   if (ALREADY_ANSWERED.test(text)) throw new AppError('The AI gave an unusable answer. Try again.', 502, 'AI_UNAVAILABLE');
+  // }
+  // if (ALREADY_ANSWERED.test(text)) throw new AppError("The team has already replied to the customer's latest message. There's nothing new to answer.", 409, 'ALREADY_ANSWERED');
+  // return text;
+  // Always a new suggestion for the customer's latest message; the team's and earlier AI replies are context. Should the
+  // AI still answer "already answered" (it isn't asked to), it is asked once more for the reply; never shown as a note.
+  let text = await ask('reply', auth, conversationId, content, lines.length);
   if (ALREADY_ANSWERED.test(text)) {
-    // Only possible when the team did write after it; otherwise the AI answered wrongly and nothing usable came back
-    if (!later.length) throw new AppError('The AI gave an unusable answer. Try again.', 502, 'AI_UNAVAILABLE');
-    throw new AppError("The team has already replied to the customer's latest message. There's nothing new to answer.", 409, 'ALREADY_ANSWERED');
+    text = await ask('reply', auth, conversationId, `${content}\n\nWrite the reply to the latest customer message now. Earlier replies are context only.`, lines.length);
+    if (ALREADY_ANSWERED.test(text)) throw new AppError('The AI gave an unusable answer. Try again.', 502, 'AI_UNAVAILABLE');
   }
   return text;
 }

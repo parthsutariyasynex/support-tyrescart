@@ -5,17 +5,21 @@ import { createPortal } from 'react-dom';
 import { type ConversationSummary, fetchConversationSummary, generateConversationSummary, suggestReply } from '@/lib/ai';
 import { GqlError } from '@/lib/api';
 import { formatDateTime } from '@/lib/time';
+import { ConfirmDialog } from '../ConfirmDialog';
 
-// "AI Assistant" tab beside Reply / Add note. AI Summary (owners, admins and supervisors): the saved summary, who
-// made it and when, Generate / Regenerate. AI Reply (whoever may reply): a suggestion to edit here, then "Use this
-// reply" puts it in the message box; sending it asks for confirmation first (ConfirmAiSend).
+// The "AI Reply" and "AI Summary" tabs beside Reply / Add note (view: which one is open). AI Reply (whoever may reply):
+// opening it writes a suggestion straight away, to edit here; "Use this reply" puts it in the message box, and sending
+// it asks for confirmation first (ConfirmAiSend). AI Summary (owners, admins and supervisors): the saved summary, who
+// made it and when, Generate (at once) / Regenerate (only after "Regenerate the summary?" → Regenerate).
 export function AiAssistantPanel({
+  view,
   conversationId,
   canSummarize,
   canReply,
   replyBlocked,
   onUseReply,
 }: {
+  view: 'reply' | 'summary';
   conversationId: string;
   canSummarize: boolean;
   canReply: boolean;
@@ -26,6 +30,8 @@ export function AiAssistantPanel({
   const [summary, setSummary] = useState<ConversationSummary | null>(null);
   const [summaryState, setSummaryState] = useState<'loading' | 'idle' | 'busy'>('loading');
   const [summaryError, setSummaryError] = useState('');
+  // "Regenerate the summary?" open: Cancel leaves the saved summary as it is
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [reply, setReply] = useState('');
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyError, setReplyError] = useState('');
@@ -37,6 +43,7 @@ export function AiAssistantPanel({
     current.current = conversationId;
     setSummary(null);
     setSummaryError('');
+    setConfirmRegenerate(false);
     setReply('');
     setReplyError('');
     setReplyNote('');
@@ -79,16 +86,26 @@ export function AiAssistantPanel({
     }
   };
 
+  // AI Reply opened: write a suggestion at once (one click), unless one is there already or a reply can't be sent now
+  const autoDrafted = useRef('');
+  useEffect(() => {
+    if (view !== 'reply' || !canReply || replyBlocked || autoDrafted.current === conversationId) return;
+    autoDrafted.current = conversationId;
+    void draft();
+    // draft only reads the current chat; runs once per opened chat
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, conversationId, canReply, replyBlocked]);
+
   const button = 'rounded-lg px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50';
   return (
-    <div className="space-y-3 rounded-xl border border-line bg-surface p-3 text-xs" aria-label="AI Assistant">
-      {canSummarize && (
+    <div className="rounded-xl border border-line bg-surface p-3 text-xs" aria-label={view === 'reply' ? 'AI Reply' : 'AI Summary'}>
+      {view === 'summary' && canSummarize && (
         <section aria-labelledby="ai-summary-title">
           <div className="flex items-center justify-between gap-2">
             <h3 id="ai-summary-title" className="text-[11px] font-bold uppercase tracking-wide text-ink">
               AI Summary
             </h3>
-            <button type="button" disabled={summaryState !== 'idle'} onClick={generate} className={`${button} bg-primary-subtle text-primary hover:bg-primary-subtle/80`}>
+            <button type="button" disabled={summaryState !== 'idle'} onClick={() => (summary ? setConfirmRegenerate(true) : void generate())} className={`${button} bg-primary-subtle text-primary hover:bg-primary-subtle/80`}>
               {summaryState === 'busy' ? 'Writing…' : summary ? 'Regenerate' : 'Generate summary'}
             </button>
           </div>
@@ -117,11 +134,28 @@ export function AiAssistantPanel({
               {summaryError}
             </p>
           )}
+          {confirmRegenerate &&
+            createPortal(
+              <ConfirmDialog
+                title="Regenerate the summary?"
+                body="Are you sure you want to regenerate the summary? The AI updates it with the messages since it was made, and the new summary replaces the current one."
+                yes="Regenerate"
+                no="Cancel"
+                danger={false}
+                busy={false}
+                onYes={() => {
+                  setConfirmRegenerate(false);
+                  void generate();
+                }}
+                onNo={() => setConfirmRegenerate(false)}
+              />,
+              document.body,
+            )}
         </section>
       )}
 
-      {canReply && (
-        <section aria-labelledby="ai-reply-title" className={canSummarize ? 'border-t border-line-soft pt-3' : ''}>
+      {view === 'reply' && canReply && (
+        <section aria-labelledby="ai-reply-title">
           <div className="flex items-center justify-between gap-2">
             <h3 id="ai-reply-title" className="text-[11px] font-bold uppercase tracking-wide text-ink">
               AI Reply

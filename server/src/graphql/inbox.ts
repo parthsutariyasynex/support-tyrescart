@@ -160,6 +160,8 @@ export const typeDefs = /* GraphQL */ `
     body: String!
     "Reply to this message of the chat (quoted above the text, in the app and in WhatsApp)"
     replyToId: ID
+    "The text came from AI Reply (the person confirmed it, maybe after editing): saved as automation ai_reply"
+    aiGenerated: Boolean
   }
 
   input SendTemplateInput {
@@ -377,8 +379,12 @@ export const resolvers = {
   },
   Mutation: {
     markConversationRead: authed(({ id }: { id: string }, { workspaceId, userId }) => markConversationRead(workspaceId, id, userId)),
-    sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string; replyToId?: string | null } }, { workspaceId, userId }) =>
-      sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body, replyToId: input.replyToId }, userId),
+    // Replaced (aiGenerated passed on, below):
+    // sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string; replyToId?: string | null } }, { workspaceId, userId }) =>
+    //   sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body, replyToId: input.replyToId }, userId),
+    // ),
+    sendTextMessage: authed(({ input }: { input: { conversationId: string; body: string; replyToId?: string | null; aiGenerated?: boolean | null } }, { workspaceId, userId }) =>
+      sendMessage(workspaceId, input.conversationId, { type: 'text', body: input.body, replyToId: input.replyToId, aiGenerated: input.aiGenerated }, userId),
     ),
     sendTemplateMessage: authed(async ({ input }: { input: { conversationId: string; name: string; language?: string | null; values?: string | null; confirmed?: boolean | null; requestId?: string | null } }, auth) =>
       withSender(
