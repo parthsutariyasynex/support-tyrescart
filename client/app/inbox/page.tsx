@@ -1891,9 +1891,17 @@ function ChatPanel({
   // Emptying the box drops it; a new chat starts without one.
   const [aiReply, setAiReply] = useState(false);
   const [aiConfirm, setAiConfirm] = useState<string | null>(null);
+  // The confirmation came straight from AI Reply's "Use this reply" (not from the message box): Send sends it as it is,
+  // Cancel opens it in the message box to review or edit
+  const [aiConfirmFromPanel, setAiConfirmFromPanel] = useState(false);
+  // The AI reply in the message box was already confirmed in "Send this AI reply?" (Cancel there opened it here to edit):
+  // Send sends it without asking again. Only for that flow; emptying the box or another chat drops it.
+  const [aiReplyConfirmed, setAiReplyConfirmed] = useState(false);
   useEffect(() => {
     setAiReply(false);
     setAiConfirm(null);
+    setAiConfirmFromPanel(false);
+    setAiReplyConfirmed(false);
   }, [conversation.id]);
   // Internal notes in the chat (yellow bubbles): this customer's remarks, live (contact:remarks: added, edited or
   // deleted by anyone). Only shown to the team; never sent to WhatsApp.
@@ -1947,7 +1955,10 @@ function ChatPanel({
   const assisting = (mode === 'ai-reply' || mode === 'ai-summary') && !editing;
   const canSummarize = !!viewer?.isAdmin || viewer?.role === 'supervisor';
   useEffect(() => {
-    if (!text) setAiReply(false);
+    if (!text) {
+      setAiReply(false);
+      setAiReplyConfirmed(false);
+    }
   }, [text]);
   // WhatsApp's 24-hour window: over 24 hours since the customer last wrote (or they never did), only approved
   // templates can be sent, so the message box gives way to "Send template". A customer message arriving live opens
@@ -3023,12 +3034,30 @@ function ChatPanel({
         {aiConfirm !== null && (
           <ConfirmAiSend
             text={aiConfirm}
-            onCancel={() => setAiConfirm(null)}
+            // Replaced (from "Use this reply", Cancel opens the message box to edit it; below):
+            // onCancel={() => setAiConfirm(null)}
+            onCancel={() => {
+              if (aiConfirmFromPanel) {
+                setText(aiConfirm);
+                setAiReply(true);
+                setAiReplyConfirmed(true); // already asked: sending it from the message box won't ask again
+                setMode('reply');
+                requestAnimationFrame(() => inputRef.current?.focus());
+              }
+              setAiConfirmFromPanel(false);
+              setAiConfirm(null);
+            }}
             onConfirm={() => {
               // Replaced (marked as an AI reply): send(aiConfirm);
               send(aiConfirm, true);
-              setText('');
-              setAiReply(false);
+              // Replaced (from "Use this reply", whatever is in the message box is left as it is; below):
+              // setText('');
+              // setAiReply(false);
+              if (!aiConfirmFromPanel) {
+                setText('');
+                setAiReply(false);
+              } else setMode('reply'); // back to the chat's message box, where the sent reply shows
+              setAiConfirmFromPanel(false);
               setAiConfirm(null);
             }}
           />
@@ -3105,11 +3134,16 @@ function ChatPanel({
             canSummarize={canSummarize}
             canReply
             replyBlocked={windowClosed ? '24-hour window closed: only an approved template can be sent until the customer writes again.' : null}
+            // Replaced ("Use this reply" now asks "Send this AI reply?" first: Send sends it, Cancel opens the message box):
+            // onUseReply={(reply) => {
+            //   setText(reply);
+            //   setAiReply(true);
+            //   setMode('reply');
+            //   requestAnimationFrame(() => inputRef.current?.focus());
+            // }}
             onUseReply={(reply) => {
-              setText(reply);
-              setAiReply(true);
-              setMode('reply');
-              requestAnimationFrame(() => inputRef.current?.focus());
+              setAiConfirmFromPanel(true);
+              setAiConfirm(reply);
             }}
           />
         ) : template && !noting && !editing ? (
@@ -3152,6 +3186,15 @@ function ChatPanel({
             if (editing) return void saveEdit();
             if (noting) return void saveNote(text); // a note may be files only
             if (!text.trim()) return;
+            // Written with AI and already confirmed in "Send this AI reply?" (then opened here to edit): sent at once, as an
+            // AI reply, without asking again
+            if (aiReply && aiReplyConfirmed) {
+              send(text, true);
+              setText('');
+              setAiReply(false);
+              setAiReplyConfirmed(false);
+              return;
+            }
             // Written with AI: only after "Send this AI reply?" → Send (ConfirmAiSend below)
             if (aiReply) return setAiConfirm(text);
             send(text);

@@ -8,8 +8,9 @@ import { formatDateTime } from '@/lib/time';
 import { ConfirmDialog } from '../ConfirmDialog';
 
 // The "AI Reply" and "AI Summary" tabs beside Reply / Add note (view: which one is open). AI Reply (whoever may reply):
-// opening it writes a suggestion straight away, to edit here; "Use this reply" puts it in the message box, and sending
-// it asks for confirmation first (ConfirmAiSend). AI Summary (owners, admins and supervisors): the saved summary, who
+// opening it writes a suggestion straight away, to edit here; "Use this reply" asks "Send this AI reply?" (ConfirmAiSend,
+// in page.tsx): Send sends it as it is, Cancel puts it in the message box to review or edit, and sending it from there
+// asks again. AI Summary (owners, admins and supervisors): the saved summary, who
 // made it and when, Generate (at once) / Regenerate (only after "Regenerate the summary?" → Regenerate).
 export function AiAssistantPanel({
   view,
