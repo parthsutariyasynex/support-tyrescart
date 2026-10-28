@@ -14,8 +14,9 @@ import {
   sanitize,
   setLogWriter,
   setRequestUser,
+  waRef,
 } from '../src/services/logging.js';
-import { statusError } from '../src/messages.js';
+import { rawStatus, statusError } from '../src/messages.js';
 
 // Captures what the terminal is sent while fn runs
 async function captureConsole(fn: () => Promise<unknown>) {
@@ -205,6 +206,32 @@ test("statusError reads Meta's numeric code from a failed status webhook (131049
   });
   assert.equal(statusError({ id: 'wamid.y', status: 'delivered' }), null);
   assert.equal(statusError({ errors: [{ code: 'abc', title: 'odd' }] })?.code, null);
+});
+
+test("a failed status's raw copy: saved under response with its nested details; ids as references, no number or secret", async () => {
+  const saved: LogRecord[] = [];
+  setLogWriter(async (r) => saved.push(r));
+  const failed = {
+    id: 'wamid.HBgMOTcxNTAwMDAwMDAwFQIAERgS',
+    status: 'failed',
+    timestamp: '1793000000',
+    recipient_id: '971500000000',
+    conversation: { id: 'conv-abc123', origin: { type: 'marketing' } },
+    biz_opaque_callback_data: 'token=supersecretvalue123',
+    errors: [{ code: 131026, title: 'Message undeliverable', message: 'Message undeliverable', error_data: { details: 'Receiver is incapable of receiving this message' }, href: 'https://developers.facebook.com/docs/whatsapp' }],
+  };
+  await logEvent({ level: 'ERROR', category: 'message', event: 'message.status', message: 'not delivered', response: rawStatus(failed) });
+  const raw = saved[0].response as any;
+  // Nested error detail survives (in data, depth 4 would have cut it to "[Truncated]")
+  assert.equal(raw.errors[0].error_data.details, 'Receiver is incapable of receiving this message');
+  assert.deepEqual([raw.errors[0].code, raw.errors[0].title, raw.conversation.origin.type], [131026, 'Message undeliverable', 'marketing']);
+  assert.equal((sanitize({ raw: failed }) as any).raw.errors[0].error_data, '[Truncated]', 'why it goes under response, not data');
+  // Identifiers become references; the customer's number and secrets are never stored
+  assert.deepEqual([raw.id, raw.conversation.id, raw.recipient_id], [waRef(failed.id), waRef('conv-abc123'), '[REDACTED]']);
+  assert.match(raw.biz_opaque_callback_data, /token=\[REDACTED\]/);
+  assert.doesNotMatch(JSON.stringify(saved[0]), /wamid\.HBgM|971500000000|conv-abc123|supersecretvalue123/);
+  // Nothing to copy: no response
+  assert.equal(rawStatus(null), null);
 });
 
 describe('every log explains itself', () => {

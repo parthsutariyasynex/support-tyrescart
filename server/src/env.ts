@@ -22,6 +22,13 @@ export const env = {
   // (FIREBASE_SERVICE_ACCOUNT) or the path to its file (FIREBASE_SERVICE_ACCOUNT_FILE). Secret: server only.
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT || '',
   firebaseServiceAccountFile: process.env.FIREBASE_SERVICE_ACCOUNT_FILE || '',
+  // AI Assistant (AI Summary and AI Reply): through OpenRouter when OPENROUTER_API_KEY is set (AI_MODEL: an OpenRouter
+  // model id), otherwise Anthropic's Claude (ANTHROPIC_API_KEY). Off when neither is set. Secrets: server only.
+  openRouterApiKey: process.env.OPENROUTER_API_KEY || '',
+  // Overridable only so tests can point it at a mock
+  openRouterBase: (process.env.OPENROUTER_API_BASE || 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  aiModel: process.env.AI_MODEL || (process.env.OPENROUTER_API_KEY ? 'google/gemma-4-26b-a4b-it:free' : 'claude-opus-5-5'),
   // Meta app id: only needed to create templates with an image/video/document header (Meta wants a sample file,
   // uploaded through the app's Resumable Upload API). Optional.
   metaAppId: process.env.META_APP_ID || '',

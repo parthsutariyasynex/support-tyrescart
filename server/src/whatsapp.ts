@@ -91,8 +91,9 @@ function hideTemplateValues(payload: any) {
 }
 
 // Every Graph API call is logged (direction out): which call, how long it took, Meta's answer (its HTTP status, and
-// on a send the message's waRef and Meta's message_status) or, when it failed, why (describeMetaFailure: Meta's
-// status, code, subcode, trace id and details, a timeout, or a network error). Inside withMessageTrace the entry
+// on a send the message's waRef and Meta's message_status; Meta's whole body only when the call failed) or, when it
+// failed, why (describeMetaFailure: Meta's status, code, subcode, trace id, details and whole error body, a timeout,
+// or a network error). Inside withMessageTrace the entry
 // names the message being sent. Never the access token, the customer's number or the message text.
 async function logged<T>(call: string, details: Record<string, unknown>, fn: (answer: MetaAnswer) => Promise<T>): Promise<T> {
   const started = Date.now();
@@ -124,7 +125,6 @@ async function logged<T>(call: string, details: Record<string, unknown>, fn: (an
         ...(waMessageId ? { waMessageId } : {}),
         ...(answer.messageStatus ? { messageStatus: answer.messageStatus } : {}),
         ...(mediaId ? { mediaId } : {}),
-        ...(answer.body !== undefined ? { body: answer.body } : {}),
       },
       data: details,
     });

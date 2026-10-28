@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CAPTION_MAX, checkFile, documentLabel, downloadFile, formatSize, mediaUrl } from '@/lib/media';
 import { overLimit, tooLongText } from '@/lib/textLimits';
+import { ZoomableImage } from './ZoomableImage';
 
 // The full Unicode emoji set (emoji-picker-react): search, categories, skin tones and recently used (kept in this
 // browser by the picker). Its data ships with the package, so nothing is fetched from another site; and it's only
@@ -241,9 +242,10 @@ export function ChatImage({ messageId }: { messageId: string }) {
       </button>
       {full &&
         createPortal(
-          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-ink/80 p-6" onClick={() => setFull(false)} role="dialog" aria-label="Image">
-            <img src={src} alt="Image, full size" className="max-h-full max-w-full rounded-lg object-contain" />
-            <button type="button" onClick={() => setFull(false)} aria-label="Close" className="absolute right-5 top-5 rounded-full bg-on-primary/15 px-3 py-1.5 text-sm text-on-primary hover:bg-on-primary/25">
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-ink/80 p-6" role="dialog" aria-label="Image">
+            {/* Zoom with the wheel, a pinch or a double-click/tap; a click beside the picture closes */}
+            <ZoomableImage src={src} alt="Image, full size" onBackdropClick={() => setFull(false)} />
+            <button type="button" onClick={() => setFull(false)} aria-label="Close" className="absolute right-5 top-5 z-10 rounded-full bg-ink/70 px-3 py-1.5 text-sm text-on-primary shadow-lg hover:bg-ink/90">
               ✕
             </button>
           </div>,
@@ -349,7 +351,7 @@ export function MediaViewer({ file, onClose }: { file: { id: string; type: strin
   const kind = file.type === 'image' || file.type === 'sticker' ? 'image' : file.type === 'video' ? 'video' : file.type === 'audio' || file.type === 'voice' ? 'audio' : 'other';
   return createPortal(
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-ink/85 p-6" onMouseDown={(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-label="File viewer">
-      <button type="button" onClick={onClose} aria-label="Close" className="absolute right-5 top-5 rounded-full bg-on-primary/15 px-3 py-1.5 text-sm text-on-primary hover:bg-on-primary/25">
+      <button type="button" onClick={onClose} aria-label="Close" className="absolute right-5 top-5 z-10 rounded-full bg-ink/70 px-3 py-1.5 text-sm text-on-primary shadow-lg hover:bg-ink/90">
         ✕
       </button>
       {error ? (
@@ -357,7 +359,7 @@ export function MediaViewer({ file, onClose }: { file: { id: string; type: strin
       ) : !src ? (
         <p className="text-sm text-on-primary/80">Loading…</p>
       ) : kind === 'image' ? (
-        <img src={src} alt={file.mediaName ?? 'Image'} className="max-h-full max-w-full rounded-lg object-contain" />
+        <ZoomableImage src={src} alt={file.mediaName ?? 'Image'} onBackdropClick={onClose} />
       ) : kind === 'video' ? (
         <video src={src} controls autoPlay className="max-h-full max-w-full rounded-lg bg-ink" aria-label="Video" />
       ) : kind === 'audio' ? (

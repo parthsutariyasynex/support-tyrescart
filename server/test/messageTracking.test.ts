@@ -247,7 +247,8 @@ describe('Meta API calls (mock Meta)', () => {
     assert.deepEqual([r.level, r.messageId, r.conversationId, r.messageSent, r.deliveryStatus], ['WARNING', 'm-traced', 'c-traced', 1, 'sent']);
     assert.deepEqual([r.waMessageId, r.waMessageRef], [WAMID, logging.waRef(WAMID)]);
     assert.deepEqual(r.request, { messaging_product: 'whatsapp', to: '971500000000', type: 'text', text: { body: 'secret text' } });
-    assert.deepEqual(r.response, { ok: true, httpStatus: 200, waMessageId: WAMID, messageStatus: 'held_for_quality_assessment', body: JSON.parse(next.body) });
+    // A success keeps Meta's status, not its whole body (that's kept for failures only)
+    assert.deepEqual(r.response, { ok: true, httpStatus: 200, waMessageId: WAMID, messageStatus: 'held_for_quality_assessment' });
     assert.match(r.message, /holding it back/);
     assert.doesNotMatch(JSON.stringify(r), /EAAG-test-token-secret/, 'never the access token');
   });
@@ -304,6 +305,17 @@ describe('delivery statuses (webhook)', () => {
     assert.deepEqual([r.level, r.deliveryStatus, r.customerReceived, r.errorCode], ['ERROR', 'failed', 0, 131049]);
     assert.match(r.errorDetails!, /Meta documents code 131049 as: Meta chose not to deliver/);
     assert.match(r.errorDetails!, /"Some new error" \(code 999123\)\. Code 999123 has no documented meaning/);
+    // Meta's whole status entry is kept under response, nested details included, wamid as its reference
+    const raw = r.response as any;
+    assert.equal(raw.errors[0].error_data.details, 'In order to maintain a healthy ecosystem engagement, the message failed to be delivered.');
+    assert.deepEqual([raw.id, raw.status, raw.timestamp], [logging.waRef(WAMID), 'failed', ts]);
+    assert.doesNotMatch(JSON.stringify(raw), new RegExp(WAMID.replace(/[.+=]/g, '\\$&')));
+  });
+  test('delivered, read and sent statuses keep no raw copy (response stays empty)', async () => {
+    for (const status of ['sent', 'delivered', 'read']) {
+      messages.logStatus('w1', { ...msg, status: 'pending' }, { id: WAMID, status, timestamp: ts, recipient_id: '971500000000' });
+      assert.equal((await last('message.status')).response, null, status);
+    }
   });
   test('failed with no error from Meta: says so, never guesses a reason', async () => {
     messages.logStatus('w1', msg, { id: WAMID, status: 'failed', timestamp: ts });

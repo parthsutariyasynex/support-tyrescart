@@ -8,7 +8,7 @@ import { defaultStageValue } from './services/leadStages.js';
 import { runAutomations } from './services/automations.js';
 import { pushCustomerMessage } from './services/push.js';
 import { inboundSentAt, laterOf } from './services/messagingWindow.js';
-import { errorCodeOf, errorDetailsOf, fitText, logEvent } from './services/logging.js';
+import { errorCodeOf, errorDetailsOf, fitText, logEvent, waRef } from './services/logging.js';
 import { explainMetaError } from './services/metaErrors.js';
 import { locationBody, placeFromWebhook } from './services/locationFormat.js';
 
@@ -294,6 +294,7 @@ export async function applyStatus(workspaceId: string, s: any) {
       waMessageId: s?.id ?? null,
       errorCode: error?.code ?? null,
       errorDetails: s?.status === 'failed' ? failureReason(s) : (error?.title ?? null),
+      ...(s?.status === 'failed' ? { response: rawStatus(s) } : {}),
       data: statusFacts(s),
     });
     return;
@@ -348,6 +349,23 @@ export function logStatus(workspaceId: string, message: { id: string; conversati
     workspaceId,
     errorCode: error?.code ?? null,
     errorDetails: why,
+    response: rawStatus(s),
     data: { ...data, errors: statusErrors(s) },
   });
+}
+
+// A failed status as Meta sent it (kept under response: deep enough for its nested errors, e.g. error_data.details),
+// without what identifies the customer: the message's and conversation's WhatsApp ids become references and the
+// customer's number is removed, whatever LOG_CUSTOMER_DATA says (the entry's own fields already carry those)
+export function rawStatus(s: any) {
+  if (!s || typeof s !== 'object') return null;
+  const { id, recipient_id, conversation, ...rest } = s;
+  return {
+    ...(typeof id === 'string' ? { id: waRef(id) } : {}),
+    ...(recipient_id !== undefined ? { recipient_id: '[REDACTED]' } : {}),
+    ...(conversation && typeof conversation === 'object'
+      ? { conversation: { ...conversation, ...(typeof conversation.id === 'string' ? { id: waRef(conversation.id) } : {}) } }
+      : {}),
+    ...rest,
+  };
 }

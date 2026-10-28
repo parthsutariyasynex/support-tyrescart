@@ -52,6 +52,12 @@ export async function requireLabelManager(auth: AuthPayload) {
   if (!canManageLabels) throw denied(auth, 'manage labels', "You don't have permission to manage labels", role);
 }
 
+// AI Summary of a chat (services/ai.ts): owners, admins and supervisors
+export async function requireSupervisor(auth: AuthPayload, action: string) {
+  const { role } = await getPermissions(auth);
+  if (!isSupervisorOrAbove(role)) throw denied(auth, action, 'Only owners, admins and supervisors can do this', role);
+}
+
 // Assigning, reassigning and unassigning chats: owners, admins and supervisors (agents use Assign to Me)
 export async function requireAssignmentManager(auth: AuthPayload) {
   const { canManageAssignments, role } = await getPermissions(auth);

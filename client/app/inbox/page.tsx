@@ -80,6 +80,8 @@ import { enterAction, fitHeight } from '@/lib/composer';
 import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInline, toggleLines } from '@/lib/formatting';
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
+import { AiAssistantPanel, ConfirmAiSend } from './AiAssistant';
+import { fetchAiConfigured } from '@/lib/ai';
 import { type ChatOption, ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, DeleteIcon, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { NO_DELETE, createDeleteChat, deleteChatText, withoutChat } from '@/lib/deleteChat';
@@ -1880,8 +1882,19 @@ function ChatPanel({
   const [voiceMode, setVoiceMode] = useState(false);
   useEffect(() => setVoiceMode(false), [conversation.id]);
   // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
-  // to the customer's Remarks in the profile panel). Each chat opens on Reply.
-  const [mode, setMode] = useState<'reply' | 'note'>('reply');
+  // to the customer's Remarks in the profile panel), or AI Assistant (AiAssistant.tsx: AI Summary and AI Reply; only
+  // when the server has AI set up). Each chat opens on Reply.
+  const [mode, setMode] = useState<'reply' | 'note' | 'ai'>('reply');
+  const [aiOn, setAiOn] = useState(false);
+  useEffect(() => void fetchAiConfigured().then(setAiOn), []);
+  // An AI-written reply in the message box: sending it asks for confirmation first (aiConfirm: the text to confirm).
+  // Emptying the box drops it; a new chat starts without one.
+  const [aiReply, setAiReply] = useState(false);
+  const [aiConfirm, setAiConfirm] = useState<string | null>(null);
+  useEffect(() => {
+    setAiReply(false);
+    setAiConfirm(null);
+  }, [conversation.id]);
   // Internal notes in the chat (yellow bubbles): this customer's remarks, live (contact:remarks: added, edited or
   // deleted by anyone). Only shown to the team; never sent to WhatsApp.
   const [notes, setNotes] = useState<ContactRemark[]>([]);
@@ -1931,6 +1944,10 @@ function ChatPanel({
   };
   const [editing, setEditing] = useState<Message | null>(null);
   const noting = mode === 'note' && !editing; // editing a message is always a reply
+  const assisting = mode === 'ai' && !editing;
+  useEffect(() => {
+    if (!text) setAiReply(false);
+  }, [text]);
   // WhatsApp's 24-hour window: over 24 hours since the customer last wrote (or they never did), only approved
   // templates can be sent, so the message box gives way to "Send template". A customer message arriving live opens
   // it again at once; a timer closes it at the exact moment it runs out. The server refuses the rest (WINDOW_CLOSED).
@@ -2999,30 +3016,45 @@ function ChatPanel({
             </button>
           </div>
         ))}
-        {/* Reply / Add note, Template, and the number replies go out from */}
+        {aiConfirm !== null && (
+          <ConfirmAiSend
+            text={aiConfirm}
+            onCancel={() => setAiConfirm(null)}
+            onConfirm={() => {
+              send(aiConfirm);
+              setText('');
+              setAiReply(false);
+              setAiConfirm(null);
+            }}
+          />
+        )}
+        {/* Reply / Add note / AI Assistant, Template, and the number replies go out from */}
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
           <div role="tablist" aria-label="Message type" className="flex items-center gap-0.5 rounded-lg bg-surface-muted p-0.5">
             {(
               [
                 { key: 'reply', label: 'Reply', icon: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /> },
                 { key: 'note', label: 'Add note', icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /> },
+                ...(aiOn
+                  ? [{ key: 'ai' as const, label: 'AI Assistant', icon: <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /> }]
+                  : []),
               ] as const
             ).map((t) => {
-              const on = (t.key === 'note') === noting;
+              const on = t.key === 'note' ? noting : t.key === 'ai' ? assisting : !noting && !assisting;
               return (
                 <button
                   key={t.key}
                   type="button"
                   role="tab"
                   aria-selected={on}
-                  disabled={!!editing && t.key === 'note'}
+                  disabled={!!editing && t.key !== 'reply'}
                   onClick={() => {
                     setMode(t.key);
-                    if (t.key === 'note') {
+                    if (t.key !== 'reply') {
                       setReplyTo(null);
                       setTemplate(null);
                     }
-                    requestAnimationFrame(() => inputRef.current?.focus());
+                    if (t.key !== 'ai') requestAnimationFrame(() => inputRef.current?.focus());
                   }}
                   className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
                     on ? (t.key === 'note' ? 'bg-warning-soft-hover text-warning shadow-xs' : 'bg-surface text-primary shadow-xs') : 'text-muted hover:text-body'
@@ -3036,7 +3068,7 @@ function ChatPanel({
               );
             })}
           </div>
-          {!noting && !(windowClosed && !editing) && <TemplatePicker disabled={!!editing} highlight={false} onPick={setTemplate} />}
+          {!noting && !assisting && !(windowClosed && !editing) && <TemplatePicker disabled={!!editing} highlight={false} onPick={setTemplate} />}
           
         </div>
         {noting && noteFiles.length > 0 && (
@@ -3061,7 +3093,20 @@ function ChatPanel({
             ))}
           </ul>
         )}
-        {template && !noting && !editing ? (
+        {assisting ? (
+          <AiAssistantPanel
+            conversationId={conversation.id}
+            canSummarize={!!viewer?.isAdmin || viewer?.role === 'supervisor'}
+            canReply
+            replyBlocked={windowClosed ? '24-hour window closed: only an approved template can be sent until the customer writes again.' : null}
+            onUseReply={(reply) => {
+              setText(reply);
+              setAiReply(true);
+              setMode('reply');
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          />
+        ) : template && !noting && !editing ? (
           // A chosen template: filled in, previewed and sent right here (inside or outside the 24-hour window)
           <TemplateComposer
             key={`${conversation.id}:${template.name}:${template.language}`}
@@ -3101,6 +3146,8 @@ function ChatPanel({
             if (editing) return void saveEdit();
             if (noting) return void saveNote(text); // a note may be files only
             if (!text.trim()) return;
+            // Written with AI: only after "Send this AI reply?" → Send (ConfirmAiSend below)
+            if (aiReply) return setAiConfirm(text);
             send(text);
             setText('');
           }}

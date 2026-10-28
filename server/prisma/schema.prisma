@@ -216,6 +216,8 @@ model Conversation {
   collaborators    ConversationCollaborator[]
   // Assignment report rows (reasons). Never read by the chat API; see services/assignmentReports.ts
   assignments      AssignmentRecord[]
+  // AI Summary (services/ai.ts): one per chat, replaced in place when regenerated
+  aiSummary        ConversationSummary?
 
   @@unique([workspaceId, contactId])
   @@index([workspaceId, lastMessageAt])
@@ -415,6 +417,21 @@ model ConversationClear {
 
   @@id([userId, conversationId])
   @@index([conversationId])
+}
+
+// AI Summary of a chat (services/ai.ts), made by owners, admins and supervisors in the AI Assistant tab. One row per
+// chat: Regenerate rewrites it (summary, lastMessageId, updatedAt, updatedBy); createdAt/createdBy stay the first
+// time. lastMessageId: the newest message it covers, so the tab can say when newer messages came in.
+model ConversationSummary {
+  id             BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
+  conversationId String       @unique
+  summary        String       @db.Text
+  lastMessageId  String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  createdBy      String?
+  updatedBy      String?
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 }
 
 // WhatsApp Business-style quick replies: typing "/shortcut" in the message box offers these texts.
@@ -701,10 +718,10 @@ model LogEntry {
 // Push notifications (Firebase Cloud Messaging, services/push.ts): one row per phone app install, registered by the
 // signed-in person (registerPushDevice) for the workspace they're signed in to. A token moves to whoever signs in on
 // that phone next; signing out removes it; tokens Firebase reports as gone are deleted when a send fails.
-// Matches the PushDevice table as it already exists in the development database (text id, no createdBy/updatedBy),
-// so nothing there changes. A database without it needs the table created (CREATE TABLE only; nothing else changes).
+// The id is a number (BIGINT UNSIGNED AUTO_INCREMENT); nothing refers to it (devices are found by token). An older
+// table with a text id is changed by backups/pushdevice-id-bigint.sql; no createdBy/updatedBy.
 model PushDevice {
-  id          String   @id @default(cuid())
+  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
   // FCM registration token (Firebase's id for this app install)
   token       String   @unique @db.VarChar(512)
   userId      String

@@ -62,7 +62,7 @@ describe('Graph API errors keep Meta’s code', () => {
 });
 
 describe('every Graph API call is logged', () => {
-  test('a successful send: SUCCESS with the exact request and Meta’s whole answer, never the access token', async () => {
+  test('a successful send: SUCCESS with the exact request and Meta’s status, not its whole answer, never the access token', async () => {
     next = { status: 200, body: { messaging_product: 'whatsapp', contacts: [{ input: '971500000000', wa_id: '971500000000' }], messages: [{ id: 'wamid.OK1' }] } };
     assert.equal(await wa.sendText(account, '971500000000', 'hello text'), 'wamid.OK1');
     const log = await lastLog();
@@ -70,8 +70,43 @@ describe('every Graph API call is logged', () => {
     assert.deepEqual(log.data, { type: 'text' });
     assert.equal(typeof log.durationMs, 'number');
     assert.deepEqual(log.request, { messaging_product: 'whatsapp', to: '971500000000', type: 'text', text: { body: 'hello text' } });
-    assert.deepEqual((log.response as any).body, next.body);
+    // The useful facts stay; the body (the customer's number, wamids) is kept for failures only
+    assert.deepEqual(log.response, { ok: true, httpStatus: 200, waMessageId: 'wamid.OK1' });
+    assert.doesNotMatch(JSON.stringify(log.response), /971500000000|contacts/);
     assert.doesNotMatch(JSON.stringify(log), /EAAG-test-token-secret/);
+  });
+  test('uploads and template listing: success metadata only, no body', async () => {
+    next = { status: 200, body: { id: 'media-9' } };
+    await wa.uploadMedia(account, Buffer.from('abc'), 'image/png', 'a.png');
+    assert.deepEqual((await lastLog()).response, { ok: true, httpStatus: 200, mediaId: 'media-9' });
+    next = { status: 200, body: { data: [{ name: 'promo' }] } };
+    await wa.listTemplates(account);
+    assert.deepEqual((await lastLog()).response, { ok: true, httpStatus: null });
+  });
+  test("a refused send keeps Meta's whole nested error body (error_data.details, error_user_msg), secrets still redacted", async () => {
+    next = {
+      status: 400,
+      body: {
+        error: {
+          message: '(#131009) Parameter value is not valid',
+          type: 'OAuthException',
+          code: 131009,
+          error_subcode: 2494010,
+          error_user_title: 'Bad value',
+          error_user_msg: 'The value of parameter 2 is too long',
+          error_data: { messaging_product: 'whatsapp', details: 'Parameter 2 of the body component exceeds 1024 characters', access_token: 'EAAG-leaked-in-body' },
+          fbtrace_id: 'Nest3d',
+        },
+      },
+    };
+    await assert.rejects(wa.sendText(account, '971500000000', 'hi'));
+    const log = await lastLog();
+    const body = (log.response as any).body;
+    assert.equal(body.error.error_data.details, 'Parameter 2 of the body component exceeds 1024 characters');
+    assert.equal(body.error.error_user_msg, 'The value of parameter 2 is too long');
+    assert.deepEqual([body.error.code, body.error.error_subcode, body.error.fbtrace_id], [131009, 2494010, 'Nest3d']);
+    assert.equal(body.error.error_data.access_token, '[REDACTED]');
+    assert.doesNotMatch(JSON.stringify(log), /EAAG-leaked-in-body|EAAG-test-token-secret/);
   });
   test('an authentication template: its values (a one-time code) are hidden in the logged request', async () => {
     next = { status: 200, body: { messages: [{ id: 'wamid.OTP1' }] } };
