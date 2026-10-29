@@ -54,6 +54,7 @@ import { overLimit } from '@/lib/textLimits';
 import { NoteFiles } from './NoteBubble';
 import { filterDialCountries } from '@/lib/profileOptions';
 import { SearchSelect } from '../SearchSelect';
+import { ContactAvatar } from './avatar';
 
 // Live updates from the inbox page's socket (contact:updated / contact:remarks), passed on as window events
 export const CONTACT_UPDATED_EVENT = 'app:contact-updated';
@@ -273,8 +274,10 @@ export function ContactPanel({
           </button>
         </div>
         <div className="flex gap-4 px-5 pb-4">
-          <span className="mt-1 flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-secondary text-lg font-bold text-on-primary">
-            {name.replace(/^\+/, '').charAt(0).toUpperCase()}
+          {/* The same avatar as the chat list and chat header (WhatsApp doesn't share customers' photos: initials, or
+              a person icon when there's only a number) */}
+          <span className="mt-1">
+            <ContactAvatar contact={{ name: name.startsWith('+') ? null : name, waId: conversation.contact.waId }} size="h-14 w-14 text-lg" />
           </span>
           <div className="min-w-0 flex-1">
             <p title={name} className="truncate text-[15px] font-bold text-ink">

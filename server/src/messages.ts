@@ -114,6 +114,13 @@ export function parseWebhookMessage(msg: any, contacts: any[] = []): Incoming {
   };
 }
 
+// Whether a WhatsApp number (wa_id: digits with country code) is the profile phone of an active member of the workspace.
+// Profile phones are saved in international format (+ and digits: members.ts), so they're compared exactly.
+export async function fromTeamMember(workspaceId: string, waId: string) {
+  if (!/^\d{6,15}$/.test(waId)) return false;
+  return (await prisma.member.count({ where: { workspaceId, active: true, user: { phone: `+${waId}` } } })) > 0;
+}
+
 export async function saveIncoming(workspaceId: string, m: Incoming) {
   const duplicate = m.waMessageId ? await prisma.message.findUnique({ where: { waMessageId: m.waMessageId }, select: { id: true, conversationId: true } }) : null;
   if (duplicate) {
@@ -133,10 +140,13 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
   const existed = await prisma.conversation.findUnique({ where: { workspaceId_contactId: { workspaceId, contactId: contact.id } }, select: { id: true, lastInboundAt: true } });
   // The 24-hour window: from when the customer sent it (never moved back by a late retry of an older message)
   const lastInboundAt = laterOf(existed?.lastInboundAt, m.sentAt && m.sentAt <= now ? m.sentAt : now);
+  // Self-chat: written from a team member's own phone (their profile phone is this number), so it's already read: saved
+  // and shown like any message, but it doesn't make the chat unread. Everyone else's messages count as before.
+  const selfMessage = await fromTeamMember(workspaceId, m.waId);
   const conversation = await prisma.conversation.upsert({
     where: { workspaceId_contactId: { workspaceId, contactId: contact.id } },
-    update: { lastMessageAt: now, lastInboundAt, unread: { increment: 1 } },
-    create: { workspaceId, contactId: contact.id, lastMessageAt: now, lastInboundAt, unread: 1 },
+    update: { lastMessageAt: now, lastInboundAt, ...(selfMessage ? {} : { unread: { increment: 1 } }) },
+    create: { workspaceId, contactId: contact.id, lastMessageAt: now, lastInboundAt, unread: selfMessage ? 0 : 1 },
     include: { contact: true },
   });
   // A reply to a message of this chat is shown quoted (a message from before this app, or another chat, isn't)
