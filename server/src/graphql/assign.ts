@@ -32,6 +32,8 @@ export const typeDefs = /* GraphQL */ `
     email: String!
     "owner | admin | supervisor | agent"
     role: String!
+    "When their profile picture last changed (GET /avatars/:id); null = no picture (initials)"
+    avatarUpdatedAt: DateTime
   }
 
   extend type Query {

@@ -9,6 +9,7 @@ import { ChatImage, ChatPlayer, DocumentCard, EmojiPicker } from './composerExtr
 import { FormattedText } from './FormattedText';
 import { LocationCard } from './LocationCard';
 import { VoicePlayer } from './voice';
+import { AssigneeAvatar } from './assign';
 import { isMediaPlaceholder, quotePreview } from '@/lib/media';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
@@ -158,10 +159,12 @@ export function MessageBubble({
         )}
         {m.senderName && (
           <p
-            className={`mb-0.5 truncate pr-4 text-[11px] font-semibold ${isOut ? '' : 'text-primary'}`}
+            className={`mb-0.5 flex min-w-0 items-center gap-1 pr-4 text-[11px] font-semibold ${isOut ? '' : 'text-primary'}`}
             style={isOut && m.sentById ? { color: agentColor(m.sentById) } : undefined}
           >
-            {m.senderName}
+            {/* The teammate who sent it, WhatsApp group-style: their picture, or their initial */}
+            {isOut && m.sentById && <AssigneeAvatar assignee={{ name: m.senderName, color: agentColor(m.sentById) }} userId={m.sentById} size="h-4 w-4 text-[8px]" />}
+            <span className="truncate">{m.senderName}</span>
           </p>
         )}
         {m.replyTo && !m.deletedAt && <QuoteBlock quote={m.replyTo} onClick={onJumpTo ? () => onJumpTo(m.replyTo!.id) : undefined} className="mb-1 mt-0.5" />}

@@ -41,9 +41,9 @@ export function toAssigneeRef(m: AssigneeRefMember) {
 // Everyone active in the current workspace (the Assign menu's people): name, email and role. Deactivated
 // members are left out, so they can't be given chats.
 export async function listWorkspaceMembers(workspaceId: string) {
-  const members = await prisma.member.findMany({ where: { workspaceId, active: true }, include: { user: { select: { id: true, name: true, email: true } } } });
+  const members = await prisma.member.findMany({ where: { workspaceId, active: true }, include: { user: { select: { id: true, name: true, email: true, avatarUpdatedAt: true } } } });
   return members
-    .map((m) => ({ id: m.user.id, name: m.user.name, email: m.user.email, role: m.role }))
+    .map((m) => ({ id: m.user.id, name: m.user.name, email: m.user.email, role: m.role, avatarUpdatedAt: m.user.avatarUpdatedAt }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

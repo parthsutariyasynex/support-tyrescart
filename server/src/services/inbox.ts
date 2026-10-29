@@ -179,11 +179,19 @@ export async function requireConversation(workspaceId: string, id: string) {
 
 export async function markConversationRead(workspaceId: string, id: string, viewerId: string | null = null) {
   const conversation = await requireConversation(workspaceId, id);
-  return prisma.conversation.update({
+  const updated = await prisma.conversation.update({
     where: { id },
     data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}), ...(await openedByAssignee(conversation, viewerId)) },
     include: conversationInclude,
   });
+  readByViewer(workspaceId, conversation);
+  return updated;
+}
+
+// Unread is shared by the team: when it drops to 0, every open tab (yours and teammates') clears the chat's badge
+// at once, instead of showing the old count until its next reload
+function readByViewer(workspaceId: string, conversation: { id: string; unread: number }) {
+  if (conversation.unread > 0) emitToWorkspace(workspaceId, 'conversation:unread', { conversationId: conversation.id, unread: 0 });
 }
 
 // The viewer is the chat's current assignee and hasn't opened it since it was assigned to them: stamp it now
@@ -223,6 +231,7 @@ export async function openConversation(workspaceId: string, id: string, viewerId
     where: { id },
     data: { unread: 0, ...(viewerId ? { updatedBy: viewerId } : {}), ...(await openedByAssignee(conversation, viewerId)) },
   });
+  readByViewer(workspaceId, conversation);
   const messages = await prisma.message.findMany({ where: { conversationId: id }, orderBy: { createdAt: 'asc' } });
   return { conversation, messages };
 }

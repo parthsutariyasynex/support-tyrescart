@@ -44,7 +44,7 @@ export function MentionMenu({
               }}
               className={`flex w-full items-center gap-2.5 px-3 py-2 text-left ${i === active ? 'bg-surface-muted' : 'hover:bg-surface-muted'}`}
             >
-              <AssigneeAvatar assignee={m} size="h-8 w-8 text-[12px]" />
+              <AssigneeAvatar assignee={m} userId={m.id} size="h-8 w-8 text-[12px]" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[13px] text-ink">{m.name}</span>
                 <span className="block truncate text-[11px] text-muted">{m.email}</span>

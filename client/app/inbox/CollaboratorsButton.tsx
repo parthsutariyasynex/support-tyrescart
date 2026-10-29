@@ -5,11 +5,11 @@ import { type WorkspaceMember, fetchWorkspaceMembers } from '@/lib/assignees';
 import { addCollaborators, addableMembers, fetchCollaborators, removeCollaborator } from '@/lib/collaborators';
 import { roleStyle } from '@/lib/roles';
 import { collaboratorRemovedByYouText, showToast } from '@/lib/toasts';
+import { AssigneeAvatar } from './assign';
 
-const Avatar = ({ m }: { m: Pick<WorkspaceMember, 'name' | 'role'> }) => (
-  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-on-primary" style={{ backgroundColor: roleStyle(m.role).color }}>
-    {m.name.charAt(0).toUpperCase()}
-  </span>
+// Their profile picture, or their initial on their role colour (id = the person's user id)
+const Avatar = ({ m }: { m: Pick<WorkspaceMember, 'id' | 'name' | 'role'> }) => (
+  <AssigneeAvatar assignee={{ name: m.name, color: roleStyle(m.role).color }} userId={m.id} size="h-7 w-7 text-[11px]" />
 );
 
 // Chat header "Collaborators" (person +): who is helping on this chat, and adding teammates to it

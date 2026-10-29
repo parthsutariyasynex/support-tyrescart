@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { type Assignee, type WorkspaceMember, fetchWorkspaceMembers } from '@/lib/assignees';
 import { toggle } from '@/lib/chatFilters';
+import { AssigneeAvatar } from './assign';
 
 // "Assign" in the Filter menu: search, then pick one or more people the chats are assigned to; Clear below.
 // Names and colours come from the assignee list, emails from the live member list.
@@ -67,9 +68,7 @@ export function CollaboratorPanel({
                 onClick={() => onChange(toggle(selected, p.id))}
                 className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition ${on ? 'bg-primary-subtle' : 'hover:bg-surface-muted'}`}
               >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-on-primary" style={{ backgroundColor: p.color }}>
-                  {p.name.charAt(0).toUpperCase()}
-                </span>
+                <AssigneeAvatar assignee={p} userId={p.userId} size="h-8 w-8 text-xs" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] text-ink">{p.name}</span>
                   {p.email && <span className="block truncate text-[11px] text-muted">{p.email}</span>}

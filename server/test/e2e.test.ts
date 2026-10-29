@@ -5069,3 +5069,139 @@ describe('My Chats is chats assigned to you; chats you only collaborate on are i
     assert.deepEqual((await ok(MINE, undefined, agent.token)).conversations.nodes, [{ contact: { name: 'Shared Chat' }, isCollaborator: false }]);
   });
 });
+
+describe('unread stays in sync: read by anyone clears every tab; self-chat never counts', () => {
+  let ws: { token: string; workspaceId: string };
+  const READ = `mutation($id: ID!) { markConversationRead(id: $id) { id unread } }`;
+  const unreadOf = async (name: string) => (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes.find((c: any) => c.contact.name === name)?.unread;
+  const total = async () => (await ok(`{ unreadTotal }`, undefined, ws.token)).unreadTotal;
+  before(async () => {
+    ws = await newWorkspace('unreadsync');
+  });
+
+  test('opening a chat with unread messages: 0 on the server and a conversation:unread 0 to every tab; already read: no event', async () => {
+    await ok(SIMULATE, { i: { waId: '917893100001', name: 'Unread Riya', body: 'one' } }, ws.token);
+    await ok(SIMULATE, { i: { waId: '917893100001', name: 'Unread Riya', body: 'two' } }, ws.token);
+    const conv = (await ok(CONVERSATIONS, {}, ws.token)).conversations.nodes.find((c: any) => c.contact.name === 'Unread Riya').id;
+    assert.equal(await unreadOf('Unread Riya'), 2);
+    assert.equal(await total(), 2);
+    // Another tab of the workspace (the event goes to the whole workspace, so teammates get it too)
+    const live = connectSocket(API, { auth: { token: ws.token }, transports: ['websocket'], forceNew: true });
+    const events: { event: string; data: any }[] = [];
+    live.onAny((event, data) => events.push({ event, data }));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        live.on('connect', () => resolve());
+        live.on('connect_error', reject);
+      });
+      assert.equal((await ok(READ, { id: conv }, ws.token)).markConversationRead.unread, 0);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual(events.filter((e) => e.event === 'conversation:unread').map((e) => e.data), [{ conversationId: conv, unread: 0 }]);
+      // A refresh or reconnect reads the server: still 0, nothing comes back
+      assert.equal(await unreadOf('Unread Riya'), 0);
+      assert.equal(await total(), 0);
+      // Opening it again with nothing unread: no event (no chatter on every chat switch)
+      events.length = 0;
+      await ok(READ, { id: conv }, ws.token);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual(events.filter((e) => e.event === 'conversation:unread'), []);
+    } finally {
+      live.disconnect();
+    }
+  });
+
+  test("a message from a team member's own phone (self-chat) never counts as unread; a customer's does", async () => {
+    const me = (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id;
+    await prisma.user.update({ where: { id: me }, data: { phone: '+917893100009' } });
+    const before = await total();
+    await ok(SIMULATE, { i: { waId: '917893100009', name: 'Me Myself', body: 'note to self' } }, ws.token);
+    await ok(SIMULATE, { i: { waId: '917893100009', name: 'Me Myself', body: 'another' } }, ws.token);
+    assert.equal(await unreadOf('Me Myself'), 0, 'self-chat: created and updated without unread');
+    assert.equal(await total(), before);
+    await ok(SIMULATE, { i: { waId: '917893100010', name: 'Real Customer', body: 'hello' } }, ws.token);
+    assert.equal(await unreadOf('Real Customer'), 1);
+    assert.equal(await total(), before + 1);
+  });
+});
+
+describe('profile photos: upload, load, and shown to teammates (same workspace only)', () => {
+  // The smallest bytes each check accepts: the file type is read from the bytes, not trusted from the header
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('fake-png-body')]);
+  const GIF = Buffer.from('GIF89a-not-allowed');
+  let owner: { token: string; workspaceId: string; id: string };
+  let agent: { token: string; id: string };
+  let outsider: { token: string; workspaceId: string };
+  const put = (token: string, body: Buffer, type: string) =>
+    fetch(`${API}/me/avatar`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': type }, body, signal: AbortSignal.timeout(10_000) });
+  const get = (path: string, token?: string) => fetch(`${API}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const members = async (token: string) => (await ok(`{ workspaceMembers { id avatarUpdatedAt } }`, undefined, token)).workspaceMembers as { id: string; avatarUpdatedAt: string | null }[];
+
+  before(async () => {
+    const ws = await newWorkspace('photos');
+    owner = { ...ws, id: (await ok(`{ me { user { id } } }`, undefined, ws.token)).me.user.id };
+    const { token: join } = (await ok(`mutation { createJoinLink { token } }`, undefined, ws.token)).createJoinLink;
+    const reg = (await ok(`mutation($i: RegisterInput!) { register(input: $i) { token user { id } } }`, {
+      i: { name: 'Photo Agent', email: `e2e-photos-agent-${run}@example.com`, password: 'password123', joinToken: join },
+    })).register;
+    created.userIds.push(reg.user.id);
+    agent = { token: reg.token, id: reg.user.id };
+    outsider = await newWorkspace('photos-other');
+  });
+
+  test('upload saves the picture and answers (it used to hang), then it loads back exactly', async () => {
+    const res = await put(owner.token, PNG, 'image/png');
+    assert.equal(res.status, 200);
+    const { avatarUpdatedAt } = await res.json();
+    assert.ok(avatarUpdatedAt);
+    assert.equal((await ok(`{ me { user { avatarUpdatedAt } } }`, undefined, owner.token)).me.user.avatarUpdatedAt, avatarUpdatedAt);
+    const mine = await get('/me/avatar', owner.token);
+    assert.equal(mine.status, 200);
+    assert.equal(mine.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await mine.arrayBuffer()), PNG);
+  });
+
+  test('wrong files are refused with a clear status, and nothing changes', async () => {
+    const before = (await ok(`{ me { user { avatarUpdatedAt } } }`, undefined, owner.token)).me.user.avatarUpdatedAt;
+    assert.equal((await put(owner.token, GIF, 'image/gif')).status, 415);
+    assert.equal((await put(owner.token, GIF, 'image/png')).status, 415, 'a GIF labelled as PNG');
+    assert.equal((await put(owner.token, Buffer.alloc(0), 'image/png')).status, 400);
+    assert.equal((await put(owner.token, Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)]), 'image/png')).status, 413);
+    assert.equal((await ok(`{ me { user { avatarUpdatedAt } } }`, undefined, owner.token)).me.user.avatarUpdatedAt, before);
+  });
+
+  test("teammates see it (workspaceMembers says who has one); another workspace or no sign-in can't", async () => {
+    const list = await members(agent.token);
+    assert.ok(list.find((m) => m.id === owner.id)?.avatarUpdatedAt);
+    assert.equal(list.find((m) => m.id === agent.id)?.avatarUpdatedAt, null, 'no picture: initials');
+    const seen = await get(`/avatars/${owner.id}`, agent.token);
+    assert.equal(seen.status, 200);
+    assert.deepEqual(Buffer.from(await seen.arrayBuffer()), PNG);
+    assert.equal((await get(`/avatars/${agent.id}`, owner.token)).status, 404, 'no picture yet');
+    assert.equal((await get(`/avatars/${owner.id}`, outsider.token)).status, 404, 'not in their workspace');
+    assert.equal((await get(`/avatars/${owner.id}`)).status, 401);
+    assert.equal((await get(`/avatars/..%2F..%2Fetc`, agent.token)).status, 404);
+  });
+
+  test('changing or removing it reaches the workspace live (member:avatar); removed: back to initials', async () => {
+    const live = connectSocket(API, { auth: { token: agent.token }, transports: ['websocket'], forceNew: true });
+    const events: any[] = [];
+    live.on('member:avatar', (e) => events.push(e));
+    const outside = connectSocket(API, { auth: { token: outsider.token }, transports: ['websocket'], forceNew: true });
+    const leaked: any[] = [];
+    outside.on('member:avatar', (e) => leaked.push(e));
+    try {
+      await Promise.all([live, outside].map((s) => new Promise<void>((resolve, reject) => (s.on('connect', () => resolve()), s.on('connect_error', reject)))));
+      const { avatarUpdatedAt } = await (await put(owner.token, PNG, 'image/png')).json();
+      assert.equal((await fetch(`${API}/me/avatar`, { method: 'DELETE', headers: { Authorization: `Bearer ${owner.token}` } })).status, 200);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual(events, [{ userId: owner.id, avatarUpdatedAt }, { userId: owner.id, avatarUpdatedAt: null }]);
+      assert.deepEqual(leaked, [], 'other workspaces hear nothing');
+      assert.equal((await get(`/avatars/${owner.id}`, agent.token)).status, 404);
+      assert.equal((await get('/me/avatar', owner.token)).status, 404);
+      assert.equal((await members(agent.token)).find((m) => m.id === owner.id)?.avatarUpdatedAt, null);
+    } finally {
+      live.disconnect();
+      outside.disconnect();
+    }
+  });
+});

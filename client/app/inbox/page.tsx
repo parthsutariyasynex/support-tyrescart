@@ -46,6 +46,7 @@ import {
   markNotificationsSeen,
 } from '@/lib/activity';
 import { type Assignee, type WorkspaceMember, claimConversation, fetchAssignees, fetchWorkspaceMembers } from '@/lib/assignees';
+import { teamPhotoChanged } from '@/lib/teamPhotos';
 import { type Label, type Permissions, fetchLabels, fetchPermissions } from '@/lib/labels';
 import { EMPTY_MENU_FILTERS, type MenuFilters, matchesMenuFilters, toServerFilter } from '@/lib/chatFilters';
 import { findMessageMatches } from '@/lib/messageSearch';
@@ -900,15 +901,34 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     const socket = io(API_URL, { auth: { token: getToken() } });
     socketRef.current = socket;
     const unbindPresence = bindPresence(socket); // online / away / offline dots
+    // The open chat on screen is being read: its customer messages are read now (badge 0 here, and on the server before
+    // the list reloads, so the old count can't come back). A hidden tab reads nothing until it's shown again.
+    const readOpenChat = () => {
+      const id = activeIdRef.current;
+      if (!id || document.hidden) return Promise.resolve();
+      patchConversations((c) => (c.id === id && c.unread ? { ...c, unread: 0 } : c));
+      return markConversationRead(id).then(
+        () => undefined,
+        () => undefined,
+      );
+    };
     // Coming back to this browser tab, or the connection re-establishing: pull what may have been missed
     const stopRevalidate = revalidateOnReturn(() => {
-      loadConversations();
+      void readOpenChat().then(() => {
+        loadConversations();
+        loadUnreadTotal();
+      });
       loadLabels();
       loadAssignees();
       loadFeed();
-      loadUnreadTotal();
       loadUnassignedCount();
     }, socket);
+    // Shown again with messages that came in while hidden (even when the refresh above is skipped as too soon)
+    const onShown = () => {
+      const id = activeIdRef.current;
+      if (!document.hidden && conversationsRef.current.some((c) => c.id === id && c.unread > 0)) void readOpenChat().then(loadUnreadTotal);
+    };
+    document.addEventListener('visibilitychange', onShown);
     socket.on('typing', (e: TypingEvent) => {
       if (e.userId === permissionsRef.current?.userId) return; // yourself in another tab
       setTyping((s) => applyTypingEvent(s, e));
@@ -933,8 +953,12 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
         patchConversations((c) => (c.id === conversation.id && c.lastInboundAt !== conversation.lastInboundAt ? { ...c, lastInboundAt: conversation.lastInboundAt } : c));
       if (message.conversationId === activeIdRef.current)
         setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
-      loadConversations();
-      loadUnreadTotal();
+      // A customer message in the chat you're looking at is seen as it arrives: read first, then the list reloads
+      const seen = message.direction === 'in' && message.conversationId === activeIdRef.current ? readOpenChat() : Promise.resolve();
+      void seen.then(() => {
+        loadConversations();
+        loadUnreadTotal();
+      });
       loadUnassignedCount(); // a brand-new chat arrives unassigned
       // (the sound and desktop pop-up for a customer's message come from the app shell, on every page)
     });
@@ -1009,12 +1033,12 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('contact:lists', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LISTS_EVENT, { detail: e })));
     socket.on('contactList:saved', (l: { id: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LIST_SAVED_EVENT, { detail: l })));
     socket.on('contactList:deleted', (l: { id: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LIST_DELETED_EVENT, { detail: l })));
-    // Pinned/unpinned in another of your tabs; "Mark as unread" by anyone
+    // Pinned/unpinned in another of your tabs; "Mark as unread" by anyone; read (0) by anyone, in any tab
     socket.on('conversation:pinned', ({ conversationId, pinned }: { conversationId: string; pinned: boolean }) =>
       patchConversations((c) => (c.id === conversationId ? { ...c, pinned } : c)),
     );
     socket.on('conversation:unread', ({ conversationId, unread }: { conversationId: string; unread: number }) => {
-      patchConversations((c) => (c.id === conversationId ? { ...c, unread: Math.max(c.unread, unread) } : c));
+      patchConversations((c) => (c.id === conversationId ? { ...c, unread: unread === 0 ? 0 : Math.max(c.unread, unread) } : c));
       loadUnreadTotal();
     });
     // Collaborators changed on a chat: am I one now? (Collaborations follows)
@@ -1031,6 +1055,8 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       setMembersVersion((v) => v + 1);
       loadUnassignedCount(); // their chats were released
     });
+    // A teammate added, changed or removed their profile picture: it shows (or their initial) everywhere at once
+    socket.on('member:avatar', ({ userId, avatarUpdatedAt }: { userId: string; avatarUpdatedAt: string | null }) => teamPhotoChanged(userId, avatarUpdatedAt));
     socket.on('member:permissions', ({ userId, role, canManageLabels, canManageAssignments }: Permissions) => {
       setMembersVersion((v) => v + 1);
       // e.g. an admin just granted (or removed) this supervisor's right to assign chats: applies without a reload
@@ -1039,6 +1065,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     });
     return () => {
       stopRevalidate();
+      document.removeEventListener('visibilitychange', onShown);
       unbindPresence();
       socketRef.current = null;
       socket.disconnect();
@@ -1724,7 +1751,7 @@ function ConversationList({
                               title={`Assigned to ${c.assignee.name}`}
                               className="inline-flex max-w-24 shrink-0 items-center gap-1 text-[10px] font-medium text-body-soft"
                             >
-                              <AssigneeAvatar assignee={c.assignee} size="h-3.5 w-3.5 text-[8px]" />
+                              <AssigneeAvatar assignee={c.assignee} userId={c.assignee.userId} size="h-3.5 w-3.5 text-[8px]" />
                               <span className="truncate">{c.assignee.name}</span>
                               <PresenceDot status={presenceOf(presence, c.assignee.userId)} size="h-1.5 w-1.5" />
                             </span>

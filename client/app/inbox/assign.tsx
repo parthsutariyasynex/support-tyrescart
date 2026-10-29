@@ -10,6 +10,7 @@ import {
 import type { Conversation } from '@/lib/inbox';
 import { presenceOf, usePresence } from '@/lib/presence';
 import { assignableMembers, otherAssigneesToList, roleStyle } from '@/lib/roles';
+import { loadTeamPhotos, onTeamPhotos, teamPhotoUrl, teamPhotoVersion } from '@/lib/teamPhotos';
 import { PresenceDot } from '../PresenceDot';
 import { RoleBadge } from '../RoleBadge';
 import { type AssignAction, AssignReasonDialog } from './AssignReasonDialog';
@@ -34,15 +35,40 @@ export function PersonIcon({ className = 'h-3.5 w-3.5' }: { className?: string }
 }
 
 // Coloured initial, like a label dot but for a person
-export function AssigneeAvatar({ assignee, size = 'h-5 w-5 text-[10px]' }: { assignee: Pick<AssigneeRef, 'name' | 'color'>; size?: string }) {
+// A team member, WhatsApp-style: their profile picture in a circle when they have one (userId given), otherwise the
+// initial on their colour. Used everywhere a teammate appears in chats.
+export function AssigneeAvatar({ assignee, userId, size = 'h-5 w-5 text-[10px]' }: { assignee: Pick<AssigneeRef, 'name' | 'color'>; userId?: string | null; size?: string }) {
+  const photo = useTeamPhoto(userId);
   return (
     <span
-      className={`flex shrink-0 items-center justify-center rounded-full font-bold text-on-primary ${size}`}
+      className={`flex shrink-0 items-center justify-center overflow-hidden rounded-full font-bold text-on-primary ${size}`}
       style={{ backgroundColor: assignee.color }}
     >
-      {assignee.name.charAt(0).toUpperCase()}
+      {photo ? <img src={photo} alt="" className="h-full w-full object-cover" /> : assignee.name.charAt(0).toUpperCase()}
     </span>
   );
+}
+
+// The picture of this person (null: none, or not loaded yet); follows changes live
+function useTeamPhoto(userId: string | null | undefined) {
+  const [version, setVersion] = useState(() => (userId ? teamPhotoVersion(userId) : null));
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!userId) return;
+    const sync = () => setVersion(teamPhotoVersion(userId));
+    sync();
+    void loadTeamPhotos();
+    return onTeamPhotos(sync);
+  }, [userId]);
+  useEffect(() => {
+    if (!userId || !version) return setUrl(null);
+    let live = true;
+    teamPhotoUrl(userId, version).then((u) => live && setUrl(u));
+    return () => {
+      live = false;
+    };
+  }, [userId, version]);
+  return userId ? url : null;
 }
 
 const inputClass =
@@ -227,7 +253,7 @@ export function AssignDropdown({
       >
         <div className="flex items-center gap-1.5 min-w-0">
           {current ? (
-            <AssigneeAvatar assignee={current} />
+            <AssigneeAvatar assignee={current} userId={current.userId} />
           ) : (
             <span className="flex h-5 w-5 items-center justify-center text-faint shrink-0">
               <PersonIcon className="h-4 w-4" />
@@ -291,7 +317,7 @@ export function AssignDropdown({
                             : 'hover:bg-surface-muted disabled:hover:bg-transparent'
                         } ${conversation && !ok ? 'opacity-50' : ''}`}
                       >
-                        <AssigneeAvatar assignee={{ name: m.name, color: roleStyle(m.role).color }} />
+                        <AssigneeAvatar assignee={{ name: m.name, color: roleStyle(m.role).color }} userId={m.id} />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-1.5">
                             <span className="truncate text-body">{m.name}</span>
@@ -324,7 +350,7 @@ export function AssignDropdown({
                             : 'hover:bg-surface-muted disabled:hover:bg-transparent'
                         } ${conversation && !allowed(a) ? 'opacity-50' : ''}`}
                       >
-                        <AssigneeAvatar assignee={a} />
+                        <AssigneeAvatar assignee={a} userId={a.userId} />
                         <span className="truncate text-body">{a.name}</span>
                         <RoleBadge role={memberRole(a.userId)} />
                         <span className="ml-auto flex items-center gap-1 text-[10px] text-faint">

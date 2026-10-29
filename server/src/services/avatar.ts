@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
+import { emitToWorkspace } from '../realtime.js';
 import { AppError, notFound } from './errors.js';
 import { logFailure } from './logging.js';
 
@@ -37,6 +38,19 @@ export async function saveAvatar(userId: string, bytes: Buffer | undefined, rawM
 export async function removeAvatar(userId: string) {
   await rm(fileOf(userId), { force: true });
   await prisma.user.update({ where: { id: userId }, data: { avatarMime: null, avatarUpdatedAt: null, updatedBy: userId } });
+}
+
+// A teammate's picture: only when they are (or were) a member of the asker's workspace; anyone else reads as not found
+export async function readTeamAvatar(workspaceId: string, userId: string) {
+  const member = await prisma.member.findFirst({ where: { workspaceId, userId }, select: { id: true } });
+  if (!member) throw notFound('Picture');
+  return readAvatar(userId);
+}
+
+// Every workspace the person is in shows the new picture (or their initials) at once wherever they appear
+export async function avatarChanged(userId: string, avatarUpdatedAt: Date | null) {
+  const members = await prisma.member.findMany({ where: { userId }, select: { workspaceId: true } });
+  for (const { workspaceId } of members) emitToWorkspace(workspaceId, 'member:avatar', { userId, avatarUpdatedAt });
 }
 
 export async function readAvatar(userId: string) {
