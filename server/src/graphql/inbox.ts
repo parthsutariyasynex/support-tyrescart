@@ -111,7 +111,7 @@ export const typeDefs = /* GraphQL */ `
     closedById: ID
     "status = snoozed: back to open at this time, or as soon as the customer writes"
     snoozedUntil: DateTime
-    "Pinned to the top of everyone's list (for the whole team; owners/admins pin it)"
+    "Pinned to the top of everyone's list (for the whole team; any member can pin it)"
     pinned: Boolean!
     "Teammates added to this chat besides the assignee (they get its notifications)"
     collaborators: [WorkspaceMember!]!
@@ -307,7 +307,7 @@ export const typeDefs = /* GraphQL */ `
     reopenConversation(id: ID!): Conversation!
     "Hide the chat until this time (at most a year ahead); it comes back to open then, or when the customer writes"
     snoozeConversation(id: ID!, until: DateTime!): Conversation!
-    "Pin this chat at the top of everyone's list (owners/admins; within the admin's pin limit, PIN_LIMIT otherwise)"
+    "Pin this chat at the top of everyone's list (any member; within the admin's pin limit, PIN_LIMIT otherwise)"
     pinConversation(id: ID!): Conversation!
     unpinConversation(id: ID!): Conversation!
     "Pin a message in its chat for everyone (owners/admins; within the pin limit per chat, PIN_LIMIT otherwise)"

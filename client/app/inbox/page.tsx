@@ -34,6 +34,7 @@ import {
   snoozeConversation,
   setConversationPinned,
   setMessagePinned,
+  mergeLoadedMessages,
   markConversationUnread,
 } from '@/lib/inbox';
 import {
@@ -53,6 +54,7 @@ import { EMPTY_MENU_FILTERS, type MenuFilters, matchesMenuFilters, toServerFilte
 import { findMessageMatches } from '@/lib/messageSearch';
 import { bindPresence, presenceOf, usePresence } from '@/lib/presence';
 import { revalidateOnReturn } from '@/lib/revalidate';
+import { createOpenChatReloader, mergeReloadedMessages } from '@/lib/chatReload';
 import { showsAssignCheckboxes } from '@/lib/roles';
 import { AppShell, OPEN_CHAT_EVENT } from '../AppShell';
 import { pinText, showToast } from '@/lib/toasts';
@@ -305,6 +307,11 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     return null;
   });
 
+  // The messages on screen, for code outside a render (the reload after a reconnect)
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
   const [olderCursor, setOlderCursor] = useState<string | null>(() => {
     const urlId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('chat') : null;
     const initId = urlId ?? cachedActiveIdByPath[pathname];
@@ -665,7 +672,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   // Admin-only action (menu item is hidden otherwise): permanently deletes the contact behind this chat, not just
   // this user's view of it — see deleteContact in lib/contacts.ts.
   const [deleteState, setDeleteState] = useState(NO_DELETE);
-  // Pin / Unpin chat from a list row (owners/admins): for the whole team, so everyone's list follows (conversation:pinned).
+  // Pin / Unpin chat from a list row (every member): for the whole team, so everyone's list follows (conversation:pinned).
   // Past the admin's limit the server refuses (PIN_LIMIT: "Up to 5 chats can be pinned. Unpin one first.") and that
   // message is shown as the toast.
   const togglePinFromList = useCallback(
@@ -932,6 +939,38 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       );
     };
     // Coming back to this browser tab, or the connection re-establishing: pull what may have been missed
+    // The live connection came back after dropping (Socket.IO started a new session): the open chat's message:new
+    // events sent meanwhile were never received, so its newest page is loaded again and merged in. One request at a
+    // time, ignored if another chat is open by then (lib/chatReload.ts). Its own listener on this socket, not rate
+    // limited like the refresh below.
+    const reloadOpenChat = createOpenChatReloader({
+      openChatId: () => activeIdRef.current,
+      fetchPage: (id) => fetchMessages(id),
+      apply: (id, page) => {
+        // More came in than a page holds: start again from this page ("load earlier messages" continues from it)
+        const cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+        const restart = !mergeReloadedMessages(page.nodes, page.pageInfo.hasNextPage, messagesRef.current, id).continuous;
+        if (restart) setOlderCursor(cursor);
+        setMessages((prev) => {
+          const next = mergeReloadedMessages(page.nodes, page.pageInfo.hasNextPage, prev, id).messages;
+          const cached = messagesCache.get(id);
+          if (cached) {
+            cached.messages = next;
+            if (restart) cached.cursor = cursor;
+            saveSessionMessages(messagesCache);
+          }
+          return next;
+        });
+      },
+    });
+    let firstConnect = !socket.connected;
+    socket.on('connect', () => {
+      if (firstConnect) {
+        firstConnect = false; // the first connection: the chat loads on its own
+        return;
+      }
+      reloadOpenChat();
+    });
     const stopRevalidate = revalidateOnReturn(() => {
       void readOpenChat().then(() => {
         loadConversations();
@@ -1141,13 +1180,21 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       .then(([page, activityItems]) => {
         if (cancelled) return;
         const cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
-        messagesCache.set(activeId, {
-          messages: page.nodes,
-          activity: activityItems,
-          cursor,
+        // Replaced (a message that arrived live while the history was loading was dropped by the snapshot):
+        // messagesCache.set(activeId, {
+        //   messages: page.nodes,
+        //   activity: activityItems,
+        //   cursor,
+        // });
+        // saveSessionMessages(messagesCache);
+        // setMessages(page.nodes);
+        // The history merged with what message:new (or a send) added meanwhile, in the screen and the cache alike
+        setMessages((prev) => {
+          const next = mergeLoadedMessages(page.nodes, prev, activeId);
+          messagesCache.set(activeId, { messages: next, activity: activityItems, cursor });
+          saveSessionMessages(messagesCache);
+          return next;
         });
-        saveSessionMessages(messagesCache);
-        setMessages(page.nodes);
         setActivity(activityItems);
         setOlderCursor(cursor);
         setMessagesChatId(activeId);
@@ -1230,7 +1277,8 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
         conversations={filteredConversations}
         onDeleteChat={(id) => deleteFlow.ask(id)}
         canDeleteChat={isAdmin}
-        canPin={isAdmin}
+        // Replaced (every member pins and unpins chats): canPin={isAdmin}
+        canPin
         onTogglePin={togglePinFromList}
         sortOrder={sortOrder}
         onSortChange={onSortOrderChange}
@@ -1454,7 +1502,7 @@ function ConversationList({
   canPin,
   onTogglePin,
 }: {
-  // Pin / Unpin chat from the row's ⋮ menu: for the whole team, owners/admins only (canPin)
+  // Pin / Unpin chat from the row's ⋮ menu: for the whole team, every member (canPin)
   canPin: boolean;
   onTogglePin: (conversation: Conversation) => void;
   // Delete chat from the row's ⋮ menu (asks first); admin-only, so the item is hidden when canDeleteChat is false
@@ -1813,8 +1861,8 @@ function ConversationList({
                       )}
                     </span>
                   </button>
-                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens): Pin / Unpin chat (for the whole team)
-                      and Delete chat, both owners/admins only */}
+                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens): Pin / Unpin chat (for the whole team,
+                      every member) and Delete chat (owners/admins only) */}
                   {/* Replaced (Pin / Unpin chat added):
                   {canDeleteChat && (
                     ... options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
@@ -2214,7 +2262,9 @@ function ChatPanel({
   const chatMenuOptions = (): ChatOption[] => [
     // Replaced (pins are for the whole team; owners and admins pin):
     // { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
-    ...(viewer?.isAdmin ? [{ label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() }] : []),
+    // Replaced (every member pins and unpins chats):
+    // ...(viewer?.isAdmin ? [{ label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() }] : []),
+    { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
     { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
     { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
     { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },

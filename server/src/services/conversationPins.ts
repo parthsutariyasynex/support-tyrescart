@@ -4,11 +4,12 @@ import { emitToWorkspace } from '../realtime.js';
 import { AppError, notFound } from './errors.js';
 import { requireConversation } from './inbox.js';
 import { logEvent } from './logging.js';
-import { requireAdmin } from './permissions.js';
+import { getPermissions, requireAdmin } from './permissions.js';
 import { settingsOf } from './workspaceSettings.js';
 
 // Pinned chats and messages, for the whole team (like WhatsApp's pins, shared by everyone in the workspace), and
-// "Mark as unread" from the chat's ⋮ menu. Owners and admins pin and unpin; everyone sees the pins at once
+// "Mark as unread" from the chat's ⋮ menu. Chats: every member who can open the chat pins and unpins them (within the
+// limit); messages: owners and admins. Everyone sees the pins at once
 // (conversation:pinned / message:pinned). The limit is the admin's setting (Workspace preferences, pinLimit, default 5):
 // at most that many pinned chats in the workspace, and that many pinned messages in each chat. Stored on the chat or message
 // itself (pinnedAt, pinnedBy); pinning and unpinning also fill in its standard audit fields (updatedAt, updatedBy).
@@ -59,7 +60,8 @@ const pinLimitText = (limit: number, what: string) => `Up to ${limit} ${what} ca
 // Pins a chat for everyone. Within the limit, checked while the workspace row is locked, so two pins at the same moment
 // can't both get past it; pinning an already pinned chat changes nothing.
 export async function pinConversation(auth: AuthPayload, conversationId: string) {
-  await requireAdmin(auth);
+  // Replaced (anyone who can open the chat pins it): await requireAdmin(auth);
+  await getPermissions(auth); // a member of this workspace (every role)
   await requireConversation(auth.workspaceId, conversationId);
   const limit = (await settingsOf(auth.workspaceId)).pinLimit;
   const pinnedNow = await prisma.$transaction(async (tx) => {
@@ -79,7 +81,8 @@ export async function pinConversation(auth: AuthPayload, conversationId: string)
 }
 
 export async function unpinConversation(auth: AuthPayload, conversationId: string) {
-  await requireAdmin(auth);
+  // Replaced (anyone who can open the chat unpins it): await requireAdmin(auth);
+  await getPermissions(auth); // a member of this workspace (every role)
   await requireConversation(auth.workspaceId, conversationId);
   const { count } = await prisma.conversation.updateMany({ where: { id: conversationId, workspaceId: auth.workspaceId, pinnedAt: { not: null } }, data: { pinnedAt: null, pinnedBy: null, updatedBy: auth.userId } });
   if (count) {

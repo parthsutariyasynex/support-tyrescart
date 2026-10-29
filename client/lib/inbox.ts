@@ -227,6 +227,28 @@ export async function restoreMessage(messageId: string, version: number) {
   return (await gql<{ restoreMessage: Message }>(query, { id: messageId, v: version })).restoreMessage;
 }
 
+// A chat's history just loaded, merged with what is already on screen for it. The history is a snapshot taken when the
+// request reached the server; a message that arrived live (message:new, or one just sent) while the request was on its
+// way isn't in it, and replacing the list with the snapshot would drop it until the chat is reopened. So: the loaded
+// history, each message in its newest copy (an edit or status that arrived live wins over an older snapshot copy), then
+// the chat's messages on screen that the snapshot doesn't have and that are newer than its newest one (the ones that
+// arrived meanwhile), oldest first. Older ones on screen (earlier pages from the cache) are left to "load earlier
+// messages", as before; messages of other chats are left out.
+export function mergeLoadedMessages(loaded: Message[], onScreen: Message[], conversationId: string): Message[] {
+  const live = onScreen.filter((m) => m.conversationId === conversationId);
+  const byId = new Map(live.map((m) => [m.id, m]));
+  const merged = loaded.map((m) => {
+    const current = byId.get(m.id);
+    return current ? newerMessage(m, current) : m;
+  });
+  const loadedIds = new Set(loaded.map((m) => m.id));
+  const newest = loaded.reduce((max, m) => (m.createdAt > max ? m.createdAt : max), '');
+  const extra = live
+    .filter((m) => !loadedIds.has(m.id) && m.createdAt >= newest)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  return extra.length ? [...merged, ...extra] : merged;
+}
+
 // Socket events and responses can arrive out of order: keep whichever copy is newest
 export function newerMessage(current: Message, incoming: Message) {
   const senderName = incoming.senderName ?? current.senderName;
