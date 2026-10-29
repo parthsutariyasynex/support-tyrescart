@@ -256,6 +256,8 @@ export const typeDefs = /* GraphQL */ `
     awayMinutes: Int!
     "Days deleted contacts are kept before being removed for good"
     deletedContactRetentionDays: Int!
+    "The most chats pinned for the whole team, and the most pinned messages in one chat (default 5). Owners/admins only: null for others"
+    pinLimit: Int
   }
 
   input WorkspaceSettingsInput {
@@ -265,6 +267,7 @@ export const typeDefs = /* GraphQL */ `
     reminderMinutes: Int
     awayMinutes: Int
     deletedContactRetentionDays: Int
+    pinLimit: Int
   }
 
   input FieldChoiceInput {

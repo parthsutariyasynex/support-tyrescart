@@ -23,7 +23,7 @@ function agentColor(id: string) {
   return AGENT_NAME_COLORS[h % AGENT_NAME_COLORS.length];
 }
 
-export type MessageAction = 'reply' | 'forward' | 'copy' | 'edit' | 'delete';
+export type MessageAction = 'reply' | 'forward' | 'copy' | 'edit' | 'pin' | 'unpin' | 'delete';
 
 // Which actions the viewer gets on a message. The API enforces the same rules; this only hides what would be refused.
 // canReply: whether the viewer may write in this chat (replying sends a message)
@@ -35,9 +35,19 @@ export function messageActions(m: Message, viewer: { userId: string; isAdmin: bo
   if (m.body) actions.push('copy');
   const mine = m.direction === 'out' && !!viewer && (viewer.isAdmin || m.sentById === viewer.userId);
   if (mine && m.type === 'text') actions.push('edit');
+  // Pin / unpin for the whole team: owners and admins (sent messages only, not one still being sent)
+  if (viewer?.isAdmin && m.status !== 'pending') actions.push(m.pinnedAt ? 'unpin' : 'pin');
   if (mine) actions.push('delete');
   return actions;
 }
+
+// A pushpin (the pinned message's mark, and Pin / Unpin in its menu)
+export const PIN_PATH = (
+  <>
+    <path d="M12 17v5" />
+    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+  </>
+);
 
 function BanIcon() {
   return (
@@ -208,6 +218,13 @@ export function MessageBubble({
           </>
         )}
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-faint">
+          {m.pinnedAt && !m.deletedAt && (
+            <span title={`Pinned ${formatDateTime(m.pinnedAt)}`} aria-label="Pinned" className="text-body-soft">
+              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                {PIN_PATH}
+              </svg>
+            </span>
+          )}
           {m.editedAt && !m.deletedAt && (
             <span title={`Edited ${formatDateTime(m.editedAt)}`} className="italic">
               Edited
@@ -430,6 +447,8 @@ export function MessageMenu({
         </>
       ),
     },
+    { action: 'pin', label: 'Pin for everyone', icon: PIN_PATH },
+    { action: 'unpin', label: 'Unpin', icon: PIN_PATH },
     {
       action: 'delete',
       label: 'Delete for everyone',

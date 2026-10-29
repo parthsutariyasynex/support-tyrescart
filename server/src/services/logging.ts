@@ -305,6 +305,8 @@ export const EVENTS: Record<string, EventInfo> = {
   'push.sent': { action: 'Send push notifications through Firebase', reason: 'A customer message, an assignment or an @mention for people with the app on their phone' },
   'push.send_failed': { action: 'Send one push notification through Firebase', reason: 'Firebase refused the notification for one phone (its code and a redacted message are logged)' },
   'push.failed': { action: 'Send push notifications through Firebase', reason: 'Looking up the phones or reaching Firebase failed' },
+  'pin.conversation': { action: 'Pin or unpin a chat for the whole team', reason: 'An owner or admin used Pin / Unpin conversation' },
+  'pin.message': { action: 'Pin or unpin a message for the whole team', reason: 'An owner or admin used Pin / Unpin on a message' },
   'ai.summary': { action: "Write the chat's AI Summary", reason: 'An owner, admin or supervisor pressed Generate or Regenerate in the AI Assistant tab' },
   'ai.reply': { action: 'Suggest a reply with AI', reason: 'Someone allowed to reply pressed AI Reply (nothing is sent until they confirm)' },
   'ai.failed': { action: 'Ask the AI (OpenRouter or Anthropic) for a summary or a reply', reason: 'The AI service refused, was busy or could not be reached; nothing was saved or sent' },

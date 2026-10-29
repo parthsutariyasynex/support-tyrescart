@@ -210,8 +210,11 @@ model Conversation {
   assignedTo       Member?                    @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
   activity         ActivityEvent[]
   clears           ConversationClear[]
-  // Pinned to the top of these people's lists (per person)
+  // Pinned to the top of these people's lists (per person). No longer used: pins are for the whole team (pinnedAt)
   pins             ConversationPin[]
+  // Pinned for the whole team (owners/admins pin it): at the top of everyone's list; null when not pinned
+  pinnedAt         DateTime?
+  pinnedBy         String?
   // Teammates added to help on this chat (besides the assignee); they get its notifications
   collaborators    ConversationCollaborator[]
   // Assignment report rows (reasons). Never read by the chat API; see services/assignmentReports.ts
@@ -220,6 +223,7 @@ model Conversation {
   aiSummary        ConversationSummary?
 
   @@unique([workspaceId, contactId])
+  @@index([workspaceId, pinnedAt])
   @@index([workspaceId, lastMessageAt])
   @@index([workspaceId, status, lastMessageAt])
   // Follow-up check: chats whose customer last wrote around 24 hours ago
@@ -263,6 +267,9 @@ model Message {
   // A reply, as in WhatsApp: the message in this chat it quotes (a teammate's reply, or a customer's reply to one
   // of ours); null for everything else
   replyToId        String?
+  // Pinned in its chat for the whole team (owners/admins; the bar at the top of the chat); null when not pinned
+  pinnedAt         DateTime?
+  pinnedBy         String?
   // --- standard audit fields (sentById = createdBy, deletedById = deletedBy, status = delivery status) ---
   updatedAt        DateTime          @default(now()) @updatedAt
   updatedBy        String?
@@ -582,6 +589,8 @@ model WorkspaceSettings {
   reminderMinutes             Int?
   awayMinutes                 Int?
   deletedContactRetentionDays Int?
+  // The most chats pinned for the whole team, and the most pinned messages in one chat (null: 5). Admins set it.
+  pinLimit                    Int?
   updatedAt                   DateTime  @updatedAt
   updatedBy                   String?
   workspace                   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

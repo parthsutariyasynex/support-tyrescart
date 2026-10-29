@@ -35,6 +35,8 @@ export type Message = {
   // A reply, as in WhatsApp: the message it quotes
   replyToId?: string | null;
   replyTo?: QuotedMessage | null;
+  // Pinned in its chat for the whole team (owners/admins pin it; the bar at the top of the chat)
+  pinnedAt?: string | null;
 };
 export type QuotedMessage = {
   id: string;
@@ -80,7 +82,7 @@ export type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endC
 
 export const PAGE_SIZE = 50;
 
-const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation';
+const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation pinnedAt';
 // Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
 export const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
 const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
@@ -248,6 +250,18 @@ export async function setConversationStatus(id: string, status: 'open' | 'closed
 }
 
 // Pin / unpin for yourself (at most 3), and "Mark as unread"
+// Pin / unpin a message for the whole team (owners/admins; PIN_LIMIT past the admin's limit per chat)
+export async function setMessagePinned(id: string, pinned: boolean) {
+  const field = pinned ? 'pinMessage' : 'unpinMessage';
+  return (await gql<Record<string, { id: string; conversationId: string; pinnedAt: string | null }>>(`mutation PinMessage($id: ID!) { ${field}(id: $id) { id conversationId pinnedAt } }`, { id }))[field];
+}
+
+// The chat's pinned messages, most recently pinned first (the bar at the top of the chat)
+export async function fetchPinnedMessages(conversationId: string) {
+  const d = await gql<{ pinnedMessages: Message[] }>(`query PinnedMessages($c: ID!) { pinnedMessages(conversationId: $c) { ${MESSAGE_FIELDS} } }`, { c: conversationId });
+  return d.pinnedMessages;
+}
+
 export async function setConversationPinned(id: string, pinned: boolean) {
   const field = pinned ? 'pinConversation' : 'unpinConversation';
   return (await gql<Record<string, { id: string; pinned: boolean }>>(`mutation Pin($id: ID!) { ${field}(id: $id) { id pinned } }`, { id }))[field];

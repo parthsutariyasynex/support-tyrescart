@@ -9,7 +9,8 @@ import { toAssigneeRef } from '../services/assign.js';
 import { conversationLabels } from '../services/labels.js';
 import { clearConversation, clearedAt, deleteConversationForUser } from '../services/conversationClear.js';
 import { closeConversation, conversationCounts, reopenConversation, snoozeConversation } from '../services/conversationStatus.js';
-import { markConversationUnread, pinConversation, pinnedIds, unpinConversation } from '../services/conversationPins.js';
+// Replaced (team-wide pins): import { markConversationUnread, pinConversation, pinnedIds, unpinConversation } from '../services/conversationPins.js';
+import { markConversationUnread, pinConversation, pinMessage, pinnedConversationIds, pinnedMessages, unpinConversation, unpinMessage } from '../services/conversationPins.js';
 import { addCollaborators, listCollaborators, removeCollaborator } from '../services/collaborators.js';
 import type { Context } from './shared.js';
 import { deleteMessage, editMessage, restoreMessage } from '../services/messageActions.js';
@@ -76,6 +77,8 @@ export const typeDefs = /* GraphQL */ `
     mediaSize: Int
     "Documents: the file name"
     mediaName: String
+    "Pinned in its chat for the whole team (owners/admins); null when not pinned"
+    pinnedAt: DateTime
   }
 
   input EditMessageInput {
@@ -108,7 +111,7 @@ export const typeDefs = /* GraphQL */ `
     closedById: ID
     "status = snoozed: back to open at this time, or as soon as the customer writes"
     snoozedUntil: DateTime
-    "Pinned to the top of your list (per person)"
+    "Pinned to the top of everyone's list (for the whole team; owners/admins pin it)"
     pinned: Boolean!
     "Teammates added to this chat besides the assignee (they get its notifications)"
     collaborators: [WorkspaceMember!]!
@@ -276,6 +279,8 @@ export const typeDefs = /* GraphQL */ `
     conversation(id: ID!): Conversation!
     "Newest page first. first: 1-100 (default 50)"
     messages(conversationId: ID!, first: Int, after: String): MessageConnection!
+    "The chat's pinned messages (the bar at the top of the chat), most recently pinned first"
+    pinnedMessages(conversationId: ID!): [Message!]!
   }
 
   extend type Mutation {
@@ -302,9 +307,12 @@ export const typeDefs = /* GraphQL */ `
     reopenConversation(id: ID!): Conversation!
     "Hide the chat until this time (at most a year ahead); it comes back to open then, or when the customer writes"
     snoozeConversation(id: ID!, until: DateTime!): Conversation!
-    "Keep this chat at the top of your own list (at most 3; PIN_LIMIT otherwise)"
+    "Pin this chat at the top of everyone's list (owners/admins; within the admin's pin limit, PIN_LIMIT otherwise)"
     pinConversation(id: ID!): Conversation!
     unpinConversation(id: ID!): Conversation!
+    "Pin a message in its chat for everyone (owners/admins; within the pin limit per chat, PIN_LIMIT otherwise)"
+    pinMessage(id: ID!): Message!
+    unpinMessage(id: ID!): Message!
     "Back to unread (bold with a badge) until someone opens it"
     markConversationUnread(id: ID!): Conversation!
     "Add teammates (user ids) as collaborators: every role"
@@ -371,6 +379,7 @@ export const resolvers = {
     allMessageTemplates: authed((_args, auth) => allTemplates(auth)),
     templateEditorInfo: authed(async () => ({ languages: TEMPLATE_LANGUAGES, mediaHeaderAvailable: !!env.metaAppId })),
     conversation: authed(({ id }: { id: string }, { workspaceId }) => requireConversation(workspaceId, id)),
+    pinnedMessages: authed(async ({ conversationId }: { conversationId: string }, { workspaceId }) => Promise.all((await pinnedMessages(workspaceId, conversationId)).map(withSender))),
     messages: authed(async ({ conversationId, ...args }: PageArgs & { conversationId: string }, { workspaceId, userId }) =>
       toConnection(
         await listMessages(workspaceId, conversationId, pageArgs(args), await clearedAt(userId, conversationId)),
@@ -416,6 +425,8 @@ export const resolvers = {
     reopenConversation: authed(({ id }: { id: string }, auth) => reopenConversation(auth, id)),
     snoozeConversation: authed(({ id, until }: { id: string; until: Date }, auth) => snoozeConversation(auth, id, until)),
     pinConversation: authed(({ id }: { id: string }, auth) => pinConversation(auth, id)),
+    pinMessage: authed(async ({ id }: { id: string }, auth) => withSender(await pinMessage(auth, id))),
+    unpinMessage: authed(async ({ id }: { id: string }, auth) => withSender(await unpinMessage(auth, id))),
     unpinConversation: authed(({ id }: { id: string }, auth) => unpinConversation(auth, id)),
     markConversationUnread: authed(({ id }: { id: string }, auth) => markConversationUnread(auth, id)),
     addCollaborators: authed(({ conversationId, userIds }: { conversationId: string; userIds: string[] }, auth) => addCollaborators(auth, conversationId, userIds)),
@@ -441,10 +452,19 @@ export const resolvers = {
   // Services already include these for list queries; fall back to a lookup otherwise
   Conversation: {
     // Whether the viewer pinned it; their pins are read once per request, not once per chat
-    pinned: async (c: ConversationParent, _args: unknown, ctx: Context) => {
+    // Replaced (pins are for the whole team now):
+    // pinned: async (c: ConversationParent, _args: unknown, ctx: Context) => {
+    //   if (!ctx.auth) return false;
+    //   let ids = pinCache.get(ctx);
+    //   if (!ids) pinCache.set(ctx, (ids = pinnedIds(ctx.auth.userId, ctx.auth.workspaceId)));
+    //   return (await ids).includes(c.id);
+    // },
+    // Pinned for the whole team: read from the row when it has pinnedAt, otherwise the workspace's pins (once per request)
+    pinned: async (c: ConversationParent & { pinnedAt?: Date | null }, _args: unknown, ctx: Context) => {
+      if (c.pinnedAt !== undefined) return c.pinnedAt !== null;
       if (!ctx.auth) return false;
       let ids = pinCache.get(ctx);
-      if (!ids) pinCache.set(ctx, (ids = pinnedIds(ctx.auth.userId, ctx.auth.workspaceId)));
+      if (!ids) pinCache.set(ctx, (ids = pinnedConversationIds(ctx.auth.workspaceId)));
       return (await ids).includes(c.id);
     },
     collaborators: (c: ConversationParent, _args: unknown, ctx: Context) => (ctx.auth ? listCollaborators(ctx.auth.workspaceId, c.id) : []),

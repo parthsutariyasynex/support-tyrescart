@@ -126,10 +126,14 @@ export async function listConversations(workspaceId: string, page?: unknown, vie
   const dir = sort === 'oldest' ? ('asc' as const) : ('desc' as const);
   if (after) await requireConversation(workspaceId, after);
   if ((assignee === 'me' || assignee === 'collaborating' || assignee === 'mentioned') && !viewerId) throw new AppError('Sign in to see chats assigned to you', 401, 'UNAUTHENTICATED');
-  // The viewer's pinned chats come first on the first page (whatever their age), and are left out of the pages
-  const pins = viewerId
-    ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
-    : [];
+  // Replaced (pins are for the whole team now, conversationPins.ts):
+  // // The viewer's pinned chats come first on the first page (whatever their age), and are left out of the pages
+  // const pins = viewerId
+  //   ? (await prisma.conversationPin.findMany({ where: { userId: viewerId, conversation: { workspaceId } }, orderBy: { createdAt: 'desc' }, select: { conversationId: true } })).map((p) => p.conversationId)
+  //   : [];
+  // The team's pinned chats come first on the first page for everyone (whatever their age, most recently pinned first),
+  // and are left out of the pages
+  const pins = (await prisma.conversation.findMany({ where: { workspaceId, pinnedAt: { not: null } }, orderBy: { pinnedAt: 'desc' }, select: { id: true } })).map((p) => p.id);
   // Chats the viewer deleted for themselves ("Delete chat"), until a newer message brings them back
   const deleted = viewerId ? await deletedConversationIds(viewerId, workspaceId) : [];
   const where: Prisma.ConversationWhereInput = {

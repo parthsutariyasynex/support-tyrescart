@@ -11,7 +11,7 @@ import { logFailure } from './logging.js';
 // Settings → Company settings → Workspace preferences (admins). Each value is null until an admin sets it, and then
 // the app's previous default applies (listed in DEFAULTS), so nothing changes for a workspace that never visits the
 // page. Read by: the web app (time zone, phone country, business day start for snooze), assignment reminders,
-// presence (away), and the deleted-contacts purge.
+// presence (away), the deleted-contacts purge, and pinning (pinLimit: the most pinned chats, and pinned messages per chat).
 export const DEFAULTS = {
   defaultTimeZone: APP_TIME_ZONE,
   defaultCountry: 'AE',
@@ -19,6 +19,7 @@ export const DEFAULTS = {
   reminderMinutes: () => env.assignmentReminderMinutes,
   awayMinutes: () => env.presenceAwayMinutes,
   deletedContactRetentionDays: 14,
+  pinLimit: 5,
 };
 export type WorkspaceSettings = {
   defaultTimeZone: string;
@@ -27,6 +28,7 @@ export type WorkspaceSettings = {
   reminderMinutes: number; // 0 = off
   awayMinutes: number;
   deletedContactRetentionDays: number;
+  pinLimit: number;
 };
 
 const withDefaults = (row: Partial<Record<keyof WorkspaceSettings, unknown>> | null): WorkspaceSettings => ({
@@ -37,6 +39,7 @@ const withDefaults = (row: Partial<Record<keyof WorkspaceSettings, unknown>> | n
   reminderMinutes: (row?.reminderMinutes as number | null) ?? DEFAULTS.reminderMinutes(),
   awayMinutes: (row?.awayMinutes as number | null) ?? DEFAULTS.awayMinutes(),
   deletedContactRetentionDays: (row?.deletedContactRetentionDays as number | null) ?? DEFAULTS.deletedContactRetentionDays,
+  pinLimit: (row?.pinLimit as number | null) ?? DEFAULTS.pinLimit,
 });
 
 // Kept in memory for the background jobs (presence sweeps run every few seconds); refreshed on save
@@ -59,9 +62,16 @@ export function cachedSettingsOf(workspaceId: string): WorkspaceSettings {
   return hit?.value ?? withDefaults(null);
 }
 
+// Replaced (the pin limit is for owners/admins only):
+// export async function getWorkspaceSettings(auth: AuthPayload) {
+//   await getPermissions(auth); // members only
+//   return settingsOf(auth.workspaceId);
+// }
+// Members read the workspace's defaults (time zone, country…); the pin limit only owners/admins (null for others)
 export async function getWorkspaceSettings(auth: AuthPayload) {
-  await getPermissions(auth); // members only
-  return settingsOf(auth.workspaceId);
+  const { isAdmin } = await getPermissions(auth); // members only
+  const value = await settingsOf(auth.workspaceId);
+  return isAdmin ? value : { ...value, pinLimit: null };
 }
 
 const isTimeZone = (tz: string) => {
@@ -90,6 +100,8 @@ const updateSchema = z.object({
   reminderMinutes: z.number().int().min(0, 'Use 0 (off) or more minutes').max(1440, 'Up to 1440 minutes (a day)').optional(),
   awayMinutes: z.number().int().min(1, 'At least 1 minute').max(240, 'Up to 240 minutes').optional(),
   deletedContactRetentionDays: z.number().int().min(1, 'At least 1 day').max(90, 'Up to 90 days').optional(),
+  // Lowering it never unpins anything: new pins wait until the count is under the limit again
+  pinLimit: z.number().int().min(1, 'At least 1').max(50, 'Up to 50').optional(),
 });
 
 export async function updateWorkspaceSettings(auth: AuthPayload, rawInput: unknown) {
@@ -103,6 +115,8 @@ export async function updateWorkspaceSettings(auth: AuthPayload, rawInput: unkno
   });
   cache.delete(auth.workspaceId);
   const value = await settingsOf(auth.workspaceId);
-  emitToWorkspace(auth.workspaceId, 'workspace:settings', value); // open apps pick up the new defaults
-  return value;
+  // Replaced (the pin limit isn't sent to everyone): emitToWorkspace(auth.workspaceId, 'workspace:settings', value);
+  const { pinLimit: _adminOnly, ...shared } = value;
+  emitToWorkspace(auth.workspaceId, 'workspace:settings', shared); // open apps pick up the new defaults
+  return value; // the admin who saved it
 }

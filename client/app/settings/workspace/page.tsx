@@ -71,14 +71,14 @@ function Preferences({ me }: { me: Me }) {
       setBusy(false);
     }
   }
-  const num = (k: 'reminderMinutes' | 'awayMinutes' | 'deletedContactRetentionDays', min: number, max: number, unit: string) => (
+  const num = (k: 'reminderMinutes' | 'awayMinutes' | 'deletedContactRetentionDays' | 'pinLimit', min: number, max: number, unit: string) => (
     <div className="flex items-center gap-2">
       <input
         id={k}
         type="number"
         min={min}
         max={max}
-        value={Number.isFinite(form[k]) ? form[k] : ''}
+        value={typeof form[k] === 'number' && Number.isFinite(form[k]) ? (form[k] as number) : ''}
         onChange={(e) => set(k, e.target.value === '' ? Number.NaN : Number(e.target.value))}
         className={`${inputClass} !w-28`}
       />
@@ -122,6 +122,9 @@ function Preferences({ me }: { me: Me }) {
         </Field>
         <Field label="Show people as Away after" htmlFor="awayMinutes" hint="Idle time (no activity in the app) before someone's status changes from Online to Away.">
           {num('awayMinutes', 1, 240, 'minutes')}
+        </Field>
+        <Field label="Pinned chats and messages" htmlFor="pinLimit" hint="Owners and admins pin chats (at the top of everyone's list) and messages (in a bar at the top of the chat) for the whole team. This is the most pinned chats, and the most pinned messages in one chat. Lowering it never unpins anything.">
+          {num('pinLimit', 1, 50, 'chats · messages per chat')}
         </Field>
       </Section>
 

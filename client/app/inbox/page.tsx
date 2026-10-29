@@ -33,6 +33,7 @@ import {
   simulateIncomingMessage,
   snoozeConversation,
   setConversationPinned,
+  setMessagePinned,
   markConversationUnread,
 } from '@/lib/inbox';
 import {
@@ -81,6 +82,7 @@ import { enterAction, fitHeight } from '@/lib/composer';
 import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInline, toggleLines } from '@/lib/formatting';
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
+import { MESSAGE_PINNED_EVENT, PinnedBar } from './PinnedBar';
 import { AiAssistantPanel, ConfirmAiSend } from './AiAssistant';
 import { fetchAiConfigured } from '@/lib/ai';
 import { type ChatOption, ChatOptionsMenu, ClearIcon, CloseIcon, ConfirmClearDialog, DeleteIcon, PinIcon, SnoozeIcon, UnreadIcon } from './chatOptions';
@@ -663,6 +665,23 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
   // Admin-only action (menu item is hidden otherwise): permanently deletes the contact behind this chat, not just
   // this user's view of it — see deleteContact in lib/contacts.ts.
   const [deleteState, setDeleteState] = useState(NO_DELETE);
+  // Pin / Unpin chat from a list row (owners/admins): for the whole team, so everyone's list follows (conversation:pinned).
+  // Past the admin's limit the server refuses (PIN_LIMIT: "Up to 5 chats can be pinned. Unpin one first.") and that
+  // message is shown as the toast.
+  const togglePinFromList = useCallback(
+    async (c: Conversation) => {
+      const name = c.contact.name || `+${c.contact.waId}`;
+      try {
+        const r = await setConversationPinned(c.id, !c.pinned);
+        patchConversations((x) => (x.id === r.id ? { ...x, pinned: r.pinned } : x));
+        const t = pinText(r.pinned, name);
+        showToast(t.key, r.id, t.message, t.detail);
+      } catch (err) {
+        showToast(`pin-failed:${c.id}:${Date.now()}`, c.id, (err as Error).message, name);
+      }
+    },
+    [patchConversations],
+  );
   const deleteFlow = useMemo(
     () =>
       createDeleteChat({
@@ -991,6 +1010,11 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('message:status', (updated: Message) =>
       setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m))),
     );
+    // A message pinned or unpinned for the team (by any owner/admin, in any tab): its pin mark, and the open chat's bar
+    socket.on('message:pinned', (p: { conversationId: string; messageId: string; pinned: boolean; pinnedAt: string | null }) => {
+      setMessages((prev) => prev.map((m) => (m.id === p.messageId ? { ...m, pinnedAt: p.pinnedAt } : m)));
+      window.dispatchEvent(new CustomEvent(MESSAGE_PINNED_EVENT, { detail: p }));
+    });
     socket.on('message:updated', onMessageUpdated);
     socket.on('label:saved', onLabelSaved);
     socket.on('label:deleted', ({ id }: { id: string }) => onLabelDeleted(id));
@@ -1206,6 +1230,8 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
         conversations={filteredConversations}
         onDeleteChat={(id) => deleteFlow.ask(id)}
         canDeleteChat={isAdmin}
+        canPin={isAdmin}
+        onTogglePin={togglePinFromList}
         sortOrder={sortOrder}
         onSortChange={onSortOrderChange}
         statusFilter={statusFilter}
@@ -1425,7 +1451,12 @@ function ConversationList({
   stageBar,
   onDeleteChat,
   canDeleteChat,
+  canPin,
+  onTogglePin,
 }: {
+  // Pin / Unpin chat from the row's ⋮ menu: for the whole team, owners/admins only (canPin)
+  canPin: boolean;
+  onTogglePin: (conversation: Conversation) => void;
   // Delete chat from the row's ⋮ menu (asks first); admin-only, so the item is hidden when canDeleteChat is false
   onDeleteChat: (conversationId: string) => void;
   canDeleteChat: boolean;
@@ -1722,15 +1753,26 @@ function ConversationList({
                     <ContactAvatar contact={c.contact} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between">
-                        <span className={`truncate text-xs ${attention ? 'font-bold' : 'font-semibold'} ${isSelected ? 'text-primary' : 'text-ink'}`}>
-                          {contactName}
+                        {/* Pinned for the whole team (c.pinned: saved on the chat; live via conversation:pinned): the pin right
+                            after the name, like WhatsApp */}
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span className={`truncate text-xs ${attention ? 'font-bold' : 'font-semibold'} ${isSelected ? 'text-primary' : 'text-ink'}`}>
+                            {contactName}
+                          </span>
+                          {/* Dark and filled, so a pinned chat is easy to spot (was: text-body-soft, outline only) */}
+                          {c.pinned && (
+                            <span title="Pinned for the team" className="shrink-0 text-ink">
+                              <svg aria-label="Pinned" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                              </svg>
+                            </span>
+                          )}
                         </span>
                         <span className="flex shrink-0 items-center">
+                          {/* Replaced (the pin moved next to the name, above):
                           {c.pinned && (
-                            <svg aria-label="Pinned" className="mr-1 inline h-3 w-3 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-                            </svg>
-                          )}
+                            <svg aria-label="Pinned" className="mr-1 inline h-3 w-3 text-faint" ...>…</svg>
+                          )} */}
                           <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
                             {listTimestamp(c.lastMessageAt)}
                           </span>
@@ -1771,13 +1813,21 @@ function ConversationList({
                       )}
                     </span>
                   </button>
-                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens); admin-only (Delete chat is its only item) */}
+                  {/* WhatsApp-style ⋮ on the row (on hover; always on touch screens): Pin / Unpin chat (for the whole team)
+                      and Delete chat, both owners/admins only */}
+                  {/* Replaced (Pin / Unpin chat added):
                   {canDeleteChat && (
+                    ... options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
+                  )} */}
+                  {(canPin || canDeleteChat) && (
                     <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
                       <ChatOptionsMenu
                         small
                         label={`Chat options for ${contactName}`}
-                        options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
+                        options={[
+                          ...(canPin ? [{ label: c.pinned ? 'Unpin chat' : 'Pin chat', icon: PinIcon, onSelect: () => onTogglePin(c) }] : []),
+                          ...(canDeleteChat ? [{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }] : []),
+                        ]}
                       />
                     </div>
                   )}
@@ -2162,7 +2212,9 @@ function ChatPanel({
 
   // The ⋮ menu's options while the chat isn't closed
   const chatMenuOptions = (): ChatOption[] => [
-    { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
+    // Replaced (pins are for the whole team; owners and admins pin):
+    // { label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() },
+    ...(viewer?.isAdmin ? [{ label: conversation.pinned ? 'Unpin conversation' : 'Pin conversation', icon: PinIcon, onSelect: () => togglePin() }] : []),
     { label: 'Mark as unread', icon: UnreadIcon, onSelect: () => markUnread() },
     { label: 'Clear chat', icon: ClearIcon, onSelect: () => setConfirmClear(true) },
     { label: 'Close chat', icon: CloseIcon, onSelect: () => changeStatus('closed') },
@@ -2182,7 +2234,7 @@ function ChatPanel({
     try {
       const r = await setConversationPinned(conversation.id, !conversation.pinned);
       onPinnedChanged(r.id, r.pinned);
-      const t = pinText(r.pinned, conversation.contact.name || `+${conversation.contact.waId}`); // only you: pins are personal
+      const t = pinText(r.pinned, conversation.contact.name || `+${conversation.contact.waId}`); // for the whole team
       showToast(t.key, r.id, t.message, t.detail);
     } catch (err) {
       setError((err as Error).message);
@@ -2364,6 +2416,14 @@ function ChatPanel({
       requestAnimationFrame(() => inputRef.current?.focus());
     } else if (action === 'copy') {
       navigator.clipboard?.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
+    } else if (action === 'pin' || action === 'unpin') {
+      // For the whole team; past the admin's limit the server says so (PIN_LIMIT)
+      setMessagePinned(m.id, action === 'pin')
+        .then((r) => {
+          onMessageUpdated({ ...m, pinnedAt: r.pinnedAt });
+          window.dispatchEvent(new CustomEvent(MESSAGE_PINNED_EVENT, { detail: { conversationId: r.conversationId, messageId: r.id, pinned: !!r.pinnedAt, pinnedAt: r.pinnedAt } }));
+        })
+        .catch((err) => setError((err as Error).message));
     } else if (action === 'edit') {
       setMode('reply');
       setReplyTo(null);
@@ -2832,6 +2892,9 @@ function ChatPanel({
           </button>
         </div>
       )}
+
+      {/* Pinned messages (for the whole team): the newest pin, the count; a click jumps to it and then to the next */}
+      <PinnedBar conversationId={conversation.id} onJump={jumpTo} />
 
       {/* Messages Stream (the ref scrolls it to the newest message) */}
       <div

@@ -9,8 +9,11 @@ export type WorkspaceSettings = {
   reminderMinutes: number;
   awayMinutes: number;
   deletedContactRetentionDays: number;
+  // The most chats pinned for the whole team, and the most pinned messages in one chat (default 5). Owners/admins only:
+  // the server sends null to anyone else (this page is admin-only anyway)
+  pinLimit: number | null;
 };
-const FIELDS = 'defaultTimeZone defaultCountry businessDayStartHour reminderMinutes awayMinutes deletedContactRetentionDays';
+const FIELDS = 'defaultTimeZone defaultCountry businessDayStartHour reminderMinutes awayMinutes deletedContactRetentionDays pinLimit';
 
 export async function fetchWorkspaceSettings() {
   return (await gql<{ workspaceSettings: WorkspaceSettings }>(`{ workspaceSettings { ${FIELDS} } }`)).workspaceSettings;

@@ -111,10 +111,10 @@ export const collaboratorRemovedByYouText = (name: string, yourself: boolean, co
   detail: contactName,
 });
 
-// Your own pin / unpin (pins are personal, so only you see it)
+// Your pin / unpin (owners/admins): pins are for the whole team, so everyone's list changes
 export const pinText = (pinned: boolean, contactName = '') => ({
   key: `pin:${pinned}:${contactName}:${Date.now()}`,
-  message: pinned ? 'Chat pinned to the top of your list.' : 'Chat unpinned.',
+  message: pinned ? "Chat pinned to the top of everyone's list." : 'Chat unpinned for everyone.',
   detail: contactName,
 });
 
