@@ -36,7 +36,7 @@ npm run build --workspace=client
 
 echo "==> Reloading support-client (rolling, cluster mode — should stay up throughout)"
 pm2 reload ecosystem.config.cjs --only support-client --update-env
-wait_healthy "http://127.0.0.1:4000/inbox" "support-client"
+wait_healthy "http://127.0.0.1:4001/inbox" "support-client"
 
 echo "==> Restarting support-server (brief gap; single instance by design — see ecosystem.config.cjs)"
 pm2 restart ecosystem.config.cjs --only support-server --update-env
