@@ -1807,20 +1807,17 @@ function ConversationList({
                     <ContactAvatar contact={c.contact} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between">
-                        {/* Pinned for the whole team (c.pinned: saved on the chat; live via conversation:pinned): the pin right
-                            after the name, like WhatsApp */}
+                        {/* The name; the pin for a chat pinned for the team sits after the date, on the right */}
                         <span className="flex min-w-0 items-center gap-1">
                           <span className={`truncate text-xs ${attention ? 'font-bold' : 'font-semibold'} ${isSelected ? 'text-primary' : 'text-ink'}`}>
                             {contactName}
                           </span>
-                          {/* Dark and filled, so a pinned chat is easy to spot (was: text-body-soft, outline only) */}
+                          {/* Replaced (the pin moved after the date, below, like WhatsApp):
                           {c.pinned && (
-                            <span title="Pinned for the team" className="shrink-0 text-ink">
-                              <svg aria-label="Pinned" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-                              </svg>
+                            <span title="Pinned for the team" className="pl-8 shrink-0 text-ink">
+                              <svg aria-label="Pinned" className="h-3.5 w-3.5" ...>…</svg>
                             </span>
-                          )}
+                          )} */}
                         </span>
                         <span className="flex shrink-0 items-center">
                           {/* Replaced (the pin moved next to the name, above):
@@ -1830,21 +1827,53 @@ function ConversationList({
                           <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
                             {listTimestamp(c.lastMessageAt)}
                           </span>
+                          {/* Replaced (the pin moved to the preview line, below, in the date's grey, like WhatsApp):
+                          {c.pinned && (
+                            <span title="Pinned for the team" className="ml-1.5 shrink-0 text-ink">
+                              <svg aria-label="Pinned" className="h-3.5 w-3.5" ...>…</svg>
+                            </span>
+                          )} */}
+                          {/* Pinned for the whole team (live via conversation:pinned): WhatsApp's pin, an outline pushpin
+                              tilted so the needle points down-left, right after the date in the date's grey */}
+                          {c.pinned && (
+                            <span title="Pinned for the team" className="ml-1.5 shrink-0 text-faint">
+                              <svg aria-label="Pinned" className="h-4 w-4 rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                              </svg>
+                            </span>
+                          )}
                         </span>
                       </div>
+                      {/* The preview line (typing… or the last message with its ticks) */}
+                      <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                        {typingNames(typing, c.id).length > 0 ? (
+                          <p className="min-w-0 flex-1 truncate text-[11px] font-medium text-accent">typing…</p>
+                        ) : (
+                          <p className={`min-w-0 flex-1 truncate text-[11px] ${attention ? 'font-semibold text-ink' : 'text-muted'}`}>
+                            {/* The last message's ticks when the team sent it (sent / delivered / read), like WhatsApp's chat list */}
+                            {c.lastMessage && c.lastMessage.direction === 'out' && !c.lastMessage.deletedAt && (
+                              <span className="mr-1 inline-block align-[-1px]">
+                                <StatusTicks status={c.lastMessage.status} error={c.lastMessage.error} />
+                              </span>
+                            )}
+                            {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage ? (filePreview(c.lastMessage) ?? (c.lastMessage.body || 'No messages yet')) : 'No messages yet'}
+                          </p>
+                        )}
+                        {/* Replaced (the pin moved back after the date, above):
+                        {c.pinned && (
+                          <span title="Pinned for the team" className="shrink-0 text-faint">
+                            <svg aria-label="Pinned" className="h-4 w-4 rotate-45" ...>…</svg>
+                          </span>
+                        )} */}
+                      </div>
+                      {/* Replaced (wrapped above with the pin):
                       {typingNames(typing, c.id).length > 0 ? (
                         <p className="mt-0.5 truncate text-[11px] font-medium text-accent">typing…</p>
                       ) : (
                         <p className={`mt-0.5 truncate text-[11px] ${attention ? 'font-semibold text-ink' : 'text-muted'}`}>
-                          {/* The last message's ticks when the team sent it (sent / delivered / read), like WhatsApp's chat list */}
-                          {c.lastMessage && c.lastMessage.direction === 'out' && !c.lastMessage.deletedAt && (
-                            <span className="mr-1 inline-block align-[-1px]">
-                              <StatusTicks status={c.lastMessage.status} error={c.lastMessage.error} />
-                            </span>
-                          )}
-                          {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage ? (filePreview(c.lastMessage) ?? (c.lastMessage.body || 'No messages yet')) : 'No messages yet'}
+                          …ticks + preview…
                         </p>
-                      )}
+                      )} */}
                       {(c.labels.length > 0 || c.assignee || c.contact.leadStage) && (
                         <div className="mt-1 flex min-w-0 items-center gap-1.5">
                           <StagePill value={c.contact.leadStage} />
@@ -3227,6 +3256,7 @@ function ChatPanel({
               ] as const
             ).map((t) => {
               const on = t.key === 'note' ? noting : t.key === 'reply' ? !noting && !assisting : assisting && mode === t.key;
+              const isAi = t.key === 'ai-reply' || t.key === 'ai-summary';
               return (
                 <button
                   key={t.key}
@@ -3243,7 +3273,15 @@ function ChatPanel({
                     if (t.key === 'reply' || t.key === 'note') requestAnimationFrame(() => inputRef.current?.focus());
                   }}
                   className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 font-semibold transition disabled:opacity-40 ${
-                    on ? (t.key === 'note' ? 'bg-warning-soft-hover text-warning shadow-xs' : 'bg-surface text-primary shadow-xs') : 'text-muted hover:text-body'
+                    on
+                      ? t.key === 'note'
+                        ? 'bg-warning-soft-hover text-warning shadow-xs'
+                        : isAi
+                          ? 'bg-[#eff6ff] text-[#1d4ed8] shadow-xs'
+                          : 'bg-surface text-primary shadow-xs'
+                      : isAi
+                        ? 'text-[#2563eb] hover:bg-[#eff6ff]/60 hover:text-[#1d4ed8]'
+                        : 'text-muted hover:text-body'
                   }`}
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
