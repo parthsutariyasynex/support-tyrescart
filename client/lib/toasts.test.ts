@@ -46,8 +46,8 @@ describe('toast texts', () => {
     assert.equal(removedAsCollaboratorText({ conversationId: 'c', actorName: 'Parth', contactName: 'Riya' }).message, 'Parth removed you as a collaborator from this chat.');
     assert.equal(collaboratorRemovedByYouText('Hemi', false, 'Riya').message, 'Hemi removed as a collaborator from this chat.');
     assert.equal(collaboratorRemovedByYouText('Me', true).message, 'You removed yourself as a collaborator from this chat.');
-    assert.equal(pinText(true, 'Riya').message, 'Chat pinned to the top of your list.');
-    assert.equal(pinText(false).message, 'Chat unpinned.');
+    assert.equal(pinText(true, 'Riya').message, "Chat pinned to the top of everyone's list.");
+    assert.equal(pinText(false).message, 'Chat unpinned for everyone.');
   });
   test('added as collaborator', () => {
     assert.equal(addedAsCollaboratorText({ conversationId: 'c1', actorName: 'Parth', contactName: 'Riya' }).message, 'Parth added you as a collaborator on this chat.');
