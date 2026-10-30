@@ -57,7 +57,7 @@ export function ChatOptionsMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className={`flex ${small ? 'h-5 w-5' : 'h-7 w-7'} items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-body disabled:opacity-50 ${open ? 'bg-surface-strong text-body' : ''}`}
+        className={`flex ${small ? 'h-5 w-5 bg-surface shadow-xs border border-line-soft' : 'h-7 w-7'} items-center justify-center rounded-full text-body-soft transition hover:bg-surface-strong hover:text-body disabled:opacity-50 ${open ? 'bg-surface-strong text-body' : ''}`}
       >
         {busy ? (
           <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line-strong border-t-primary" />

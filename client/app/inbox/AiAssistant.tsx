@@ -99,9 +99,9 @@ export function AiAssistantPanel({
 
   const button = 'rounded-lg px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50';
   return (
-    <div className="rounded-xl border border-line bg-surface p-3 text-xs" aria-label={view === 'reply' ? 'AI Reply' : 'AI Summary'}>
+    <div className="rounded-xl border border-line bg-[#eff6ff] p-3 text-xs" aria-label={view === 'reply' ? 'AI Reply' : 'AI Summary'}>
       {view === 'summary' && canSummarize && (
-        <section aria-labelledby="ai-summary-title">
+        <section aria-labelledby="ai-summary-title" className="-m-1.5 rounded-lg bg-[#dbeafe] p-1.5">
           <div className="flex items-center justify-between gap-2">
             <h3 id="ai-summary-title" className="text-[11px] font-bold uppercase tracking-wide text-ink">
               AI Summary
@@ -156,7 +156,7 @@ export function AiAssistantPanel({
       )}
 
       {view === 'reply' && canReply && (
-        <section aria-labelledby="ai-reply-title">
+        <section aria-labelledby="ai-reply-title" className="-m-1.5 rounded-lg bg-[#dbeafe] p-1.5">
           <div className="flex items-center justify-between gap-2">
             <h3 id="ai-reply-title" className="text-[11px] font-bold uppercase tracking-wide text-ink">
               AI Reply

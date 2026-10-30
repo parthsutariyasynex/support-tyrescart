@@ -1820,28 +1820,9 @@ function ConversationList({
                           )} */}
                         </span>
                         <span className="flex shrink-0 items-center">
-                          {/* Replaced (the pin moved next to the name, above):
-                          {c.pinned && (
-                            <svg aria-label="Pinned" className="mr-1 inline h-3 w-3 text-faint" ...>…</svg>
-                          )} */}
                           <span className={`text-[10px] ${attention ? 'font-semibold text-accent' : 'text-faint'}`}>
                             {listTimestamp(c.lastMessageAt)}
                           </span>
-                          {/* Replaced (the pin moved to the preview line, below, in the date's grey, like WhatsApp):
-                          {c.pinned && (
-                            <span title="Pinned for the team" className="ml-1.5 shrink-0 text-ink">
-                              <svg aria-label="Pinned" className="h-3.5 w-3.5" ...>…</svg>
-                            </span>
-                          )} */}
-                          {/* Pinned for the whole team (live via conversation:pinned): WhatsApp's pin, an outline pushpin
-                              tilted so the needle points down-left, right after the date in the date's grey */}
-                          {c.pinned && (
-                            <span title="Pinned for the team" className="ml-1.5 shrink-0 text-faint">
-                              <svg aria-label="Pinned" className="h-4 w-4 rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-                              </svg>
-                            </span>
-                          )}
                         </span>
                       </div>
                       {/* The preview line (typing… or the last message with its ticks) */}
@@ -1875,7 +1856,7 @@ function ConversationList({
                         </p>
                       )} */}
                       {(c.labels.length > 0 || c.assignee || c.contact.leadStage) && (
-                        <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                        <div className="mt-1 flex min-w-0 items-center gap-1.5 pr-8">
                           <StagePill value={c.contact.leadStage} />
                           {c.assignee && (
                             <span
@@ -1892,7 +1873,14 @@ function ConversationList({
                       )}
                     </div>
                     {/* Fixed slot, so the row doesn't shift when the badge appears or goes away */}
-                    <span className="flex w-5 shrink-0 justify-end">
+                    <span className="flex min-w-5 shrink-0 items-center justify-end gap-1.5">
+                      {c.pinned && (
+                        <span title="Pinned for the team" className="shrink-0 text-faint">
+                          <svg aria-label="Pinned" className="h-3.5 w-3.5 rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                          </svg>
+                        </span>
+                      )}
                       {c.unread > 0 ? (
                         <span className="flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-on-primary">
                           {c.unread > 99 ? '99+' : c.unread}
@@ -1909,7 +1897,7 @@ function ConversationList({
                     ... options={[{ label: 'Delete chat', icon: DeleteIcon, danger: true, onSelect: () => onDeleteChat(c.id) }]}
                   )} */}
                   {(canPin || canDeleteChat) && (
-                    <div className="absolute bottom-2 right-2 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
+                    <div className="absolute bottom-2 right-2 z-10 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 [@media(hover:none)]:opacity-100">
                       <ChatOptionsMenu
                         small
                         label={`Chat options for ${contactName}`}
