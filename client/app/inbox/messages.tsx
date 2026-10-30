@@ -13,6 +13,38 @@ import { AssigneeAvatar } from './assign';
 import { isMediaPlaceholder, quotePreview } from '@/lib/media';
 
 const STATUS_ICON: Record<string, string> = { pending: '🕓', sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠' };
+
+// WhatsApp Web-style delivery ticks for an outgoing message: sent = one grey tick, delivered = two overlapping grey
+// ticks, read = the same two in blue (WhatsApp's sizes: 12×11 for one tick, 16×11 for two; its grey and blue).
+// pending (clock) and failed (warning) keep their characters. Used in the bubble and the chat list preview.
+const TICK_GREY = '#667781';
+const TICK_BLUE = '#53bdeb';
+export function StatusTicks({ status, error }: { status: string; error?: string | null }) {
+  if (status !== 'sent' && status !== 'delivered' && status !== 'read') {
+    return (
+      <span className={status === 'failed' ? 'text-danger-icon' : 'text-faint'} title={status === 'failed' ? `Not delivered${error ? `: ${error}` : ''}` : status}>
+        {STATUS_ICON[status] ?? ''}
+      </span>
+    );
+  }
+  const label = status === 'sent' ? 'Sent' : status === 'delivered' ? 'Delivered' : 'Read';
+  const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  return (
+    <span role="img" aria-label={label} title={label} className="inline-flex shrink-0 items-center" style={{ color: status === 'read' ? TICK_BLUE : TICK_GREY }}>
+      {status === 'sent' ? (
+        <svg width="12" height="11" viewBox="0 0 12 11" aria-hidden="true">
+          <path d="M1.6 5.9l2.9 2.9 6.1-6.6" {...stroke} />
+        </svg>
+      ) : (
+        <svg width="16" height="11" viewBox="0 0 16 11" aria-hidden="true">
+          {/* the first tick, then the second overlapping it on the right (its short stroke runs into the first) */}
+          <path d="M1.2 5.9l2.9 2.9 6.1-6.6" {...stroke} />
+          <path d="M7.3 7.9l0.9 0.9 6.1-6.6" {...stroke} />
+        </svg>
+      )}
+    </span>
+  );
+}
 const LONG_PRESS_MS = 450;
 
 // WhatsApp-group style: every agent gets their own name colour (stable per sender id); the customer uses the brand colour
@@ -231,16 +263,13 @@ export function MessageBubble({
             </span>
           )}
           <span>{formatTime(m.createdAt)}</span>
+          {/* Replaced (text ticks ✓ / ✓✓ → WhatsApp-style SVG ticks, StatusTicks):
           {isOut && !m.deletedAt && (
-            <span
-              className={
-                m.status === 'read' ? 'text-tick-read font-bold' : m.status === 'failed' ? 'text-danger-icon' : 'text-faint'
-              }
-              title={m.status === 'failed' ? `Not delivered${m.error ? `: ${m.error}` : ''}` : m.status}
-            >
+            <span className={m.status === 'read' ? 'text-tick-read font-bold' : m.status === 'failed' ? 'text-danger-icon' : 'text-faint'} title={…}>
               {STATUS_ICON[m.status]}
             </span>
-          )}
+          )} */}
+          {isOut && !m.deletedAt && <StatusTicks status={m.status} error={m.error} />}
         </div>
         {/* Why WhatsApp didn't take or deliver it, as WhatsApp said it */}
         {isOut && !m.deletedAt && m.status === 'failed' && (

@@ -119,6 +119,7 @@ import {
   MessageMenu,
   type MessageAction,
   QuoteBlock,
+  StatusTicks,
   UndoToast,
   messageActions,
 } from './messages';
@@ -1046,9 +1047,14 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     socket.on('live:changed', (live: LiveLocation) => setLive(live));
     // Live locations you were sharing before a reload carry on from this tab
     void resumeMyLiveLocations();
-    socket.on('message:status', (updated: Message) =>
-      setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m))),
-    );
+    // Replaced (the chat list's last-message ticks follow too):
+    // socket.on('message:status', (updated: Message) =>
+    //   setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m))),
+    // );
+    socket.on('message:status', (updated: Message) => {
+      setMessages((prev) => prev.map((m) => (m.id === updated.id ? newerMessage(m, updated) : m)));
+      patchConversations((c) => (c.lastMessage?.id === updated.id ? { ...c, lastMessage: newerMessage(c.lastMessage, updated) } : c));
+    });
     // A message pinned or unpinned for the team (by any owner/admin, in any tab): its pin mark, and the open chat's bar
     socket.on('message:pinned', (p: { conversationId: string; messageId: string; pinned: boolean; pinnedAt: string | null }) => {
       setMessages((prev) => prev.map((m) => (m.id === p.messageId ? { ...m, pinnedAt: p.pinnedAt } : m)));
@@ -1830,6 +1836,12 @@ function ConversationList({
                         <p className="mt-0.5 truncate text-[11px] font-medium text-accent">typing…</p>
                       ) : (
                         <p className={`mt-0.5 truncate text-[11px] ${attention ? 'font-semibold text-ink' : 'text-muted'}`}>
+                          {/* The last message's ticks when the team sent it (sent / delivered / read), like WhatsApp's chat list */}
+                          {c.lastMessage && c.lastMessage.direction === 'out' && !c.lastMessage.deletedAt && (
+                            <span className="mr-1 inline-block align-[-1px]">
+                              <StatusTicks status={c.lastMessage.status} error={c.lastMessage.error} />
+                            </span>
+                          )}
                           {c.lastMessage?.deletedAt ? <DeletedText /> : c.lastMessage ? (filePreview(c.lastMessage) ?? (c.lastMessage.body || 'No messages yet')) : 'No messages yet'}
                         </p>
                       )}
