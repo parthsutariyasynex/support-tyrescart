@@ -748,15 +748,15 @@ model PushDevice {
   @@index([workspaceId, userId])
 }
 
-// A customer's vehicle (chat header → 🚗 Vehicles → Add vehicle). Belongs to one CRM contact; plate number, make,
-// model, year and tyre size 1 are required. Audit: who added / last changed / deleted it and when (user ids);
-// deleting sets deletedAt/deletedBy (soft delete) and the vehicle is no longer shown.
-// The dates are calendar days (no time).
+// A customer's vehicle. Belongs to one CRM contact; make, model, year and tyre size 1 are required (shown as its name,
+// e.g. "Toyota Land Cruiser 2022"); the plate number is optional.
+// lastServiceDate is no longer on the form but kept (existing data); editing a vehicle leaves it as it is.
+// Audit: who added / last changed / deleted it and when (user ids); deleting sets deletedAt/deletedBy (soft delete).
 model Vehicle {
   id               String    @id @default(cuid())
   workspaceId      String
   contactId        String
-  plateNumber      String    @db.VarChar(20)
+  plateNumber      String?   @db.VarChar(20)
   make             String    @db.VarChar(60)
   model            String    @db.VarChar(60)
   year             Int
@@ -764,6 +764,8 @@ model Vehicle {
   lastServiceDate  DateTime? @db.Date
   tireSize1        String    @db.VarChar(30)
   tireSize2        String?   @db.VarChar(30)
+  // Free-text notes about this vehicle (team only)
+  remarks          String?   @db.Text
   createdAt        DateTime  @default(now())
   createdBy        String?
   updatedAt        DateTime  @default(now()) @updatedAt

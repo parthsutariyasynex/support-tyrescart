@@ -1,0 +1,967 @@
+# Prompt: Vehicle form update (copy everything below into the other project's Claude Code session)
+
+Update the customer Vehicle feature (car button in the chat header + "Add Vehicle" in the contact profile) so it
+matches the reference implementation below EXACTLY. The reference files at the end of this prompt are the final,
+tested versions: copy them as they are, then only adapt import paths / names if this project differs.
+
+==================================================
+STEP 0 — Inspect first (do not change anything yet)
+==================================================
+Read and compare with the reference files at the end:
+- `server/prisma/schema.prisma` → `model Vehicle`
+- `server/src/services/vehicles.ts`, `server/src/graphql/vehicles.ts` (registered in `server/src/graphql/index.ts`)
+- `client/lib/vehicles.ts`, `client/app/inbox/VehiclesDialog.tsx`
+- The two callers: `client/app/inbox/page.tsx` (chat header car button) and `client/app/inbox/ContactPanel.tsx`
+  ("Add Vehicle" pill under the email)
+- Helpers the reference code imports and must exist in this project: `requireContact` (services/contacts),
+  `notFound` (services/errors), `getPermissions` (services/permissions), `parse` (services/validate),
+  `emitToWorkspace` (realtime), `authed` (graphql/shared), `gql` (client/lib/api), `showToast` (client/lib/toasts),
+  `CountryFlag` (client/app/inbox/CountryFlag.tsx). If one is missing or named differently, adapt the import; if
+  `CountryFlag` doesn't exist, remove its two uses (import + one line in the dialog header) instead of creating it.
+- Check the live MySQL `Vehicle` table columns:
+  `SELECT COLUMN_NAME, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Vehicle' ORDER BY ORDINAL_POSITION;`
+
+RULES: do NOT deploy, do NOT restart PM2, do NOT run `prisma db push` or any migration on its own, do NOT touch a
+production database. Only `npx prisma generate` is allowed (it doesn't touch the database).
+
+==================================================
+WHAT THE FINAL BEHAVIOUR MUST BE
+==================================================
+1. Customer: name, flag and WhatsApp number come from the open chat and are shown at the top of the dialog with
+   "· N vehicles". There is NO customer picker / search: nobody types the customer. The contactId comes from the chat;
+   the workspaceId always comes from the login (server side), never from the input. If the customer has no name,
+   the title is "+<number>" and the second line says "WhatsApp contact" (the number is not shown twice).
+2. One dialog (no "form only" mode): "SAVED VEHICLES (N)" list on top, then a section "ADD VEHICLE" /
+   "ADD ANOTHER VEHICLE" (or "EDIT VEHICLE: Toyota Land Cruiser 2022 [PLATE]" while editing), then a footer pinned at
+   the bottom with Close / Cancel edit and the submit button (Add vehicle / Save changes / Saving…).
+   - Many vehicles per customer. After saving, the form clears for the next one and the list reloads.
+   - Each vehicle card: "Make Model Year" as its name, the plate as a badge ONLY when there is one, Tyre size 1,
+     Tyre size 2, Registered (dd Mon yyyy), Last service (only if a saved one exists), remarks (3 lines max).
+   - Edit (pencil) fills the form with that vehicle and highlights the card ("Editing" badge).
+     "+ Add new instead" / "Cancel edit" go back to an empty form.
+   - Delete (trash) asks "Delete? Cancel / Delete" IN PLACE of the two icons (same row). Delete is a SOFT delete.
+   - Live reload: the socket event `contact:vehicles` ({ contactId }) is relayed as the window event
+     `crm:contact-vehicles` (VEHICLES_EVENT); the open dialog reloads when it's for its customer.
+   - Toasts: "Vehicle added", "Vehicle updated", "Vehicle deleted".
+3. Form fields (labels exactly):
+   Make *, Model *, Year * (4 digits, 1900 to next year), Plate Number (optional, saved UPPERCASE, empty = NULL),
+   Registration Date (optional, type=date, max = today in the user's time zone), Tyre Size 1 *, Tyre Size 2 (optional),
+   Remarks (optional textarea, NO character counter, NO length limit on the form).
+   "Last Purchase / Service Date" is NOT on the form any more, but the column is kept: editing a vehicle never
+   changes it (it isn't sent).
+   Validation messages: "Enter the make", "Enter the model", "Enter the year", "Enter a 4-digit year",
+   "Enter a year from 1900 to <next year>", "Enter tyre size 1". Shown under the field (red border) after submit.
+   Server errors in a red box under the form.
+4. Layout (desktop, ONE 4-column grid so every row splits at the same middle line):
+       Make *                 | Model *
+       Year *  | Plate Number | Registration Date
+       Tyre Size 1 *          | Tyre Size 2
+       Remarks (full width)
+   Phone (2 columns): everything full width except Year | Plate Number side by side.
+   Dialog: max-w-2xl, opens near the top (sm:items-start sm:pt-[6dvh]) and grows downward, max-h 88dvh (92dvh on
+   phone), only the middle scrolls, min-w-0 so it never gets wider than a phone screen. Footer buttons have a
+   min width so they don't change size. Inputs 38px high.
+5. Server:
+   - `updateVehicle(auth, id, input)`: only the fields sent change (a vehicle never moves to another contact);
+     sets `updatedBy`; 404 "Vehicle not found" for a deleted / other-workspace vehicle; announces the change.
+   - `remarks`: trimmed, empty → null, only limit is the TEXT column: 65,535 BYTES
+     ("The remarks are too long to save. Shorten them and try again.").
+   - `plateNumber`: optional, trimmed, uppercase, empty → null. Length messages read
+     "Keep the <field> to <max> characters or fewer".
+   - GraphQL: `Vehicle.plateNumber: String`, `Vehicle.remarks: String`, `Vehicle.updatedAt: DateTime!`,
+     `VehicleInput.plateNumber: String`, `VehicleInput.remarks: String`, new `input UpdateVehicleInput` (all optional),
+     new mutation `updateVehicle(id: ID!, input: UpdateVehicleInput!): Vehicle!`.
+
+==================================================
+DATABASE (SQL — do not run it yourself; give it to me)
+==================================================
+Prisma model changes (see reference schema below): `plateNumber String? @db.VarChar(20)` and
+`remarks String? @db.Text` (after tireSize2). Then `npx prisma generate`.
+
+Check what is needed with:
+  npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script
+Only these two Vehicle statements may be needed (skip one if the column is already like that). If the diff shows
+anything else (for example dropping `Workspace.companyId`), DO NOT apply it — report it to me.
+
+  -- server/prisma/sql/2026-11-02_vehicle_remarks.sql
+  ALTER TABLE `Vehicle` ADD COLUMN `remarks` TEXT NULL AFTER `tireSize2`;
+
+  -- server/prisma/sql/2026-11-02_vehicle_plate_optional.sql
+  ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NULL;
+
+Save them as those two files (comments included, see the reference SQL files below). They are applied later with:
+  npx prisma db execute --file prisma/sql/2026-11-02_vehicle_remarks.sql --schema prisma/schema.prisma
+  npx prisma db execute --file prisma/sql/2026-11-02_vehicle_plate_optional.sql --schema prisma/schema.prisma
+IMPORTANT: the new server code reads `remarks`; until the remarks SQL is applied, the vehicle list fails with
+"Unexpected error." (Prisma P2022). Say this clearly in your report.
+
+==================================================
+CALLERS
+==================================================
+- `client/app/inbox/page.tsx` and `client/app/inbox/ContactPanel.tsx`: render the dialog WITHOUT `formOnly`:
+    <VehiclesDialog
+      key={conversation.contact.id}
+      customer={{ id: conversation.contact.id, name: conversation.contact.name, waId: conversation.contact.waId }}
+      onClose={() => setVehiclesOpen(false)}   // setVehicleOpen in ContactPanel
+    />
+  Keep the existing buttons (round car button in the header between "Label" and (i); "Add Vehicle" pill under the
+  email in the profile) and the socket relay for `contact:vehicles`. Remove any leftover `formOnly` prop.
+- Nothing else in the client may still import `searchVehicleCustomers` or a `CustomerPicker` from the dialog
+  (the server query `vehicleCustomers` stays for compatibility).
+
+==================================================
+VERIFY
+==================================================
+- `npx tsc --noEmit -p .` in client and server: no errors.
+- Client unit tests still pass (`npx tsx --test lib/*.test.ts` in client).
+- After I've applied the SQL on a LOCAL database only: add a vehicle without a plate (plateNumber NULL), with a plate
+  (uppercase), edit it (lastServiceDate unchanged, updatedBy = my user id), delete it (deletedAt/deletedBy set, hidden
+  from the list), and a 5,000+ character remark saves in full.
+- Report: every changed file, the SQL (separately), and anything in this project that differed from the reference.
+
+==================================================
+REFERENCE FILES (final versions — copy exactly, adapt imports only if needed)
+==================================================
+
+### `server/prisma/schema.prisma` (model Vehicle only)
+
+```prisma
+// A customer's vehicle. Belongs to one CRM contact; make, model, year and tyre size 1 are required (shown as its name,
+// e.g. "Toyota Land Cruiser 2022"); the plate number is optional.
+// lastServiceDate is no longer on the form but kept (existing data); editing a vehicle leaves it as it is.
+// Audit: who added / last changed / deleted it and when (user ids); deleting sets deletedAt/deletedBy (soft delete).
+model Vehicle {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  contactId        String
+  plateNumber      String?   @db.VarChar(20)
+  make             String    @db.VarChar(60)
+  model            String    @db.VarChar(60)
+  year             Int
+  registrationDate DateTime? @db.Date
+  lastServiceDate  DateTime? @db.Date
+  tireSize1        String    @db.VarChar(30)
+  tireSize2        String?   @db.VarChar(30)
+  // Free-text notes about this vehicle (team only)
+  remarks          String?   @db.Text
+  createdAt        DateTime  @default(now())
+  createdBy        String?
+  updatedAt        DateTime  @default(now()) @updatedAt
+  updatedBy        String?
+  deletedAt        DateTime?
+  deletedBy        String?
+  contact          Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([contactId, createdAt])
+  @@index([workspaceId])
+}
+```
+
+### `server/prisma/sql/2026-11-02_vehicle_remarks.sql`
+
+```sql
+-- Vehicle remarks (Add Vehicle form → Remarks). Run once on each database BEFORE starting the new server code:
+-- the regenerated Prisma client reads this column, so vehicle screens fail with "column remarks does not exist" until it's there.
+--
+-- Safe: adds one nullable column; existing vehicles keep all their data (remarks = NULL).
+-- Run with:  npx prisma db execute --file prisma/sql/2026-11-02_vehicle_remarks.sql --schema prisma/schema.prisma
+-- (do NOT use `prisma db push` here: on this database it would also drop Workspace.companyId)
+
+ALTER TABLE `Vehicle` ADD COLUMN `remarks` TEXT NULL AFTER `tireSize2`;
+
+-- Check: 18 columns, remarks after tireSize2
+-- SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE FROM information_schema.COLUMNS
+--  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Vehicle' ORDER BY ORDINAL_POSITION;
+
+-- Undo (drops any remarks typed in since):
+-- ALTER TABLE `Vehicle` DROP COLUMN `remarks`;
+```
+
+### `server/prisma/sql/2026-11-02_vehicle_plate_optional.sql`
+
+```sql
+-- Vehicle plate number optional (Add Vehicle form → Plate Number is no longer required). Run once on each database
+-- BEFORE starting the new server code: until then, saving a vehicle without a plate fails.
+--
+-- Safe: only allows NULL; existing plate numbers stay as they are.
+-- Run with:  npx prisma db execute --file prisma/sql/2026-11-02_vehicle_plate_optional.sql --schema prisma/schema.prisma
+-- (do NOT use `prisma db push` here: on this database it would also drop Workspace.companyId)
+
+ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NULL;
+
+-- Undo (only works while no vehicle has an empty plate):
+-- ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NOT NULL;
+```
+
+### `server/src/services/vehicles.ts`
+
+```ts
+import type { Vehicle } from '@prisma/client';
+import { z } from 'zod';
+import type { AuthPayload } from '../auth.js';
+import { prisma } from '../prisma.js';
+import { emitToWorkspace } from '../realtime.js';
+import { requireContact } from './contacts.js';
+import { notFound } from './errors.js';
+import { getPermissions } from './permissions.js';
+import { parse } from './validate.js';
+
+// A customer's vehicles (chat header car button, contact profile "Add Vehicle"). Every member can list, add, edit
+// and delete them; deleting is a soft delete (deletedAt/deletedBy), so nothing is lost. Every vehicle belongs to one
+// contact of the caller's workspace (workspaceId always comes from the login, never from the input).
+
+// Optional text: trimmed, empty → null
+const text = (max: number, label: string) =>
+  z
+    .string()
+    .trim()
+    .max(max, `Keep the ${label} to ${max} characters or fewer`)
+    .nullish()
+    .transform((v) => v || null);
+
+const requiredText = (max: number, label: string) =>
+  z
+    .string({ error: `Enter the ${label}` })
+    .trim()
+    .min(1, `Enter the ${label}`)
+    .max(max, `Keep the ${label} to ${max} characters or fewer`);
+
+// The latest calendar day anywhere on Earth (UTC+14), so "today" in the user's own time zone is never refused
+const latestToday = () => new Date(Date.now() + 14 * 3600_000).toISOString().slice(0, 10);
+
+// Optional yyyy-mm-dd: a real date, not in the future; empty → null
+const day = (label: string) =>
+  z
+    .string()
+    .trim()
+    .nullish()
+    .transform((v) => v || null)
+    .refine((v) => v === null || /^\d{4}-\d{2}-\d{2}$/.test(v), `The ${label} must be a date like 2026-01-31`)
+    .refine((v) => {
+      if (v === null) return true;
+      const d = new Date(`${v}T00:00:00Z`);
+      return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v; // rejects 2026-02-30
+    }, `The ${label} is not a real date`)
+    .refine((v) => v === null || v <= latestToday(), `The ${label} can't be in the future`);
+
+// The vehicle's own details (shared by add and edit)
+const detailsSchema = z.object({
+  // Optional; stored uppercase, empty → null
+  plateNumber: text(20, 'plate number').transform((v) => v?.toUpperCase() ?? null),
+  make: requiredText(60, 'make'),
+  model: requiredText(60, 'model'),
+  year: z
+    .number({ error: 'Enter the year' })
+    .int('Enter the year')
+    .min(1900, 'Enter the year')
+    .refine((y) => y <= new Date().getUTCFullYear() + 1, 'Enter the year'),
+  registrationDate: day('registration date'),
+  lastServiceDate: day('last purchase / service date'),
+  tireSize1: z.string({ error: 'Enter tyre size 1' }).trim().min(1, 'Enter tyre size 1').max(30, 'Keep tyre size 1 to 30 characters or fewer'),
+  tireSize2: text(30, 'tyre size 2'),
+  // No length limit on the form; only what the TEXT column holds (65,535 bytes: an emoji or Arabic letter takes 2-4)
+  remarks: z
+    .string()
+    .trim()
+    .nullish()
+    .transform((v) => v || null)
+    .refine((v) => v === null || Buffer.byteLength(v, 'utf8') <= 65535, 'The remarks are too long to save. Shorten them and try again.'),
+});
+
+const vehicleSchema = detailsSchema.extend({
+  contactId: z.string({ error: 'Choose a CRM customer' }).trim().min(1, 'Choose a CRM customer'),
+});
+// Edit: only the fields sent change (a vehicle never moves to another contact)
+const updateSchema = detailsSchema.partial();
+
+const toDay = (v: string | null) => (v ? new Date(`${v}T00:00:00Z`) : null);
+const fromDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+
+// API shape: dates as yyyy-mm-dd, no workspace or audit ids
+function shape(v: Vehicle) {
+  return {
+    id: v.id,
+    contactId: v.contactId,
+    plateNumber: v.plateNumber,
+    make: v.make,
+    model: v.model,
+    year: v.year,
+    registrationDate: fromDay(v.registrationDate),
+    lastServiceDate: fromDay(v.lastServiceDate),
+    tireSize1: v.tireSize1,
+    tireSize2: v.tireSize2,
+    remarks: v.remarks,
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+  };
+}
+
+// Open vehicle lists of this contact reload
+function announce(workspaceId: string, contactId: string) {
+  emitToWorkspace(workspaceId, 'contact:vehicles', { contactId });
+}
+
+export async function listVehicles(auth: AuthPayload, contactId: string) {
+  await getPermissions(auth);
+  await requireContact(auth.workspaceId, contactId);
+  const rows = await prisma.vehicle.findMany({
+    where: { workspaceId: auth.workspaceId, contactId, deletedAt: null },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  });
+  return rows.map(shape);
+}
+
+// "CRM Customer" picker: contacts by name, first/last name, or the digits of their WhatsApp number
+export async function searchVehicleCustomers(auth: AuthPayload, search: string | null | undefined) {
+  await getPermissions(auth);
+  const term = (search ?? '').trim().slice(0, 100);
+  // Prisma's `contains` is LIKE '%...%' on MySQL without escaping
+  const like = term.replace(/[\\%_]/g, '\\$&');
+  const digits = term.replace(/\D/g, '');
+  const rows = await prisma.contact.findMany({
+    where: {
+      workspaceId: auth.workspaceId,
+      deletedAt: null,
+      ...(term
+        ? {
+            OR: [
+              { name: { contains: like } },
+              { firstName: { contains: like } },
+              { lastName: { contains: like } },
+              ...(digits ? [{ waId: { contains: digits } }] : []),
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ updatedAt: 'desc' }],
+    select: { id: true, name: true, waId: true },
+    take: 20,
+  });
+  return rows;
+}
+
+export async function addVehicle(auth: AuthPayload, rawInput: unknown) {
+  await getPermissions(auth);
+  const data = parse(vehicleSchema, rawInput);
+  await requireContact(auth.workspaceId, data.contactId);
+  const vehicle = await prisma.vehicle.create({
+    data: {
+      workspaceId: auth.workspaceId,
+      contactId: data.contactId,
+      plateNumber: data.plateNumber,
+      make: data.make,
+      model: data.model,
+      year: data.year,
+      registrationDate: toDay(data.registrationDate),
+      lastServiceDate: toDay(data.lastServiceDate),
+      tireSize1: data.tireSize1,
+      tireSize2: data.tireSize2,
+      remarks: data.remarks,
+      createdBy: auth.userId,
+      updatedBy: auth.userId,
+    },
+  });
+  announce(auth.workspaceId, vehicle.contactId);
+  return shape(vehicle);
+}
+
+// Edit a vehicle's details; the contact and workspace stay the same
+export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unknown) {
+  await getPermissions(auth);
+  const data = parse(updateSchema, rawInput);
+  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  if (!vehicle) throw notFound('Vehicle');
+  const { registrationDate, lastServiceDate, ...rest } = data;
+  const updated = await prisma.vehicle.update({
+    where: { id: vehicle.id },
+    data: {
+      ...rest,
+      ...(registrationDate !== undefined ? { registrationDate: toDay(registrationDate) } : {}),
+      ...(lastServiceDate !== undefined ? { lastServiceDate: toDay(lastServiceDate) } : {}),
+      updatedBy: auth.userId,
+    },
+  });
+  announce(auth.workspaceId, updated.contactId);
+  return shape(updated);
+}
+
+// Soft delete
+export async function deleteVehicle(auth: AuthPayload, id: string) {
+  await getPermissions(auth);
+  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  if (!vehicle) throw notFound('Vehicle');
+  await prisma.vehicle.update({
+    where: { id: vehicle.id },
+    data: { deletedAt: new Date(), deletedBy: auth.userId, updatedBy: auth.userId },
+  });
+  announce(auth.workspaceId, vehicle.contactId);
+  return true;
+}
+```
+
+### `server/src/graphql/vehicles.ts`
+
+```ts
+import { addVehicle, deleteVehicle, listVehicles, searchVehicleCustomers, updateVehicle } from '../services/vehicles.js';
+import { authed } from './shared.js';
+
+export const typeDefs = /* GraphQL */ `
+  "A customer's vehicle (one CRM contact has any number)"
+  type Vehicle {
+    id: ID!
+    contactId: ID!
+    "Uppercase, e.g. DUBAI A 12345"
+    plateNumber: String
+    make: String!
+    model: String!
+    year: Int!
+    "yyyy-mm-dd"
+    registrationDate: String
+    "yyyy-mm-dd: last tyre purchase or service"
+    lastServiceDate: String
+    tireSize1: String!
+    tireSize2: String
+    "Free-text notes about this vehicle"
+    remarks: String
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  "A contact offered by the CRM Customer picker"
+  type VehicleCustomer {
+    id: ID!
+    name: String
+    waId: String!
+  }
+
+  input VehicleInput {
+    contactId: ID!
+    plateNumber: String
+    make: String!
+    model: String!
+    year: Int!
+    "yyyy-mm-dd, not in the future"
+    registrationDate: String
+    "yyyy-mm-dd, not in the future"
+    lastServiceDate: String
+    tireSize1: String!
+    tireSize2: String
+    remarks: String
+  }
+
+  "Edit: only the fields sent change; null clears an optional one"
+  input UpdateVehicleInput {
+    plateNumber: String
+    make: String
+    model: String
+    year: Int
+    registrationDate: String
+    lastServiceDate: String
+    tireSize1: String
+    tireSize2: String
+    remarks: String
+  }
+
+  extend type Query {
+    "This contact's vehicles, newest first"
+    contactVehicles(contactId: ID!): [Vehicle!]!
+    "Up to 20 contacts matching name, first/last name or WhatsApp number digits"
+    vehicleCustomers(search: String): [VehicleCustomer!]!
+  }
+
+  extend type Mutation {
+    addVehicle(input: VehicleInput!): Vehicle!
+    updateVehicle(id: ID!, input: UpdateVehicleInput!): Vehicle!
+    "Soft delete"
+    deleteVehicle(id: ID!): Boolean!
+  }
+`;
+
+export const resolvers = {
+  Query: {
+    contactVehicles: authed(({ contactId }: { contactId: string }, auth) => listVehicles(auth, contactId)),
+    vehicleCustomers: authed(({ search }: { search?: string | null }, auth) => searchVehicleCustomers(auth, search)),
+  },
+  Mutation: {
+    addVehicle: authed(({ input }: { input: unknown }, auth) => addVehicle(auth, input)),
+    updateVehicle: authed(({ id, input }: { id: string; input: unknown }, auth) => updateVehicle(auth, id, input)),
+    deleteVehicle: authed(({ id }: { id: string }, auth) => deleteVehicle(auth, id)),
+  },
+};
+```
+
+### `client/lib/vehicles.ts`
+
+```ts
+import { gql } from './api';
+
+// A customer's vehicles (chat header car button, contact profile "Add Vehicle"). Dates are yyyy-mm-dd.
+export type Vehicle = {
+  id: string;
+  contactId: string;
+  plateNumber: string | null;
+  make: string;
+  model: string;
+  year: number;
+  registrationDate: string | null;
+  lastServiceDate: string | null;
+  tireSize1: string;
+  tireSize2: string | null;
+  remarks: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+// What the form sends. lastServiceDate is no longer on the form: left out, so editing keeps a saved one
+export type VehicleDetails = Pick<Vehicle, 'plateNumber' | 'make' | 'model' | 'year' | 'registrationDate' | 'tireSize1' | 'tireSize2' | 'remarks'>;
+export type VehicleInput = VehicleDetails & { contactId: string };
+export type VehicleCustomer = { id: string; name: string | null; waId: string };
+
+// Window event relayed from the socket's contact:vehicles ({ contactId }): open vehicle lists reload
+export const VEHICLES_EVENT = 'crm:contact-vehicles';
+
+const FIELDS = 'id contactId plateNumber make model year registrationDate lastServiceDate tireSize1 tireSize2 remarks createdAt updatedAt';
+
+export async function listVehicles(contactId: string) {
+  return (await gql<{ contactVehicles: Vehicle[] }>(`query ContactVehicles($c: ID!) { contactVehicles(contactId: $c) { ${FIELDS} } }`, { c: contactId })).contactVehicles;
+}
+
+export async function searchVehicleCustomers(search: string) {
+  const query = `query VehicleCustomers($s: String) { vehicleCustomers(search: $s) { id name waId } }`;
+  return (await gql<{ vehicleCustomers: VehicleCustomer[] }>(query, { s: search.trim() || null })).vehicleCustomers;
+}
+
+export async function addVehicle(input: VehicleInput) {
+  const query = `mutation AddVehicle($input: VehicleInput!) { addVehicle(input: $input) { ${FIELDS} } }`;
+  return (await gql<{ addVehicle: Vehicle }>(query, { input })).addVehicle;
+}
+
+export async function updateVehicle(id: string, input: VehicleDetails) {
+  const query = `mutation UpdateVehicle($id: ID!, $input: UpdateVehicleInput!) { updateVehicle(id: $id, input: $input) { ${FIELDS} } }`;
+  return (await gql<{ updateVehicle: Vehicle }>(query, { id, input })).updateVehicle;
+}
+
+export async function deleteVehicle(id: string) {
+  await gql(`mutation DeleteVehicle($id: ID!) { deleteVehicle(id: $id) }`, { id });
+}
+
+// "Toyota Land Cruiser 2022"
+export const vehicleTitle = (v: Pick<Vehicle, 'make' | 'model' | 'year'>) => [v.make, v.model, v.year].filter(Boolean).join(' ');
+```
+
+### `client/app/inbox/VehiclesDialog.tsx`
+
+```tsx
+'use client';
+
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { showToast } from '@/lib/toasts';
+import { type Vehicle, type VehicleCustomer, VEHICLES_EVENT, addVehicle, deleteVehicle, listVehicles, updateVehicle, vehicleTitle } from '@/lib/vehicles';
+import { CountryFlag } from './CountryFlag';
+
+// The TyresCart car (sized by width only; the height follows its 2.8:1 ratio)
+export const CarIcon = ({
+  className = 'w-[1.375rem]',
+}: {
+  className?: string;
+}) => (
+  <svg
+    className={`h-auto shrink-0 ${className}`}
+    viewBox="0 0 47.747 16.977"
+    fill="currentColor"
+    aria-hidden="true"
+  >
+    <path
+      transform="translate(122.615 -135.806)"
+      d="M-122.615,146.25a14.294,14.294,0,0,0,.9,1.807,1.609,1.609,0,0,0,.935.518c1.073.245,2.161.424,3.313.642a4.4,4.4,0,0,1,2.574-3.96,4.107,4.107,0,0,1,2.686-.294,4.432,4.432,0,0,1,3.413,4.935l21.435.432a4.315,4.315,0,0,1,1.162-4.224,4.061,4.061,0,0,1,3.118-1.236,4.36,4.36,0,0,1,4.163,5.139c.687-.113,1.356-.194,2.011-.338,1.472-.323,1.693-.616,1.987-2.158a5.746,5.746,0,0,0-.342-2.547,2.327,2.327,0,0,0-1.6-1.7,39.349,39.349,0,0,0-7.593-2.017,16.658,16.658,0,0,1-3.88-1.389c-1.793-.78-3.566-1.607-5.351-2.407a21.266,21.266,0,0,0-9.744-1.617,33.618,33.618,0,0,0-11.928,2.885,20.127,20.127,0,0,1-5.156,1.381c-1.089.153-1.255.357-1.256,1.444,0,.358-.012.716,0,1.073a2.047,2.047,0,0,1-.454,1.677,2.842,2.842,0,0,0-.391.931Zm30.034-4.853a.274.274,0,0,1-.12.014c-2.485-.069-4.97-.144-7.455-.2-.27-.007-.33-.139-.381-.359-.23-.982-.476-1.96-.714-2.939-.071-.291-.135-.584-.222-.962,3.475.284,6.78.76,9.465,2.868Zm-9.58-.407a.745.745,0,0,1-.153.049c-2.3-.068-4.594-.135-6.89-.218a.451.451,0,0,1-.317-.243,1.572,1.572,0,0,1,.174-1.881,8.174,8.174,0,0,0,.455-.7.938.938,0,0,1,.418-.325,17.885,17.885,0,0,1,5.381-.687.411.411,0,0,1,.315.232C-102.558,138.468-102.363,139.723-102.161,140.989Zm-11.361-.195a1.036,1.036,0,0,1,.612-1.247c.563-.291,1.137-.561,1.714-.823.506-.23,1.022-.436,1.534-.653-.557.9-1.154,1.725-1.762,2.543a.451.451,0,0,1-.3.172C-112.325,140.8-112.928,140.794-113.522,140.794Z"
+    />
+    <path
+      transform="translate(-503.07 -304.356)"
+      d="M512.565,314.14a3.6,3.6,0,1,0,3.6,3.624A3.629,3.629,0,0,0,512.565,314.14Zm.312,1.314,1.1.473c-.269.253-.451.444-.653.61-.235.192-.407.1-.443-.176A8.107,8.107,0,0,1,512.877,315.454Zm0,4.553c0-.385-.021-.647.006-.906s.2-.346.412-.185.426.372.718.632Zm-2.582-2.585.5-1.186c.23.3.4.5.543.717.06.089.121.236.086.313a.392.392,0,0,1-.29.149C510.886,317.437,510.64,317.422,510.295,317.422Zm.463,1.772-.445-1.135c.352,0,.615-.021.874.005.3.03.368.2.177.436C511.2,318.705,511.02,318.9,510.757,319.194Zm4.1-1.678-1.151-.247c.2-.267.4-.534.6-.8.012-.015.057,0,.144-.009Zm-.416,1.52-.189.072c-.151-.194-.314-.38-.449-.584a.47.47,0,0,1-.082-.321c.014-.063.158-.13.248-.137.259-.018.52-.006.861-.006Zm-2.194-3.58a7.38,7.38,0,0,1-.008.906c-.039.276-.2.369-.445.165-.2-.165-.407-.324-.714-.568Zm-1.139,4.083c.3-.255.48-.424.679-.567a.428.428,0,0,1,.309-.082c.067.017.138.154.145.242.019.255.007.513.007.871Z"
+    />
+    <path
+      transform="translate(72.415 -304.356)"
+      d="M-32.965,314.14a3.616,3.616,0,0,0-3.619,3.614,3.631,3.631,0,0,0,3.609,3.579,3.607,3.607,0,0,0,3.585-3.545A3.6,3.6,0,0,0-32.965,314.14Zm.3,1.326,1.144.474c-.3.256-.5.447-.72.612s-.389.1-.418-.169S-32.665,315.835-32.665,315.466Zm1.5.812.453,1.144c-.355,0-.617.017-.876,0-.306-.025-.363-.2-.185-.434C-31.619,316.775-31.436,316.585-31.17,316.278Zm.472,1.782-.484,1.09c-.26-.282-.452-.465-.612-.673s-.1-.386.177-.413S-31.093,318.06-30.7,318.06Zm-2.6-2.6c0,.355.012.614-.007.871-.006.088-.074.225-.14.244a.419.419,0,0,1-.314-.071c-.208-.15-.4-.328-.682-.57Zm-1.483.8c.25.3.428.492.58.7a.415.415,0,0,1,.067.313c-.019.066-.156.131-.244.138-.258.018-.518.007-.863.007Zm.011,2.963-.474-1.164c.356,0,.619-.018.878,0,.287.025.382.18.194.428C-34.341,318.712-34.523,318.919-34.774,319.224Zm2.107.794c0-.357-.014-.6.007-.846a.379.379,0,0,1,.15-.279.394.394,0,0,1,.308.076c.213.145.409.314.708.55Zm-1.762-.474c.29-.253.468-.426.666-.572a.429.429,0,0,1,.312-.081c.065.016.136.154.142.242.019.258.007.519.007.871Z"
+    />
+  </svg>
+);
+
+// "Toyota Land Cruiser 2022 (A 12345)": the plate only when there is one
+const vehicleName = (v: Vehicle) => (v.plateNumber ? `${vehicleTitle(v)} (${v.plateNumber})` : vehicleTitle(v));
+
+// "15 Mar 2024" from yyyy-mm-dd (a calendar day: no time zone shift)
+const dayLabel = (v: string) => new Date(`${v}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+
+// Today in the viewer's own time zone, for the date picker's max
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The customer's vehicles: who (name, WhatsApp number) at the top, every saved vehicle with Edit and Delete, and the
+// form below to add another one (or edit the chosen one). The customer always comes from the open chat; nobody types
+// it in. Reloads live when anyone adds, edits or deletes one of this customer's vehicles.
+export function VehiclesDialog({ customer, onClose }: { customer: VehicleCustomer; onClose: () => void }) {
+  const [vehicles, setVehicles] = useState<Vehicle[] | null>(null);
+  const [listError, setListError] = useState('');
+  const [editing, setEditing] = useState<Vehicle | null>(null);
+  const [formRound, setFormRound] = useState(0); // a new number = an empty form again
+  const [saving, setSaving] = useState(false);
+  const titleId = useId();
+  const formRef = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(
+    () =>
+      listVehicles(customer.id)
+        .then((v) => {
+          setVehicles(v);
+          setListError('');
+        })
+        .catch((e) => setListError((e as Error).message)),
+    [customer.id],
+  );
+  useEffect(() => {
+    load();
+    const onChanged = (e: Event) => (e as CustomEvent<{ contactId: string }>).detail?.contactId === customer.id && load();
+    window.addEventListener(VEHICLES_EVENT, onChanged);
+    return () => window.removeEventListener(VEHICLES_EVENT, onChanged);
+  }, [load, customer.id]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !saving && onClose();
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  const startEdit = (v: Vehicle) => {
+    setEditing(v);
+    // The form is below the list: bring it into view
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  };
+  const resetForm = () => {
+    setEditing(null);
+    setFormRound((n) => n + 1);
+  };
+
+  const count = vehicles?.length ?? 0;
+  const name = customer.name?.trim() || `+${customer.waId}`;
+  if (typeof document === 'undefined') return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-shadow/40 p-4 sm:items-start sm:pt-[6dvh]" onMouseDown={(e) => e.target === e.currentTarget && !saving && onClose()}>
+      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="flex max-h-[92dvh] w-full min-w-0 max-w-2xl flex-col overflow-hidden rounded-2xl bg-surface shadow-2xl sm:max-h-[88dvh]">
+        {/* Customer: from the open chat */}
+        <div className="flex shrink-0 items-center gap-3 border-b border-line-soft px-5 py-4">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary">
+            <CarIcon className="w-7" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 id={titleId} className="truncate text-[15px] font-bold leading-tight text-ink">
+              {name}
+            </h2>
+            <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[13px] text-muted">
+              <CountryFlag waId={customer.waId} />
+              {/* The number is already the title when the customer hasn't shared a name */}
+              <span className="truncate">{customer.name?.trim() ? `+${customer.waId}` : 'WhatsApp contact'}</span>
+              {vehicles && (
+                <span className="shrink-0">
+                  · {count} {count === 1 ? 'vehicle' : 'vehicles'}
+                </span>
+              )}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-body-soft hover:bg-surface-muted disabled:opacity-50">
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {/* Saved vehicles */}
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted">Saved vehicles{vehicles ? ` (${count})` : ''}</h3>
+          {listError && <p className="mt-2 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{listError}</p>}
+          {vehicles === null ? (
+            !listError && (
+              <div className="mt-2 rounded-xl border border-line px-4 py-3" role="status" aria-label="Loading vehicles">
+                <div className="h-4 w-48 animate-pulse rounded bg-surface-strong" />
+                <div className="mt-2.5 h-3 w-64 max-w-full animate-pulse rounded bg-surface-strong" />
+              </div>
+            )
+          ) : count === 0 ? (
+            <p className="mt-2 rounded-xl border border-dashed border-line px-4 py-5 text-center text-xs text-muted">No vehicles yet. Add the first one below.</p>
+          ) : (
+            <ul className="mt-2 space-y-2">
+              {vehicles.map((v) => (
+                <VehicleCard
+                  key={v.id}
+                  vehicle={v}
+                  isEditing={editing?.id === v.id}
+                  onEdit={() => startEdit(v)}
+                  onDeleted={() => {
+                    if (editing?.id === v.id) resetForm();
+                    load();
+                  }}
+                />
+              ))}
+            </ul>
+          )}
+
+          {/* Add another vehicle, or edit the chosen one */}
+          <section ref={formRef} className="mt-5 scroll-mt-4 border-t border-line-soft pt-4">
+            <div className="mb-3 flex h-6 items-center justify-between gap-2">
+              <h3 className="flex min-w-0 items-center text-[11px] font-semibold uppercase tracking-wide text-muted">
+                {editing ? (
+                  <>
+                    <span className="shrink-0">Edit vehicle:</span>
+                    <span className="ml-1.5 truncate normal-case tracking-normal text-[13px] font-bold text-ink">{vehicleTitle(editing)}</span>
+                    {editing.plateNumber && <span className="ml-2 shrink-0 rounded border border-line bg-surface-strong px-1.5 py-px font-mono text-[11px] font-semibold normal-case tracking-wide text-body">{editing.plateNumber}</span>}
+                  </>
+                ) : count ? (
+                  'Add another vehicle'
+                ) : (
+                  'Add vehicle'
+                )}
+              </h3>
+              {editing && (
+                <button type="button" disabled={saving} onClick={resetForm} className="shrink-0 text-[12px] font-medium text-primary hover:underline disabled:opacity-50">
+                  + Add new instead
+                </button>
+              )}
+            </div>
+            <VehicleForm
+              key={editing ? `edit-${editing.id}` : `new-${formRound}`}
+              contactId={customer.id}
+              vehicle={editing}
+              onSavingChange={setSaving}
+              onSaved={(wasEdit) => {
+                showToast(`vehicle:${Date.now()}`, '', wasEdit ? 'Vehicle updated' : 'Vehicle added');
+                resetForm();
+                load();
+              }}
+            />
+          </section>
+        </div>
+
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-soft px-5 py-3">
+          {editing ? (
+            <button type="button" disabled={saving} onClick={resetForm} className="min-w-24 rounded-lg px-4 py-2 text-[13px] font-medium text-body hover:bg-surface-strong disabled:opacity-50">
+              Cancel edit
+            </button>
+          ) : (
+            <button type="button" disabled={saving} onClick={onClose} className="min-w-24 rounded-lg px-4 py-2 text-[13px] font-medium text-body hover:bg-surface-strong disabled:opacity-50">
+              Close
+            </button>
+          )}
+          <button type="submit" form="vehicle-form" disabled={saving} className="min-w-32 rounded-lg bg-primary px-4 py-2 text-[13px] font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-50">
+            {saving ? 'Saving…' : editing ? 'Save changes' : 'Add vehicle'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// One saved vehicle: make, model, year, plate, tyres, registration date and remarks; Edit and Delete (asks first)
+function VehicleCard({ vehicle: v, isEditing, onEdit, onDeleted }: { vehicle: Vehicle; isEditing: boolean; onEdit: () => void; onDeleted: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function remove() {
+    setBusy(true);
+    setError('');
+    try {
+      await deleteVehicle(v.id);
+      showToast(`vehicle:${Date.now()}`, '', 'Vehicle deleted');
+      onDeleted();
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+  const iconButton = 'flex h-8 w-8 items-center justify-center rounded-lg text-body-soft transition hover:bg-surface-muted disabled:opacity-50';
+  return (
+    <li className={`rounded-xl border px-4 py-3 transition ${isEditing ? 'border-primary bg-primary-subtle' : 'border-line bg-surface'}`}>
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] font-semibold text-ink">{vehicleTitle(v)}</span>
+            {v.plateNumber && <span className="rounded border border-line bg-surface-strong px-1.5 py-px font-mono text-[11px] font-semibold tracking-wide text-body">{v.plateNumber}</span>}
+            {isEditing && <span className="rounded-full bg-primary px-2 py-px text-[10px] font-semibold text-on-primary">Editing</span>}
+          </div>
+          <dl className="mt-1.5 grid grid-cols-1 gap-x-4 gap-y-0.5 text-xs sm:grid-cols-2">
+            <div className="flex gap-1.5">
+              <dt className="shrink-0 text-muted">Tyre size 1:</dt>
+              <dd className="text-body">{v.tireSize1}</dd>
+            </div>
+            {v.tireSize2 && (
+              <div className="flex gap-1.5">
+                <dt className="shrink-0 text-muted">Tyre size 2:</dt>
+                <dd className="text-body">{v.tireSize2}</dd>
+              </div>
+            )}
+            {v.registrationDate && (
+              <div className="flex gap-1.5">
+                <dt className="shrink-0 text-muted">Registered:</dt>
+                <dd className="text-body">{dayLabel(v.registrationDate)}</dd>
+              </div>
+            )}
+            {v.lastServiceDate && (
+              <div className="flex gap-1.5">
+                <dt className="shrink-0 text-muted">Last service:</dt>
+                <dd className="text-body">{dayLabel(v.lastServiceDate)}</dd>
+              </div>
+            )}
+          </dl>
+          {v.remarks && <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap rounded-lg bg-surface-muted px-2.5 py-1.5 text-xs text-body">{v.remarks}</p>}
+          {error && <p className="mt-1.5 text-[11px] text-danger">{error}</p>}
+        </div>
+        {confirming ? (
+          <span className="flex h-8 shrink-0 items-center gap-1">
+            <span className="mr-1 text-xs text-body">Delete?</span>
+            <button type="button" disabled={busy} onClick={() => setConfirming(false)} className="rounded-md px-2 py-1 text-xs text-body-soft hover:bg-surface-muted disabled:opacity-50">
+              Cancel
+            </button>
+            <button type="button" disabled={busy} onClick={remove} className="min-w-16 rounded-md bg-danger px-2.5 py-1 text-xs font-semibold text-on-primary disabled:opacity-50">
+              {busy ? 'Deleting…' : 'Delete'}
+            </button>
+          </span>
+        ) : (
+          <span className="flex shrink-0 gap-0.5">
+            <button type="button" onClick={onEdit} aria-label={`Edit ${vehicleName(v)}`} title="Edit" className={`${iconButton} hover:text-ink`}>
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z" />
+              </svg>
+            </button>
+            <button type="button" onClick={() => setConfirming(true)} aria-label={`Delete ${vehicleName(v)}`} title="Delete" className={`${iconButton} hover:text-danger`}>
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          </span>
+        )}
+      </div>
+    </li>
+  );
+}
+
+type Form = { make: string; model: string; year: string; plateNumber: string; registrationDate: string; tireSize1: string; tireSize2: string; remarks: string };
+type Field = keyof Form;
+
+function validate(f: Form): Partial<Record<Field, string>> {
+  const errors: Partial<Record<Field, string>> = {};
+  const maxYear = new Date().getFullYear() + 1;
+  if (!f.make.trim()) errors.make = 'Enter the make';
+  if (!f.model.trim()) errors.model = 'Enter the model';
+  if (!f.year.trim()) errors.year = 'Enter the year';
+  else if (!/^\d{4}$/.test(f.year.trim())) errors.year = 'Enter a 4-digit year';
+  else if (+f.year < 1900 || +f.year > maxYear) errors.year = `Enter a year from 1900 to ${maxYear}`;
+  if (!f.tireSize1.trim()) errors.tireSize1 = 'Enter tyre size 1';
+  return errors;
+}
+
+// Add (vehicle = null) or edit one. The submit button is the dialog's footer button (form="vehicle-form").
+function VehicleForm({
+  contactId,
+  vehicle,
+  onSavingChange,
+  onSaved,
+}: {
+  contactId: string;
+  vehicle: Vehicle | null;
+  onSavingChange: (saving: boolean) => void;
+  onSaved: (wasEdit: boolean) => void;
+}) {
+  const [form, setForm] = useState<Form>({
+    make: vehicle?.make ?? '',
+    model: vehicle?.model ?? '',
+    year: vehicle ? String(vehicle.year) : '',
+    plateNumber: vehicle?.plateNumber ?? '',
+    registrationDate: vehicle?.registrationDate ?? '',
+    tireSize1: vehicle?.tireSize1 ?? '',
+    tireSize2: vehicle?.tireSize2 ?? '',
+    remarks: vehicle?.remarks ?? '',
+  });
+  const [submitted, setSubmitted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState('');
+  const errors = submitted ? validate(form) : {};
+  const today = localToday();
+  const set = (k: Field, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitted(true);
+    if (busy || Object.keys(validate(form)).length) return;
+    setBusy(true);
+    onSavingChange(true);
+    setServerError('');
+    const details = {
+      make: form.make.trim(),
+      model: form.model.trim(),
+      year: Number(form.year.trim()),
+      plateNumber: form.plateNumber.trim().toUpperCase() || null,
+      registrationDate: form.registrationDate || null,
+      tireSize1: form.tireSize1.trim(),
+      tireSize2: form.tireSize2.trim() || null,
+      remarks: form.remarks.trim() || null,
+    };
+    try {
+      if (vehicle) await updateVehicle(vehicle.id, details);
+      else await addVehicle({ ...details, contactId });
+      onSavingChange(false);
+      onSaved(!!vehicle);
+    } catch (err) {
+      setServerError((err as Error).message);
+      setBusy(false);
+      onSavingChange(false);
+    }
+  }
+
+  const inputClass = (bad: boolean) =>
+    `h-[38px] w-full rounded-lg border bg-surface px-3 text-[13px] text-ink outline-hidden placeholder:text-faint focus:ring-1 ${bad ? 'border-danger focus:border-danger focus:ring-danger' : 'border-line focus:border-primary focus:ring-primary'}`;
+  const label = (id: string, text: string, required: boolean) => (
+    <label htmlFor={id} className="mb-1.5 block truncate text-[11px] font-semibold text-body-soft">
+      {text}
+      {required ? <span className="text-danger"> *</span> : <span className="font-normal text-faint"> (optional)</span>}
+    </label>
+  );
+  const problem = (k: Field) => errors[k] && <p className="mt-1 text-[11px] text-danger">{errors[k]}</p>;
+  const field = (k: Exclude<Field, 'remarks'>, text: string, required: boolean, span: string, extra: React.InputHTMLAttributes<HTMLInputElement> = {}) => (
+    <div className={span}>
+      {label(`vehicle-${k}`, text, required)}
+      <input id={`vehicle-${k}`} value={form[k]} onChange={(e) => set(k, e.target.value)} aria-invalid={!!errors[k]} className={inputClass(!!errors[k])} {...extra} />
+      {problem(k)}
+    </div>
+  );
+
+  return (
+    <form id="vehicle-form" onSubmit={submit} noValidate>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
+        {field('make', 'Make', true, 'col-span-2', { maxLength: 60, placeholder: 'e.g. Toyota', autoFocus: !vehicle })}
+        {field('model', 'Model', true, 'col-span-2', { maxLength: 60, placeholder: 'e.g. Land Cruiser' })}
+        {field('year', 'Year', true, 'col-span-1', { inputMode: 'numeric', maxLength: 4, placeholder: 'e.g. 2022', onChange: (e) => set('year', e.target.value.replace(/\D/g, '').slice(0, 4)) })}
+        {field('plateNumber', 'Plate Number', false, 'col-span-1', { maxLength: 20, placeholder: 'e.g. A 12345', style: { textTransform: form.plateNumber ? 'uppercase' : 'none' } })}
+        {field('registrationDate', 'Registration Date', false, 'col-span-2', { type: 'date', max: today })}
+        {field('tireSize1', 'Tyre Size 1', true, 'col-span-2', { maxLength: 30, placeholder: 'e.g. 265/65 R17' })}
+        {field('tireSize2', 'Tyre Size 2', false, 'col-span-2', { maxLength: 30, placeholder: 'Rear, if different' })}
+        <div className="col-span-2 sm:col-span-4">
+          {label('vehicle-remarks', 'Remarks', false)}
+          <textarea
+            id="vehicle-remarks"
+            value={form.remarks}
+            onChange={(e) => set('remarks', e.target.value)}
+            rows={3}
+            placeholder="e.g. Prefers Michelin, rotates tyres every 10,000 km"
+            className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-hidden placeholder:text-faint focus:border-primary focus:ring-1 focus:ring-primary"
+          />
+        </div>
+      </div>
+      {serverError && <p className="mt-3 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{serverError}</p>}
+    </form>
+  );
+}
+```

@@ -302,7 +302,7 @@ export function ContactPanel({
             </button>
             {vehicleOpen && (
               <VehiclesDialog
-                formOnly
+                key={conversation.contact.id}
                 customer={{ id: conversation.contact.id, name: conversation.contact.name, waId: conversation.contact.waId }}
                 onClose={() => setVehicleOpen(false)}
               />

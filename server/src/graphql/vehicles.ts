@@ -1,25 +1,29 @@
-import { addVehicle, deleteVehicle, listVehicles, searchVehicleCustomers } from '../services/vehicles.js';
+import { addVehicle, deleteVehicle, listVehicles, searchVehicleCustomers, updateVehicle } from '../services/vehicles.js';
 import { authed } from './shared.js';
 
 export const typeDefs = /* GraphQL */ `
-  "A customer's vehicle (chat header → Vehicles)"
+  "A customer's vehicle (one CRM contact has any number)"
   type Vehicle {
     id: ID!
     contactId: ID!
-    plateNumber: String!
+    "Uppercase, e.g. DUBAI A 12345"
+    plateNumber: String
     make: String!
     model: String!
     year: Int!
-    "Calendar day, yyyy-mm-dd"
+    "yyyy-mm-dd"
     registrationDate: String
-    "Last purchase / service day, yyyy-mm-dd"
+    "yyyy-mm-dd: last tyre purchase or service"
     lastServiceDate: String
     tireSize1: String!
     tireSize2: String
+    "Free-text notes about this vehicle"
+    remarks: String
     createdAt: DateTime!
+    updatedAt: DateTime!
   }
 
-  "A CRM customer to pick for a vehicle"
+  "A contact offered by the CRM Customer picker"
   type VehicleCustomer {
     id: ID!
     name: String
@@ -28,25 +32,43 @@ export const typeDefs = /* GraphQL */ `
 
   input VehicleInput {
     contactId: ID!
-    plateNumber: String!
+    plateNumber: String
     make: String!
     model: String!
     year: Int!
+    "yyyy-mm-dd, not in the future"
     registrationDate: String
+    "yyyy-mm-dd, not in the future"
     lastServiceDate: String
     tireSize1: String!
     tireSize2: String
+    remarks: String
+  }
+
+  "Edit: only the fields sent change; null clears an optional one"
+  input UpdateVehicleInput {
+    plateNumber: String
+    make: String
+    model: String
+    year: Int
+    registrationDate: String
+    lastServiceDate: String
+    tireSize1: String
+    tireSize2: String
+    remarks: String
   }
 
   extend type Query {
-    "Newest first"
+    "This contact's vehicles, newest first"
     contactVehicles(contactId: ID!): [Vehicle!]!
-    "Contacts by name or number (up to 20)"
+    "Up to 20 contacts matching name, first/last name or WhatsApp number digits"
     vehicleCustomers(search: String): [VehicleCustomer!]!
   }
 
   extend type Mutation {
     addVehicle(input: VehicleInput!): Vehicle!
+    updateVehicle(id: ID!, input: UpdateVehicleInput!): Vehicle!
+    "Soft delete"
     deleteVehicle(id: ID!): Boolean!
   }
 `;
@@ -58,6 +80,7 @@ export const resolvers = {
   },
   Mutation: {
     addVehicle: authed(({ input }: { input: unknown }, auth) => addVehicle(auth, input)),
+    updateVehicle: authed(({ id, input }: { id: string; input: unknown }, auth) => updateVehicle(auth, id, input)),
     deleteVehicle: authed(({ id }: { id: string }, auth) => deleteVehicle(auth, id)),
   },
 };

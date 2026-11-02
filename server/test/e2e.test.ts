@@ -2137,7 +2137,7 @@ INSERT INTO \`klever_tyres_chat\` (\`id\`, \`shortcut\`, \`description\`, \`cate
 (3, '  ', 'blank shortcut skipped', 'other', NULL, NULL, 1, 3, NULL, NULL);`;
     const rows = parseQuickReplyDump(sql);
     assert.equal(rows.length, 2);
-    assert.deepEqual([rows[0].shortcut, rows[0].description, rows[0].category, rows[0].updatedBy, rows[0].status], ['nostock', "It's out (for now), sorry; ask again", 'car_tyres', 6n, 1]);
+    assert.deepEqual([rows[0].shortcut, rows[0].description, rows[0].category, rows[0].siteUpdatedBy, rows[0].status], ['nostock', "It's out (for now), sorry; ask again", 'car_tyres', 6n, 1]);
     assert.equal(rows[0].createdAt?.toISOString(), '2026-07-16T15:38:14.000Z');
     assert.deepEqual([rows[1].description, rows[1].category, rows[1].status, rows[1].createdAt], ["Open\nFri: 09:00 - 18:00\n'Closed' Sunday", null, 0, null]);
   });
@@ -2197,6 +2197,48 @@ INSERT INTO \`klever_tyres_chat\` (\`id\`, \`shortcut\`, \`description\`, \`cate
   test('workspace isolation and sign-in are enforced', async () => {
     assert.deepEqual((await ok(Q, { s: 'tyrescart' }, B.token)).quickReplies.map((r: any) => r.description), ['B only']);
     assert.equal((await gql(Q, { s: 'tyrescart' })).errors?.[0].extensions?.code, 'UNAUTHENTICATED');
+  });
+
+  test('owners, admins and supervisors add, edit and soft-delete saved replies, with audit fields', async () => {
+    const FIELDS = 'id shortcut description category sortOrder createdAt createdByName updatedAt updatedByName';
+    const CREATE = `mutation($i: CreateQuickReplyInput!) { createQuickReply(input: $i) { ${FIELDS} } }`;
+    const UPDATE = `mutation($id: ID!, $i: UpdateQuickReplyInput!) { updateQuickReply(id: $id, input: $i) { ${FIELDS} } }`;
+    const DELETE = `mutation($id: ID!) { deleteQuickReply(id: $id) }`;
+    const input = { shortcut: '/Brake-Pads', description: 'Brake pads from AED 99', category: 'Car  Brakes' };
+
+    // Agents: read-only
+    assert.equal(await errorCode(CREATE, { i: input }, agentToken), 'FORBIDDEN');
+
+    const made = (await ok(CREATE, { i: input }, ws.token)).createQuickReply;
+    assert.deepEqual([made.shortcut, made.category, made.sortOrder, made.createdByName, made.updatedByName], ['Brake-Pads', 'car_brakes', 67, 'quick', 'quick']); // last (66 + 1)
+    assert.ok(made.createdAt);
+    assert.ok((await shortcuts('', agentToken)).includes('Brake-Pads'));
+
+    // Validation and live-shortcut uniqueness (case-insensitive)
+    assert.equal(await errorCode(CREATE, { i: { ...input, shortcut: 'brake-pads' } }, ws.token), 'QUICK_REPLY_EXISTS');
+    assert.equal(await errorCode(CREATE, { i: { ...input, shortcut: 'has space' } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(CREATE, { i: { ...input, shortcut: 'x'.repeat(51) } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(CREATE, { i: { ...input, shortcut: 'ok', description: '  ' } }, ws.token), 'BAD_USER_INPUT');
+    assert.equal(await errorCode(UPDATE, { id: made.id, i: { shortcut: 'Greetings' } }, ws.token), 'QUICK_REPLY_EXISTS');
+    assert.equal(await errorCode(UPDATE, { id: made.id, i: { description: 'x' } }, agentToken), 'FORBIDDEN');
+
+    // Nulls leave fields unchanged; "" clears the category
+    const edited = (await ok(UPDATE, { id: made.id, i: { description: 'Brake pads from AED 89', category: '', shortcut: null } }, ws.token)).updateQuickReply;
+    assert.deepEqual([edited.shortcut, edited.description, edited.category, edited.updatedByName], ['Brake-Pads', 'Brake pads from AED 89', null, 'quick']);
+
+    // Soft delete: the row stays, drops out of the list and frees the shortcut
+    assert.equal(await errorCode(DELETE, { id: made.id }, agentToken), 'FORBIDDEN');
+    assert.equal((await ok(DELETE, { id: made.id }, ws.token)).deleteQuickReply, made.id);
+    const row = await prisma.quickReply.findUniqueOrThrow({ where: { id: Number(made.id) } });
+    assert.ok(row.deletedAt);
+    assert.equal(row.deletedBy, row.updatedBy);
+    assert.ok(!(await shortcuts()).includes('Brake-Pads'));
+    assert.equal(await errorCode(DELETE, { id: made.id }, ws.token), 'NOT_FOUND');
+    assert.equal(await errorCode(UPDATE, { id: made.id, i: { description: 'x' } }, ws.token), 'NOT_FOUND');
+    const again = (await ok(CREATE, { i: input }, ws.token)).createQuickReply;
+    assert.notEqual(again.id, made.id);
+    // Other workspaces can't touch it
+    assert.equal(await errorCode(DELETE, { id: again.id }, B.token), 'NOT_FOUND');
   });
 });
 
@@ -2307,7 +2349,7 @@ describe('regression: "Welcome TyresCart.ae Customer" quick reply (emojis lost b
 
   test('parsed byte-for-byte from the dump, with its 7 lost emojis flagged and no emoji invented', () => {
     const [r] = parseQuickReplyDump(DUMP_ROW);
-    assert.deepEqual([r.shortcut, r.category, r.status, r.sortOrder, Number(r.updatedBy)], ['Welcome TyresCart.ae Customer', 'other', 1, 52, 6]);
+    assert.deepEqual([r.shortcut, r.category, r.status, r.sortOrder, Number(r.siteUpdatedBy)], ['Welcome TyresCart.ae Customer', 'other', 1, 52, 6]);
     assert.ok(r.description!.startsWith('Welcome to TyresCart.ae \n\nWe\u2019re more than just Tyres'));
     assert.equal(possibleLostEmojis(r.description), 7);
     assert.equal((r.description!.match(/\?/g) ?? []).length, 8); // 7 lost emojis + the real "anytime?"
