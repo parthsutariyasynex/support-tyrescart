@@ -70,6 +70,7 @@ model Workspace {
   settings         WorkspaceSettings?
   automation       AutomationSettings?
   fieldChoices     ContactFieldChoice[]
+  vehicles         Vehicle[]
 }
 
 model Member {
@@ -150,6 +151,7 @@ model Contact {
   remarks       ContactRemark[]
   customValues  ContactCustomValue[]
   listMembers   ContactListMember[]
+  vehicles      Vehicle[]
   createdAt     DateTime             @default(now())
   // --- standard audit fields (who/when; nullable for system-created rows; soft-delete columns are informational,
   // --- deletes stay as they are) ---
@@ -446,23 +448,26 @@ model ConversationSummary {
 // scripts/importQuickReplies.ts),
 // plus workspaceId so each workspace has its own set.
 model QuickReply {
-  id          Int       @id @default(autoincrement()) @db.UnsignedInt
-  workspaceId String
-  shortcut    String    @db.VarChar(255)
-  description String?   @db.Text
-  category    String?   @db.VarChar(50)
+  id            Int       @id @default(autoincrement()) @db.UnsignedInt
+  workspaceId   String
+  shortcut      String    @db.VarChar(255)
+  description   String?   @db.Text
+  category      String?   @db.VarChar(50)
   // Admin user ids from the TyresCart site, kept as imported
-  createdBy   BigInt?   @map("created_by") @db.UnsignedBigInt
-  updatedBy   BigInt?   @map("updated_by") @db.UnsignedBigInt
+  siteCreatedBy BigInt?   @map("created_by") @db.UnsignedBigInt
+  siteUpdatedBy BigInt?   @map("updated_by") @db.UnsignedBigInt
+  // This app's User ids: who added / last edited it here (null for imported rows)
+  createdBy     String?   @map("created_by_user_id")
+  updatedBy     String?   @map("updated_by_user_id")
   // 1 = enabled, 0 = disabled
-  status      Int       @default(1) @db.SmallInt
-  sortOrder   Int       @default(0) @map("sort_order")
-  createdAt   DateTime? @map("created_at")
-  updatedAt   DateTime? @updatedAt @map("updated_at")
+  status        Int       @default(1) @db.SmallInt
+  sortOrder     Int       @default(0) @map("sort_order")
+  createdAt     DateTime? @default(now()) @map("created_at")
+  updatedAt     DateTime? @updatedAt @map("updated_at")
   // Standard soft-delete columns (our user id; created_by/updated_by hold TyresCart site ids as imported)
-  deletedAt   DateTime? @map("deleted_at")
-  deletedBy   String?   @map("deleted_by")
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deletedAt     DateTime? @map("deleted_at")
+  deletedBy     String?   @map("deleted_by")
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, status, sortOrder])
   @@map("Shortchat")
@@ -741,4 +746,33 @@ model PushDevice {
   updatedAt   DateTime @default(now()) @updatedAt
 
   @@index([workspaceId, userId])
+}
+
+// A customer's vehicle (chat header → 🚗 Vehicles → Add vehicle). Belongs to one CRM contact; plate number, make,
+// model, year and tyre size 1 are required. Audit: who added / last changed / deleted it and when (user ids);
+// deleting sets deletedAt/deletedBy (soft delete) and the vehicle is no longer shown.
+// The dates are calendar days (no time).
+model Vehicle {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  contactId        String
+  plateNumber      String    @db.VarChar(20)
+  make             String    @db.VarChar(60)
+  model            String    @db.VarChar(60)
+  year             Int
+  registrationDate DateTime? @db.Date
+  lastServiceDate  DateTime? @db.Date
+  tireSize1        String    @db.VarChar(30)
+  tireSize2        String?   @db.VarChar(30)
+  createdAt        DateTime  @default(now())
+  createdBy        String?
+  updatedAt        DateTime  @default(now()) @updatedAt
+  updatedBy        String?
+  deletedAt        DateTime?
+  deletedBy        String?
+  contact          Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([contactId, createdAt])
+  @@index([workspaceId])
 }

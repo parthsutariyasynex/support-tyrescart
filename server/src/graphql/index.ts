@@ -19,12 +19,13 @@ import * as ai from './ai.js';
 import * as push from './push.js';
 import * as reports from './reports.js';
 import * as settings from './settings.js';
+import * as vehicles from './vehicles.js';
 import * as shared from './shared.js';
 import type { Context } from './shared.js';
 
 type ServerContext = { req: Request; res: Response };
 
-const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations, location, push, ai];
+const modules = [shared, auth, settings, inbox, labels, assign, permissions, activity, members, quickReplies, reports, presence, contacts, automations, location, push, ai, vehicles];
 
 export const yoga = createYoga<ServerContext, Context>({
   schema: createSchema<ServerContext & Context>({

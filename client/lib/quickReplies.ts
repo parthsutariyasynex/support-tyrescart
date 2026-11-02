@@ -9,6 +9,42 @@ export async function fetchQuickReplies(search: string) {
   return (await gql<{ quickReplies: QuickReply[] }>(query, { s: search || null })).quickReplies;
 }
 
+// Settings → Saved replies: the list plus who added / last edited each one (names are null for imported replies)
+export type SavedReply = QuickReply & {
+  sortOrder: number;
+  createdAt: string | null;
+  createdByName: string | null;
+  updatedAt: string | null;
+  updatedByName: string | null;
+};
+const SAVED_FIELDS = 'id shortcut description category sortOrder createdAt createdByName updatedAt updatedByName';
+
+export async function fetchSavedReplies(search: string) {
+  const query = `query SavedReplies($s: String) { quickReplies(search: $s, first: 100) { ${SAVED_FIELDS} } }`;
+  return (await gql<{ quickReplies: SavedReply[] }>(query, { s: search || null })).quickReplies;
+}
+
+export type QuickReplyInput = { shortcut: string; description: string; category: string };
+
+export async function createQuickReply(input: QuickReplyInput) {
+  const query = `mutation CreateQuickReply($input: CreateQuickReplyInput!) { createQuickReply(input: $input) { ${SAVED_FIELDS} } }`;
+  return (await gql<{ createQuickReply: SavedReply }>(query, { input })).createQuickReply;
+}
+
+// An empty category clears it
+export async function updateQuickReply(id: string, input: Partial<QuickReplyInput>) {
+  const query = `mutation UpdateQuickReply($id: ID!, $input: UpdateQuickReplyInput!) { updateQuickReply(id: $id, input: $input) { ${SAVED_FIELDS} } }`;
+  return (await gql<{ updateQuickReply: SavedReply }>(query, { id, input })).updateQuickReply;
+}
+
+export async function deleteQuickReply(id: string) {
+  const query = `mutation DeleteQuickReply($id: ID!) { deleteQuickReply(id: $id) }`;
+  return (await gql<{ deleteQuickReply: string }>(query, { id })).deleteQuickReply;
+}
+
+// Adding, editing and deleting saved replies: owners, admins and supervisors (the server checks the same)
+export const canManageQuickReplies = (role?: string | null) => role === 'owner' || role === 'admin' || role === 'supervisor';
+
 // Same rule as the server (case-insensitive partial match on shortcut, text or category), used to narrow
 // results that are still loading so the menu never offers a reply that doesn't match what's typed
 export function matchesQuickReply(reply: QuickReply, search: string) {

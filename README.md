@@ -3,26 +3,22 @@
 A shared inbox, broadcasts and automations on the official **WhatsApp Cloud API**.
 
 ```
-server/   Node.js + Express + Prisma + Socket.io   (API, webhook, real-time)  :4000
-web/      Next.js + Tailwind                        (login, inbox, settings)    :3000
+server/   Node.js + Express + Prisma + Socket.io   (API, webhook, real-time)  :5001
+client/   Next.js + Tailwind                        (login, inbox, settings)    :4001
 ```
 
 ## Run locally
 
+From repository root:
 ```bash
-# terminal 1: API
-cd server
-npm install
-npx prisma db push      # creates SQLite dev.db
-npm run dev
+# Terminal 1: API Server (port 5001)
+npm run dev:server
 
-# terminal 2: web
-cd web
-npm install
-npm run dev
+# Terminal 2: Web Client (port 4001)
+npm run dev:client
 ```
 
-Open http://localhost:3000, create a workspace, open **Inbox** and click **Simulate**. A fake customer
+Open http://localhost:4001, create a workspace, open **Inbox** and click **Simulate**. A fake customer
 message appears live. Sending replies needs a real WhatsApp number (see below).
 
 ## Connect real WhatsApp

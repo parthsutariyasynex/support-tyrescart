@@ -40,7 +40,7 @@ wait_healthy "http://127.0.0.1:4001/inbox" "support-client"
 
 echo "==> Restarting support-server (brief gap; single instance by design — see ecosystem.config.cjs)"
 pm2 restart ecosystem.config.cjs --only support-server --update-env
-wait_healthy "http://127.0.0.1:5000/health" "support-server"
+wait_healthy "http://127.0.0.1:5001/health" "support-server"
 
 echo "==> Deploy complete"
 pm2 status

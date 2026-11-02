@@ -5,8 +5,8 @@ export type ImportedQuickReply = {
   shortcut: string;
   description: string | null;
   category: string | null;
-  createdBy: bigint | null;
-  updatedBy: bigint | null;
+  siteCreatedBy: bigint | null;
+  siteUpdatedBy: bigint | null;
   status: number;
   sortOrder: number;
   createdAt: Date | null;
@@ -90,8 +90,8 @@ export function parseQuickReplyDump(sql: string): ImportedQuickReply[] {
         shortcut: r.shortcut.trim(),
         description: (r.description as string | null) ?? null,
         category: (r.category as string | null) ?? null,
-        createdBy: big(r.created_by ?? null),
-        updatedBy: big(r.updated_by ?? null),
+        siteCreatedBy: big(r.created_by ?? null),
+        siteUpdatedBy: big(r.updated_by ?? null),
         status: Number(r.status ?? 1),
         sortOrder: Number(r.sort_order ?? 0),
         createdAt: utc(r.created_at ?? null),

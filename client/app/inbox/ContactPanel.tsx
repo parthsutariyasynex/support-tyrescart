@@ -55,6 +55,8 @@ import { NoteFiles } from './NoteBubble';
 import { filterDialCountries } from '@/lib/profileOptions';
 import { SearchSelect } from '../SearchSelect';
 import { ContactAvatar } from './avatar';
+import { CountryFlag } from './CountryFlag';
+import { CarIcon, VehiclesDialog } from './VehiclesDialog';
 
 // Live updates from the inbox page's socket (contact:updated / contact:remarks), passed on as window events
 export const CONTACT_UPDATED_EVENT = 'app:contact-updated';
@@ -164,6 +166,8 @@ export function ContactPanel({
 }) {
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [listsOpen, setListsOpen] = useState(false);
+  // Add Vehicle (the header's vehicle form, for this customer)
+  const [vehicleOpen, setVehicleOpen] = useState(false);
   const labelsButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     setLabelsOpen(false);
@@ -283,8 +287,26 @@ export function ContactPanel({
             <p title={name} className="truncate text-[15px] font-bold text-ink">
               {name}
             </p>
-            <p className="truncate text-xs text-muted">+{conversation.contact.waId}</p>
+            <p className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
+              <CountryFlag waId={conversation.contact.waId} />
+              <span className="truncate">+{conversation.contact.waId}</span>
+            </p>
             <p className="truncate text-xs text-muted">{contact?.email || '–'}</p>
+            <button
+              type="button"
+              onClick={() => setVehicleOpen(true)}
+              className="mt-2 flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] font-medium text-body-soft transition hover:bg-surface-strong hover:text-body"
+            >
+              <CarIcon className="w-6" />
+              Add Vehicle
+            </button>
+            {vehicleOpen && (
+              <VehiclesDialog
+                formOnly
+                customer={{ id: conversation.contact.id, name: conversation.contact.name, waId: conversation.contact.waId }}
+                onClose={() => setVehicleOpen(false)}
+              />
+            )}
             <div role="tablist" aria-label="Profile sections" className="mt-3 flex items-center gap-1.5">
               {TABS.map((t) => (
                 <button
