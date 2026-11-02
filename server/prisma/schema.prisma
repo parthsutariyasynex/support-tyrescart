@@ -752,8 +752,9 @@ model PushDevice {
 // e.g. "Toyota Land Cruiser 2022"); the plate number is optional.
 // lastServiceDate is no longer on the form but kept (existing data); editing a vehicle leaves it as it is.
 // Audit: who added / last changed / deleted it and when (user ids); deleting sets deletedAt/deletedBy (soft delete).
+// The id is a number (BIGINT UNSIGNED AUTO_INCREMENT), sent to the app as a string; nothing refers to it.
 model Vehicle {
-  id               String    @id @default(cuid())
+  id               BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
   workspaceId      String
   contactId        String
   plateNumber      String?   @db.VarChar(20)

@@ -1,4 +1,4 @@
-# Prompt: Vehicle form update (copy everything below into the other project's Claude Code session)
+  # Prompt: Vehicle form update (copy everything below into the other project's Claude Code session)
 
 Update the customer Vehicle feature (car button in the chat header + "Add Vehicle" in the contact profile) so it
 matches the reference implementation below EXACTLY. The reference files at the end of this prompt are the final,
@@ -68,6 +68,11 @@ WHAT THE FINAL BEHAVIOUR MUST BE
      ("The remarks are too long to save. Shorten them and try again.").
    - `plateNumber`: optional, trimmed, uppercase, empty → null. Length messages read
      "Keep the <field> to <max> characters or fewer".
+   - `Vehicle.id` is a number: `BIGINT UNSIGNED AUTO_INCREMENT` (Prisma `BigInt @id @default(autoincrement())
+     @db.UnsignedBigInt`). The API still sends it as text (`id: v.id.toString()` in `shape`, GraphQL type `ID!`), so
+     the client is unchanged. `updateVehicle` / `deleteVehicle` turn the text id into a BigInt with `vehicleId(id)`;
+     anything that isn't 1-20 digits (e.g. an old cuid) gives "Vehicle not found". workspaceId / contactId stay
+     VARCHAR(191) (they point at Workspace / Contact). Nothing references Vehicle.id.
    - GraphQL: `Vehicle.plateNumber: String`, `Vehicle.remarks: String`, `Vehicle.updatedAt: DateTime!`,
      `VehicleInput.plateNumber: String`, `VehicleInput.remarks: String`, new `input UpdateVehicleInput` (all optional),
      new mutation `updateVehicle(id: ID!, input: UpdateVehicleInput!): Vehicle!`.
@@ -75,13 +80,22 @@ WHAT THE FINAL BEHAVIOUR MUST BE
 ==================================================
 DATABASE (SQL — do not run it yourself; give it to me)
 ==================================================
-Prisma model changes (see reference schema below): `plateNumber String? @db.VarChar(20)` and
-`remarks String? @db.Text` (after tireSize2). Then `npx prisma generate`.
+Prisma model changes (see reference schema below): `id BigInt @id @default(autoincrement()) @db.UnsignedBigInt`,
+`plateNumber String? @db.VarChar(20)` and `remarks String? @db.Text` (after tireSize2). Then `npx prisma generate`.
+
+First check what the live table looks like:
+  SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, EXTRA FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Vehicle' ORDER BY ORDINAL_POSITION;
+- No rows (no Vehicle table yet) → only `2026-11-02_vehicle_table.sql` (full CREATE TABLE, already final). Needs the
+  Workspace and Contact tables (foreign keys).
+- Table exists → the three ALTER files below, skipping any already applied (remarks column present / plateNumber
+  IS_NULLABLE = YES / id already `bigint unsigned` + `auto_increment`).
 
 Check what is needed with:
   npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script
-Only these two Vehicle statements may be needed (skip one if the column is already like that). If the diff shows
-anything else (for example dropping `Workspace.companyId`), DO NOT apply it — report it to me.
+Only the Vehicle statements below may be needed. If the diff shows anything else (for example dropping
+`Workspace.companyId`), DO NOT apply it — report it to me. For the id, do NOT use Prisma's diff
+(`MODIFY id BIGINT ...`): it fails on existing text ids. Use the id_bigint file (drop + re-add, rows renumbered 1, 2, 3).
 
   -- server/prisma/sql/2026-11-02_vehicle_remarks.sql
   ALTER TABLE `Vehicle` ADD COLUMN `remarks` TEXT NULL AFTER `tireSize2`;
@@ -89,9 +103,22 @@ anything else (for example dropping `Workspace.companyId`), DO NOT apply it — 
   -- server/prisma/sql/2026-11-02_vehicle_plate_optional.sql
   ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NULL;
 
-Save them as those two files (comments included, see the reference SQL files below). They are applied later with:
+  -- server/prisma/sql/2026-11-02_vehicle_id_bigint.sql  (back up the Vehicle table first)
+  ALTER TABLE `Vehicle`
+    DROP PRIMARY KEY,
+    DROP COLUMN `id`,
+    ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT FIRST,
+    ADD PRIMARY KEY (`id`);
+
+  -- server/prisma/sql/2026-11-02_vehicle_table.sql  (new database only: full CREATE TABLE, see reference below)
+
+Save them as those four files (comments included, see the reference SQL files below). They are applied later with:
   npx prisma db execute --file prisma/sql/2026-11-02_vehicle_remarks.sql --schema prisma/schema.prisma
   npx prisma db execute --file prisma/sql/2026-11-02_vehicle_plate_optional.sql --schema prisma/schema.prisma
+  npx prisma db execute --file prisma/sql/2026-11-02_vehicle_id_bigint.sql --schema prisma/schema.prisma
+Backup before the id change (local example):
+  mysqldump --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF <db> Vehicle > backups/vehicle-before-id-bigint-<date>.sql
+IMPORTANT: the new server code expects a number id; until the id_bigint SQL is applied, listing vehicles fails.
 IMPORTANT: the new server code reads `remarks`; until the remarks SQL is applied, the vehicle list fails with
 "Unexpected error." (Prisma P2022). Say this clearly in your report.
 
@@ -116,7 +143,9 @@ VERIFY
 - Client unit tests still pass (`npx tsx --test lib/*.test.ts` in client).
 - After I've applied the SQL on a LOCAL database only: add a vehicle without a plate (plateNumber NULL), with a plate
   (uppercase), edit it (lastServiceDate unchanged, updatedBy = my user id), delete it (deletedAt/deletedBy set, hidden
-  from the list), and a 5,000+ character remark saves in full.
+  from the list), and a 5,000+ character remark saves in full. New vehicles get number ids (next one = last + 1),
+  existing ones were renumbered 1, 2, 3 with their data intact, and editing/deleting with an old text id gives
+  "Vehicle not found".
 - Report: every changed file, the SQL (separately), and anything in this project that differed from the reference.
 
 ==================================================
@@ -130,8 +159,10 @@ REFERENCE FILES (final versions — copy exactly, adapt imports only if needed)
 // e.g. "Toyota Land Cruiser 2022"); the plate number is optional.
 // lastServiceDate is no longer on the form but kept (existing data); editing a vehicle leaves it as it is.
 // Audit: who added / last changed / deleted it and when (user ids); deleting sets deletedAt/deletedBy (soft delete).
+// The id is a number (BIGINT UNSIGNED AUTO_INCREMENT); nothing refers to it. An older table with a text id is
+// changed by prisma/sql/2026-11-02_vehicle_id_bigint.sql.
 model Vehicle {
-  id               String    @id @default(cuid())
+  id               BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
   workspaceId      String
   contactId        String
   plateNumber      String?   @db.VarChar(20)
@@ -192,6 +223,55 @@ ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NULL;
 
 -- Undo (only works while no vehicle has an empty plate):
 -- ALTER TABLE `Vehicle` MODIFY `plateNumber` VARCHAR(20) NOT NULL;
+```
+
+### `server/prisma/sql/2026-11-02_vehicle_id_bigint.sql`
+
+```sql
+-- Vehicle.id: VARCHAR(191) cuid -> BIGINT UNSIGNED AUTO_INCREMENT.
+-- Nothing references Vehicle.id (no foreign key points at it), so existing rows are simply renumbered 1, 2, 3...
+-- Run once on a database whose Vehicle table still has the text id. Back up the table first.
+ALTER TABLE `Vehicle`
+  DROP PRIMARY KEY,
+  DROP COLUMN `id`,
+  ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT FIRST,
+  ADD PRIMARY KEY (`id`);
+```
+
+### `server/prisma/sql/2026-11-02_vehicle_table.sql`
+
+```sql
+-- Vehicle table (customer vehicles: chat header car button / contact profile "Add Vehicle").
+-- Full definition (from the local database, with the id as BIGINT UNSIGNED AUTO_INCREMENT), 2026-11-02.
+-- Use this on a database that does NOT have the Vehicle table yet.
+-- If the table already exists, run 2026-11-02_vehicle_remarks.sql, 2026-11-02_vehicle_plate_optional.sql and
+-- 2026-11-02_vehicle_id_bigint.sql instead (skip any that is already applied).
+
+CREATE TABLE IF NOT EXISTS `Vehicle` (
+  `id`               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `workspaceId`      VARCHAR(191) NOT NULL,
+  `contactId`        VARCHAR(191) NOT NULL,
+  `plateNumber`      VARCHAR(20)  NULL,
+  `make`             VARCHAR(60)  NOT NULL,
+  `model`            VARCHAR(60)  NOT NULL,
+  `year`             INT          NOT NULL,
+  `registrationDate` DATE         NULL,
+  `lastServiceDate`  DATE         NULL,
+  `tireSize1`        VARCHAR(30)  NOT NULL,
+  `tireSize2`        VARCHAR(30)  NULL,
+  `remarks`          TEXT         NULL,
+  `createdAt`        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `createdBy`        VARCHAR(191) NULL,
+  `updatedAt`        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedBy`        VARCHAR(191) NULL,
+  `deletedAt`        DATETIME(3)  NULL,
+  `deletedBy`        VARCHAR(191) NULL,
+  PRIMARY KEY (`id`),
+  INDEX `Vehicle_contactId_createdAt_idx` (`contactId`, `createdAt`),
+  INDEX `Vehicle_workspaceId_idx` (`workspaceId`),
+  CONSTRAINT `Vehicle_contactId_fkey` FOREIGN KEY (`contactId`) REFERENCES `Contact` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `Vehicle_workspaceId_fkey` FOREIGN KEY (`workspaceId`) REFERENCES `Workspace` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 ### `server/src/services/vehicles.ts`
@@ -275,13 +355,20 @@ const vehicleSchema = detailsSchema.extend({
 // Edit: only the fields sent change (a vehicle never moves to another contact)
 const updateSchema = detailsSchema.partial();
 
+// The API sends the BIGINT id as text; anything that isn't a number is simply "not found"
+function vehicleId(id: string) {
+  const v = String(id ?? '').trim();
+  if (!/^\d{1,20}$/.test(v)) throw notFound('Vehicle');
+  return BigInt(v);
+}
+
 const toDay = (v: string | null) => (v ? new Date(`${v}T00:00:00Z`) : null);
 const fromDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 
 // API shape: dates as yyyy-mm-dd, no workspace or audit ids
 function shape(v: Vehicle) {
   return {
-    id: v.id,
+    id: v.id.toString(),
     contactId: v.contactId,
     plateNumber: v.plateNumber,
     make: v.make,
@@ -370,7 +457,7 @@ export async function addVehicle(auth: AuthPayload, rawInput: unknown) {
 export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unknown) {
   await getPermissions(auth);
   const data = parse(updateSchema, rawInput);
-  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId(id), workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   const { registrationDate, lastServiceDate, ...rest } = data;
   const updated = await prisma.vehicle.update({
@@ -389,7 +476,7 @@ export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unk
 // Soft delete
 export async function deleteVehicle(auth: AuthPayload, id: string) {
   await getPermissions(auth);
-  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId(id), workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   await prisma.vehicle.update({
     where: { id: vehicle.id },

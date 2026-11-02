@@ -76,13 +76,16 @@ const vehicleSchema = detailsSchema.extend({
 // Edit: only the fields sent change (a vehicle never moves to another contact)
 const updateSchema = detailsSchema.partial();
 
+// The vehicle id from the app ("42") as the BIGINT it's stored as; anything else matches no vehicle
+const vehicleId = (id: string) => (/^\d{1,20}$/.test(id) && BigInt(id) <= 18446744073709551615n ? BigInt(id) : null);
+
 const toDay = (v: string | null) => (v ? new Date(`${v}T00:00:00Z`) : null);
 const fromDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 
-// API shape: dates as yyyy-mm-dd, no workspace or audit ids
+// API shape: id as a string (BIGINT), dates as yyyy-mm-dd, no workspace or audit ids
 function shape(v: Vehicle) {
   return {
-    id: v.id,
+    id: String(v.id),
     contactId: v.contactId,
     plateNumber: v.plateNumber,
     make: v.make,
@@ -171,7 +174,8 @@ export async function addVehicle(auth: AuthPayload, rawInput: unknown) {
 export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unknown) {
   await getPermissions(auth);
   const data = parse(updateSchema, rawInput);
-  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  const key = vehicleId(id);
+  const vehicle = key === null ? null : await prisma.vehicle.findFirst({ where: { id: key, workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   const { registrationDate, lastServiceDate, ...rest } = data;
   const updated = await prisma.vehicle.update({
@@ -190,7 +194,8 @@ export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unk
 // Soft delete
 export async function deleteVehicle(auth: AuthPayload, id: string) {
   await getPermissions(auth);
-  const vehicle = await prisma.vehicle.findFirst({ where: { id, workspaceId: auth.workspaceId, deletedAt: null } });
+  const key = vehicleId(id);
+  const vehicle = key === null ? null : await prisma.vehicle.findFirst({ where: { id: key, workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   await prisma.vehicle.update({
     where: { id: vehicle.id },
