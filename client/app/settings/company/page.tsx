@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { renameWorkspace } from '@/lib/auth';
+import { connectWhatsApp } from '@/lib/settings';
 import { type WorkingDay, WEEK, fetchAutomationSettings, updateAutomationSettings, workingHoursText } from '@/lib/automations';
 import { timeZoneLabel } from '@/lib/profileOptions';
 import { isAdminRole } from '@/lib/roles';
@@ -217,7 +218,7 @@ function Company({ me }: { me: Me }) {
             </section>
           </>
         ) : (
-          <section className="mt-5">
+          <section className="mt-5 space-y-5">
             <dl className="divide-y divide-line-soft rounded-xl border border-line bg-surface">
               {row(
                 'Status',
@@ -233,6 +234,7 @@ function Company({ me }: { me: Me }) {
               {row('Phone number ID', wa?.phoneNumberId ?? '–', true)}
               {row('WhatsApp Business account ID', wa?.wabaId ?? '–', true)}
             </dl>
+            <ConnectWhatsAppForm onConnected={() => window.location.reload()} />
           </section>
         )}
         {error && <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
@@ -261,5 +263,91 @@ function Company({ me }: { me: Me }) {
         </div>
       )}
     </>
+  );
+}
+
+function ConnectWhatsAppForm({ onConnected }: { onConnected: () => void }) {
+  const [wabaId, setWabaId] = useState('');
+  const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!wabaId.trim() || !phoneNumberId.trim() || !accessToken.trim()) {
+      setError('All fields are required.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setSuccess('');
+    try {
+      const account = await connectWhatsApp({ wabaId: wabaId.trim(), phoneNumberId: phoneNumberId.trim(), accessToken: accessToken.trim() });
+      setSuccess(`Connected: ${account.displayPhone}`);
+      setTimeout(onConnected, 1200);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-6">
+      <h3 className="text-[15px] font-bold text-ink">Connect / Update WhatsApp Number</h3>
+      <p className="mt-1 text-[12px] text-muted">
+        Get these values from{' '}
+        <span className="font-medium text-ink">Meta Developer Dashboard → WhatsApp → API Setup</span>.
+      </p>
+      <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+        <div>
+          <label htmlFor="waba-id" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+            WhatsApp Business Account ID (WABA ID)
+          </label>
+          <input
+            id="waba-id"
+            value={wabaId}
+            onChange={(e) => setWabaId(e.target.value)}
+            placeholder="e.g. 123456789012345"
+            className={input}
+          />
+        </div>
+        <div>
+          <label htmlFor="phone-number-id" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+            Phone Number ID
+          </label>
+          <input
+            id="phone-number-id"
+            value={phoneNumberId}
+            onChange={(e) => setPhoneNumberId(e.target.value)}
+            placeholder="e.g. 987654321098765"
+            className={input}
+          />
+        </div>
+        <div>
+          <label htmlFor="access-token" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+            Access Token
+          </label>
+          <input
+            id="access-token"
+            value={accessToken}
+            onChange={(e) => setAccessToken(e.target.value)}
+            placeholder="Paste your permanent system user token"
+            className={input}
+          />
+        </div>
+        {error && <p className="rounded-lg bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
+        {success && <p className="rounded-lg bg-success-soft px-3 py-2 text-[13px] text-success">{success}</p>}
+        <button
+          type="submit"
+          disabled={busy}
+          className="rounded-lg bg-primary px-6 py-2.5 text-[13px] font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-50"
+        >
+          {busy ? 'Connecting…' : 'Connect WhatsApp'}
+        </button>
+      </form>
+    </div>
   );
 }

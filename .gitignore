@@ -59,3 +59,8 @@ client-next-backups/
 
 # Database dumps and migration backups (real emails and password hashes); also in server/.gitignore
 server/backups/
+ Database dumps and migration backups (real emails and password hashes); also in server/.gitignore
+server/backups/
+client/app/favicon.ico
+client/app/icon.png
+/home/tyrescart-support/htdocs/support.tyrescart.ae/ecosystem.config.cjs
