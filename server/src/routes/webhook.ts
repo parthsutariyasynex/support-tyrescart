@@ -18,26 +18,33 @@ webhookRouter.get('/', (req, res) => {
   res.sendStatus(403);
 });
 
+// META_APP_SECRET may list several app secrets, comma-separated (the old and the new Meta app while a number moves
+// between apps): a webhook signed with any of them is accepted
+export const appSecrets = (secret: string) => secret.split(',').map((s) => s.trim()).filter(Boolean);
+
 // Meta signs every webhook with the app secret (X-Hub-Signature-256). Without META_APP_SECRET, unsigned
 // webhooks are accepted only outside production, so local testing still works.
 export function validSignature(rawBody: Buffer | undefined, header: string | undefined, secret: string, isProd: boolean) {
-  if (!secret) return !isProd;
+  const secrets = appSecrets(secret);
+  if (!secrets.length) return !isProd;
   if (!rawBody || !header) return false;
-  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-  return expected.length === header.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(header));
+  return secrets.some((s) => {
+    const expected = 'sha256=' + crypto.createHmac('sha256', s).update(rawBody).digest('hex');
+    return expected.length === header.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(header));
+  });
 }
 
 // Diagnostics only - mirrors validSignature's own checks so a real rejection says *why* (missing secret, missing
 // header/body, or an actual HMAC mismatch) instead of a bare "rejecting". Never includes the secret, the header's
 // value, or the body's content - only booleans and a byte count, safe to log.
 export function signatureFailureReason(rawBody: Buffer | undefined, header: string | undefined, secret: string, isProd: boolean): string {
-  if (!secret) return isProd ? 'META_APP_SECRET is not configured' : 'ok without a secret outside production';
+  if (!appSecrets(secret).length) return isProd ? 'META_APP_SECRET is not configured' : 'ok without a secret outside production';
   if (!rawBody) return 'request had no body (rawBody capture missing or empty payload)';
   if (!header) return 'x-hub-signature-256 header missing';
   return 'signature does not match the computed HMAC (wrong/rotated secret, or the body was altered in transit)';
 }
 
-if (env.isProd && !env.metaAppSecret)
+if (env.isProd && !appSecrets(env.metaAppSecret).length)
   console.error('[Webhook] META_APP_SECRET is not set: every webhook will be rejected until it is');
 
 // Calls events (WhatsApp Business Calling) in a webhook change: how many (anything but an array counts as none)

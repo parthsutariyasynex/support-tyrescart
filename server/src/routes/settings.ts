@@ -7,6 +7,6 @@ export const settingsRouter = Router();
 settingsRouter.use(requireAuth);
 
 settingsRouter.post('/whatsapp', async (req, res) => {
-  const account = await connectWhatsApp(req.auth!, req.body);
+  const account = await connectWhatsApp(req.auth!, req.body, 'api');
   res.json({ ok: true, displayPhone: account.displayPhone });
 });

@@ -1,3 +1,5 @@
+import { writeSessionCookie } from './session';
+
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 // A GraphQL error with the server's error code (e.g. ACCOUNT_EXISTS), so forms can offer the right next step
@@ -65,9 +67,11 @@ export function getToken() {
   return typeof window === 'undefined' ? null : localStorage.getItem('token');
 }
 
+// Signing in, switching workspace and signing out all go through here, so the server-side cookie always matches
 export function setToken(token: string | null) {
   if (token) localStorage.setItem('token', token);
   else localStorage.removeItem('token');
+  writeSessionCookie(token);
 }
 
 export async function api<T = any>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {

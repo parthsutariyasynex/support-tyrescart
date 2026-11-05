@@ -70,7 +70,7 @@ import { TemplateComposer, TemplatePicker } from './templates';
 import type { Template } from '@/lib/templates';
 import { sendVoice } from '@/lib/voice';
 import { insertAt } from '@/lib/emojis';
-import { ACCEPT, CHAT_ACCEPT, checkFile, documentLabel, filePreview, formatSize, pastedName, sendFile } from '@/lib/media';
+import { ACCEPT, CHAT_ACCEPT, checkFile, copyImage, documentLabel, filePreview, fitPastedImage, formatSize, pastedName, sendFile } from '@/lib/media';
 import { CONTACT_LIST_DELETED_EVENT, CONTACT_LIST_SAVED_EVENT } from './ListsDropdown';
 import { CUSTOM_PROPERTIES_EVENT, type ContactRemark, NOTE_FILES_MAX, type StagesChanged, addRemark, deleteContact, fetchChatNotes, stagesChanged, uploadRemarkFile } from '@/lib/contacts';
 import { PresenceDot } from '../PresenceDot';
@@ -85,6 +85,8 @@ import { type Edit, type InlineStyle, type LineStyle, shortcutStyle, toggleInlin
 import { dayKey, dayLabel, formatDateTime, formatTime, listTimestamp } from '@/lib/time';
 import { ContactAvatar, contactDisplayName } from './avatar';
 import { CountryFlag } from './CountryFlag';
+import { AiRobotPanel, showRobotTab, useAiRobotChat } from './AiRobotPanel';
+import { AI_ROBOT_EVENT } from '@/lib/aiRobot';
 import { CarIcon, VehiclesDialog } from './VehiclesDialog';
 import { VEHICLES_EVENT } from '@/lib/vehicles';
 import { MESSAGE_PINNED_EVENT, PinnedBar } from './PinnedBar';
@@ -928,7 +930,7 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
     loadFeed();
     loadUnreadTotal();
     loadUnassignedCount();
-    const socket = io(API_URL, { auth: { token: getToken() } });
+    const socket = io(API_URL, { auth: { token: getToken() }, addTrailingSlash: false });
     socketRef.current = socket;
     const unbindPresence = bindPresence(socket); // online / away / offline dots
     // The open chat on screen is being read: its customer messages are read now (badge 0 here, and on the server before
@@ -1102,6 +1104,14 @@ function Inbox({ meName, channelPhone, defaultCountry }: { meName: string; chann
       if (moved) patchConversations((x) => (x.contact.leadStage === moved.from ? { ...x, contact: { ...x.contact, leadStage: moved.to } } : x));
     });
     socket.on('contact:remarks', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(CONTACT_REMARKS_EVENT, { detail: e })));
+    // The AI Robot did something in a chat (replied, handed over, stopped): its tab reloads, and the chat list's
+    // "Needs human" marker follows
+    socket.on('ai-robot:state', (e: { conversationId: string }) => {
+      window.dispatchEvent(new CustomEvent(AI_ROBOT_EVENT, { detail: e }));
+      fetchConversation(e.conversationId)
+        .then((c) => c && patchConversations((x) => (x.id === c.id && x.aiRobotState !== c.aiRobotState ? { ...x, aiRobotState: c.aiRobotState } : x)))
+        .catch(() => {});
+    });
     socket.on('contact:vehicles', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(VEHICLES_EVENT, { detail: e })));
     socket.on('contact:lists', (e: { contactId: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LISTS_EVENT, { detail: e })));
     socket.on('contactList:saved', (l: { id: string }) => window.dispatchEvent(new CustomEvent(CONTACT_LIST_SAVED_EVENT, { detail: l })));
@@ -1863,8 +1873,13 @@ function ConversationList({
                           …ticks + preview…
                         </p>
                       )} */}
-                      {(c.labels.length > 0 || c.assignee || c.contact.leadStage) && (
+                      {(c.labels.length > 0 || c.assignee || c.contact.leadStage || (c.aiRobotState === 'handover' && !c.assignee && c.status === 'open')) && (
                         <div className="mt-1 flex min-w-0 items-center gap-1.5 pr-8">
+                          {c.aiRobotState === 'handover' && !c.assignee && c.status === 'open' && (
+                            <span title="The AI Robot handed this chat to the team" className="shrink-0 rounded-full bg-warning-soft px-1.5 py-px text-[10px] font-semibold text-warning">
+                              Needs human
+                            </span>
+                          )}
                           <StagePill value={c.contact.leadStage} />
                           {c.assignee && (
                             <span
@@ -1884,7 +1899,7 @@ function ConversationList({
                     <span className="flex min-w-5 shrink-0 items-center justify-end gap-1.5">
                       {c.pinned && (
                         <span title="Pinned for the team" className="shrink-0 text-faint">
-                          <svg aria-label="Pinned" className="h-3.5 w-3.5 rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                          <svg aria-label="Pinned" className="h-4 w-4 rotate-45" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
                           </svg>
                         </span>
@@ -2046,7 +2061,10 @@ function ChatPanel({
   // Above the message box: Reply (to the customer, on WhatsApp) or Add note (internal, only the team sees it; saved
   // to the customer's Remarks in the profile panel), AI Reply or AI Summary (AiAssistant.tsx; only when the server has
   // AI set up; AI Summary for owners, admins and supervisors). Each chat opens on Reply.
-  const [mode, setMode] = useState<'reply' | 'note' | 'ai-reply' | 'ai-summary'>('reply');
+  const [mode, setMode] = useState<'reply' | 'note' | 'ai-reply' | 'ai-summary' | 'ai-robot'>('reply');
+  // The AI Robot tab (AiRobotPanel.tsx): shown while the robot is on, or has worked in this chat
+  const robot = useAiRobotChat(conversation.id, messages[messages.length - 1]?.id);
+  const robotTab = showRobotTab(robot.data);
   const [aiOn, setAiOn] = useState(false);
   useEffect(() => void fetchAiConfigured().then(setAiOn), []);
   // An AI-written reply in the message box: sending it asks for confirmation first (aiConfirm: the text to confirm).
@@ -2116,7 +2134,7 @@ function ChatPanel({
   };
   const [editing, setEditing] = useState<Message | null>(null);
   const noting = mode === 'note' && !editing; // editing a message is always a reply
-  const assisting = (mode === 'ai-reply' || mode === 'ai-summary') && !editing;
+  const assisting = (mode === 'ai-reply' || mode === 'ai-summary' || (mode === 'ai-robot' && robotTab)) && !editing;
   const canSummarize = !!viewer?.isAdmin || viewer?.role === 'supervisor';
   useEffect(() => {
     if (!text) {
@@ -2231,7 +2249,7 @@ function ChatPanel({
   const [noteFiles, setNoteFiles] = useState<File[]>([]);
   const noteFileInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => setNoteFiles([]), [conversation.id]);
-  function addNoteFiles(list: FileList | null) {
+  function addNoteFiles(list: FileList | File[] | null) {
     const chosen = Array.from(list ?? []);
     const problems = chosen.map((f) => ('problem' in checkFile(f) ? `${f.name}: ${(checkFile(f) as { problem: string }).problem}` : null)).filter(Boolean);
     const ok = chosen.filter((f) => !('problem' in checkFile(f)));
@@ -2504,7 +2522,10 @@ function ChatPanel({
       setReplyTo(m);
       requestAnimationFrame(() => inputRef.current?.focus());
     } else if (action === 'copy') {
-      navigator.clipboard?.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
+      // A photo or sticker copies the picture itself (pasting it in a chat attaches it); anything else its text
+      if ((m.type === 'image' || m.type === 'sticker') && m.mediaMime) copyImage(m.id, m.body).catch((err) => setError((err as Error).message));
+      else if (!navigator.clipboard?.writeText) setError("This browser doesn't allow copying here. Select the text and press Ctrl+C instead.");
+      else navigator.clipboard.writeText(m.body).catch(() => setError("Couldn't copy to the clipboard"));
     } else if (action === 'pin' || action === 'unpin') {
       // For the whole team; past the admin's limit the server says so (PIN_LIMIT)
       setMessagePinned(m.id, action === 'pin')
@@ -2784,8 +2805,16 @@ function ChatPanel({
         const files = [...e.clipboardData.items].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter((f): f is File => !!f);
         if (!files.length) return;
         e.preventDefault();
+        // Writing a note: the image is attached to the note (only the team sees it), not sent to the customer
+        if (noting)
+          return void Promise.all(files.map((f) => fitPastedImage(pastedName(f))))
+            .then(addNoteFiles)
+            .catch((err) => setError((err as Error).message));
         if (!canAttach) return setError(isClosed ? 'This chat is closed. Reopen it to send files.' : windowClosed ? '24-hour window closed: only approved templates can be sent until the customer writes again.' : 'Assign this chat to yourself before sending files (New Leads → Assign to Me).');
-        pickFile(pastedName(files[0]), files.length > 1);
+        // An image over 5 MB is made smaller first (as a JPEG), so it can still be sent
+        fitPastedImage(pastedName(files[0]))
+          .then((f) => pickFile(f, files.length > 1))
+          .catch((err) => setError((err as Error).message));
       }}
     >
       {dragging && (
@@ -3270,10 +3299,13 @@ function ChatPanel({
                 { key: 'note', label: 'Add note', icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /> },
                 ...(aiOn ? [{ key: 'ai-reply' as const, label: 'AI Reply', icon: <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /> }] : []),
                 ...(aiOn && canSummarize ? [{ key: 'ai-summary' as const, label: 'AI Summary', icon: <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5" /> }] : []),
+                ...(robotTab
+                  ? [{ key: 'ai-robot' as const, label: 'AI Robot', icon: <path d="M12 8V4H8M4 12a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4zM2 14h2M20 14h2M9 13v2M15 13v2" /> }]
+                  : []),
               ] as const
             ).map((t) => {
               const on = t.key === 'note' ? noting : t.key === 'reply' ? !noting && !assisting : assisting && mode === t.key;
-              const isAi = t.key === 'ai-reply' || t.key === 'ai-summary';
+              const isAi = t.key === 'ai-reply' || t.key === 'ai-summary' || t.key === 'ai-robot';
               return (
                 <button
                   key={t.key}
@@ -3334,7 +3366,18 @@ function ChatPanel({
             ))}
           </ul>
         )}
-        {assisting ? (
+        {assisting && mode === 'ai-robot' ? (
+          <AiRobotPanel
+            data={robot.data}
+            conversationId={conversation.id}
+            onChanged={robot.reload}
+            replyBlocked={windowClosed ? '24-hour window closed: only an approved template can be sent until the customer writes again.' : null}
+            onUseReply={(reply) => {
+              setAiConfirmFromPanel(true);
+              setAiConfirm(reply);
+            }}
+          />
+        ) : assisting ? (
           <AiAssistantPanel
             view={mode === 'ai-summary' ? 'summary' : 'reply'}
             conversationId={conversation.id}

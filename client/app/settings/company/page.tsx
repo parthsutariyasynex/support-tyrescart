@@ -7,12 +7,15 @@ import { type WorkingDay, WEEK, fetchAutomationSettings, updateAutomationSetting
 import { timeZoneLabel } from '@/lib/profileOptions';
 import { isAdminRole } from '@/lib/roles';
 import { APP_TIME_ZONE } from '@/lib/time';
+import { type WhatsAppCheck, connectWhatsApp } from '@/lib/settings';
 import { showToast } from '@/lib/toasts';
 import { AppShell, type Me } from '../../AppShell';
+import { ConfirmDialog } from '../../ConfirmDialog';
 import { SettingsShell } from '../SettingsShell';
 
 // Settings → Company details (owners and admins): the company name, its business hours (the working hours Simple
-// automations use, the same ones as on that page) and, on the other tab, the WhatsApp connection (read-only)
+// automations use, the same ones as on that page) and, on the other tab, the WhatsApp connection and its
+// Connect / Update form
 export default function CompanyPage() {
   return (
     <AppShell>
@@ -233,6 +236,7 @@ function Company({ me }: { me: Me }) {
               {row('Phone number ID', wa?.phoneNumberId ?? '–', true)}
               {row('WhatsApp Business account ID', wa?.wabaId ?? '–', true)}
             </dl>
+            <ConnectWhatsApp current={wa} />
           </section>
         )}
         {error && <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
@@ -261,5 +265,110 @@ function Company({ me }: { me: Me }) {
         </div>
       )}
     </>
+  );
+}
+
+// Connect a number, or update / replace the connected one. The server runs 7 checks with Meta (token, app, permanent
+// System User token, permissions, account, number, webhooks) and saves nothing unless all pass; a replaced number's
+// credentials are kept as a backup on the server. The token is sent once and never shown again.
+const CHECK_NAMES = ['Access token', 'Meta app', 'Permanent token', 'Permissions', 'WhatsApp Business account', 'Phone number', 'Webhooks'];
+
+function ConnectWhatsApp({ current }: { current: Me['workspace']['whatsapp'] }) {
+  const [wabaId, setWabaId] = useState('');
+  const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [checks, setChecks] = useState<WhatsAppCheck[] | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const connected = !!current?.displayPhone;
+  const replacing = connected && !!phoneNumberId.trim() && phoneNumberId.trim() !== current?.phoneNumberId;
+  const ready = !!wabaId.trim() && !!phoneNumberId.trim() && accessToken.trim().length >= 10;
+
+  async function connect() {
+    setBusy(true);
+    setError('');
+    setChecks(null);
+    try {
+      const account = await connectWhatsApp({ wabaId: wabaId.trim(), phoneNumberId: phoneNumberId.trim(), accessToken: accessToken.trim() });
+      setChecks(account.checks ?? []);
+      setAccessToken('');
+      setConfirming(false);
+      showToast(`whatsapp:${Date.now()}`, '', 'WhatsApp connected', `${account.displayPhone} passed all 7 checks. Reloading…`);
+      setTimeout(() => window.location.reload(), 3000); // every page shows the new number after the reload
+    } catch (e) {
+      setError((e as Error).message);
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const field = (id: string, label: string, value: string, set: (v: string) => void, props: React.InputHTMLAttributes<HTMLInputElement> = {}) => (
+    <label className="block text-[12px] font-semibold text-body" htmlFor={id}>
+      {label}
+      <input id={id} value={value} onChange={(e) => set(e.target.value)} disabled={busy} className={`${input} mt-1.5 font-mono font-normal`} {...props} />
+    </label>
+  );
+
+  return (
+    <form
+      className="mt-5 rounded-xl border border-line bg-surface p-6"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!ready || busy) return;
+        if (replacing) setConfirming(true);
+        else void connect();
+      }}
+    >
+      <h3 className="text-[15px] font-bold text-ink">{connected ? 'Update WhatsApp connection' : 'Connect WhatsApp'}</h3>
+      <p className="mt-1 text-[13px] text-body-soft">
+        From Meta: WhatsApp Manager (account and phone number IDs) and Business Settings → System users (a token that never expires, with whatsapp_business_messaging and
+        whatsapp_business_management). Nothing is saved unless all 7 checks with Meta pass.
+      </p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        {field('waba-id', 'WhatsApp Business account ID', wabaId, setWabaId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.wabaId || '' })}
+        {field('phone-number-id', 'Phone number ID', phoneNumberId, setPhoneNumberId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.phoneNumberId || '' })}
+        <div className="sm:col-span-2">
+          {field('access-token', 'Permanent access token (System User)', accessToken, setAccessToken, { type: 'password', autoComplete: 'off', spellCheck: false })}
+          <span className="mt-1 block text-[11px] text-faint">Sent once to verify and save; it is never shown again.</span>
+        </div>
+      </div>
+
+      {checks && (
+        <ul className="mt-4 space-y-1.5" aria-label="Checks with Meta">
+          {checks.map((c, i) => (
+            <li key={c.name} className="flex gap-2 text-[12px]">
+              <span className={c.ok ? 'text-primary' : 'text-danger'}>{c.ok ? '✓' : '✗'}</span>
+              <span className="font-semibold text-ink">
+                {i + 1}. {c.name}
+              </span>
+              <span className="text-body-soft">{c.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {busy && <p className="mt-4 text-[12px] text-body-soft">Checking with Meta: {CHECK_NAMES.join(' · ')}…</p>}
+      {error && <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error} Nothing was changed.</p>}
+
+      <div className="mt-5 flex justify-end">
+        <button type="submit" disabled={!ready || busy} className="min-w-24 rounded-lg bg-primary px-5 py-2 text-[13px] font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-50">
+          {busy ? 'Checking…' : connected ? 'Verify and update' : 'Verify and connect'}
+        </button>
+      </div>
+
+      {confirming && (
+        <ConfirmDialog
+          title={`Replace ${current?.displayPhone}?`}
+          body={`The whole workspace will send and receive from the new number (shown after the checks pass). Messages to ${current?.displayPhone} stop arriving here. Its credentials are kept as a backup on the server.`}
+          yes="Verify and replace"
+          danger
+          busy={busy}
+          error={error}
+          onYes={() => void connect()}
+          onNo={() => setConfirming(false)}
+        />
+      )}
+    </form>
   );
 }

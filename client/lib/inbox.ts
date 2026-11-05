@@ -71,6 +71,8 @@ export type Conversation = {
   isCollaborator: boolean;
   // Was ever assigned to someone: then it's no longer a New Lead, even if unassigned again
   wasAssigned?: boolean;
+  // AI Robot in this chat: null (not started) | active | stopped | handover (handed to the team: "Needs human")
+  aiRobotState?: string | null;
 };
 
 // New Leads: open chats nobody holds right now (the server applies the same rule with assignee 'new_leads'). An
@@ -85,7 +87,7 @@ export const PAGE_SIZE = 50;
 const BASE_MESSAGE_FIELDS = 'id conversationId direction type body status error createdAt sentById senderName editedAt deletedAt version mediaMime mediaSize mediaName customerReaction teamReaction teamReactionById automation pinnedAt';
 // Messages in a chat also bring the message they reply to (the list's last-message preview doesn't need it)
 export const MESSAGE_FIELDS = `${BASE_MESSAGE_FIELDS} replyToId replyTo { id direction type body senderName deleted mediaMime mediaName }`;
-const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned`;
+const CONVERSATION_FIELDS = `id unread lastMessageAt lastInboundAt contact { id waId name leadStage country } lastMessage { ${BASE_MESSAGE_FIELDS} } labels { id name color } assignee { id name color userId } assigneeOpenedAt status closedAt closedById snoozedUntil pinned isCollaborator wasAssigned aiRobotState`;
 
 // The search box, applied instantly to the chats already on screen while the server search (the same rule over
 // every message) refreshes the list. Case-insensitive substring over: customer name · phone digits · the last

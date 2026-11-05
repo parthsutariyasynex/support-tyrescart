@@ -29,6 +29,18 @@ export const env = {
   openRouterBase: (process.env.OPENROUTER_API_BASE || 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   aiModel: process.env.AI_MODEL || (process.env.OPENROUTER_API_KEY ? 'google/gemma-4-26b-a4b-it:free' : 'claude-opus-5-5'),
+  // AI Robot (services/aiRobot.ts): AI_ROBOT_ENABLED=false turns it off on this server whatever the workspaces' settings
+  // (kill switch); AI_ROBOT_MODEL: another model just for the robot (default AI_MODEL); how often it checks for chats
+  // waiting for their first reply (seconds)
+  aiRobotEnabled: process.env.AI_ROBOT_ENABLED !== 'false',
+  aiRobotModel: process.env.AI_ROBOT_MODEL || '',
+  aiRobotCheckMs: (Number(process.env.AI_ROBOT_CHECK_SECONDS) > 0 ? Number(process.env.AI_ROBOT_CHECK_SECONDS) : 15) * 1000,
+  // Tyrescart product catalogue for the AI Robot (services/tyrescart.ts): the site's GraphQL API (Basic auth) and the
+  // public site address product links are built on. Empty URL = the robot has no catalogue (it hands price questions over).
+  tyrescartGraphqlUrl: process.env.TYRESCART_GRAPHQL_URL || '',
+  tyrescartGraphqlUser: process.env.TYRESCART_GRAPHQL_USER || '',
+  tyrescartGraphqlPassword: process.env.TYRESCART_GRAPHQL_PASSWORD || '',
+  tyrescartSiteUrl: (process.env.TYRESCART_SITE_URL || '').replace(/\/$/, ''),
   // Meta app id: only needed to create templates with an image/video/document header (Meta wants a sample file,
   // uploaded through the app's Resumable Upload API). Optional.
   metaAppId: process.env.META_APP_ID || '',
@@ -74,4 +86,16 @@ export const env = {
   // the attribution shown and allows light use only)
   mapTileUrl: process.env.MAP_TILE_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   mapAttribution: process.env.MAP_ATTRIBUTION || '© OpenStreetMap contributors',
+  // Make / Model / Year dropdowns on the vehicle form (services/vehicleCatalog.ts): the Wheel API key and the domain it
+  // was issued for (sent as X-Client-Domain). Without a key the form falls back to typing make/model/year. Secret.
+  wheelApiUrl: (process.env.WHEEL_API_URL || 'https://wheel-api.klever.ae').replace(/\/$/, ''),
+  wheelApiKey: process.env.WHEEL_API_KEY || process.env.KLEVER_API_KEY || '',
+  wheelApiDomain: process.env.WHEEL_API_DOMAIN || '',
+  // The vehicle form's Tyre Size list (services/tyreSizes.ts): a JSON file, the only place sizes are kept. Sizes added
+  // in the app are written to it. Default: config/tyre-sizes.json next to the server; set a path outside the repo in
+  // production so deploys don't overwrite added sizes (copy the default file there first).
+  tyreSizesFile: process.env.TYRE_SIZES_FILE || 'config/tyre-sizes.json',
+  // Makes, models and years added on the vehicle form (+ Add New …), shown with the Wheel API's (services/
+  // customVehicles.ts): a JSON file, like the tyre sizes. Same advice for production: a path outside the repo.
+  vehicleCatalogFile: process.env.VEHICLE_CATALOG_FILE || 'config/vehicle-catalog.json',
 };

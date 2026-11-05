@@ -4,8 +4,9 @@ import { APP_NAME } from '@/lib/brand';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { setToken } from '@/lib/api';
-import { login } from '@/lib/auth';
+import { getToken, isNetworkError, setToken } from '@/lib/api';
+import { fetchMe, login } from '@/lib/auth';
+import { hasSessionCookie, writeSessionCookie } from '@/lib/session';
 import { joinWorkspace } from '@/lib/members';
 import { lastWorkspace } from '@/lib/workspaces';
 import { AuthShell, FormMessage, buttonClass, inputClass } from '../AuthShell';
@@ -23,7 +24,25 @@ export default function LoginPage() {
     const params = new URLSearchParams(window.location.search);
     setPasswordReset(params.get('reset') === '1');
     setJoinToken(params.get('join'));
-  }, []);
+    // Signed in before the server-side sign-in cookie existed (token only in this browser's storage): check it, give it
+    // the cookie and go to the app. An invalid one is cleared by the API client; an unreachable API leaves the form.
+    // (A sign-in that already has the cookie never gets here: the server sends it straight to the app.)
+    const token = getToken();
+    if (!token || hasSessionCookie() || params.has('join')) return;
+    let cancelled = false;
+    fetchMe()
+      .then(() => {
+        if (cancelled || getToken() !== token) return;
+        writeSessionCookie(token);
+        router.replace('/');
+      })
+      .catch((err) => {
+        if (!cancelled && !isNetworkError(err)) setToken(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -41,7 +60,8 @@ export default function LoginPage() {
           alert(`Signed in, but couldn't join the team: ${(err as Error).message}`);
         }
       }
-      router.push('/inbox');
+      // Always the app's home after signing in (the server then opens the Inbox)
+      router.replace('/');
     } catch (err) {
       setError((err as Error).message);
       setLoading(false);

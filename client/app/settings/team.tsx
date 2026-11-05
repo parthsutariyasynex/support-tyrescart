@@ -91,7 +91,7 @@ export function TeamSection({ meId, role }: { meId: string; role: string | undef
   // removal (member:removed), so the Teams tab reloads from the database instead of guessing
   useEffect(() => {
     if (!admin) return;
-    const socket = io(API_URL, { auth: { token: getToken() } });
+    const socket = io(API_URL, { auth: { token: getToken() }, addTrailingSlash: false });
     socket.on('member:permissions', load);
     socket.on('member:removed', load);
     const unbindPresence = bindPresence(socket); // online / away / offline dots

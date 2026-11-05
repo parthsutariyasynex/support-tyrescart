@@ -156,7 +156,7 @@ export function AppShell({
   };
   useEffect(() => {
     if (!me?.user.id) return;
-    const socket = io(API_URL, { auth: { token: getToken() } });
+    const socket = io(API_URL, { auth: { token: getToken() }, addTrailingSlash: false });
     const unbind = bindPresence(socket);
     const open = (id: string) => openChatRef.current(id);
     // The notification sound, unless turned off in Settings → Notifications
@@ -323,6 +323,7 @@ export function AppShell({
   useEffect(() => {
     if (!getToken()) {
       cachedMe = null;
+      setToken(null); // also drops the server-side sign-in cookie, or /login would send this browser straight back
       router.replace('/login');
       return;
     }
@@ -352,6 +353,7 @@ export function AppShell({
           try {
             sessionStorage.removeItem(ME_STORAGE_KEY);
           } catch {}
+          setToken(null); // signed out for real: without this, /login would send a still-valid cookie back here (a loop)
           router.replace('/login');
         });
     load();

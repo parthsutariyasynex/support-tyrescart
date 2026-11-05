@@ -144,3 +144,24 @@ describe('callsCount', () => {
     assert.equal(callsCount(null), 0);
   });
 });
+
+describe('validSignature: several app secrets (moving a number between Meta apps)', () => {
+  const body = Buffer.from('{"entry":[]}');
+  const sign = (secret: string) => 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+
+  test('a webhook signed with any of the comma-separated secrets is accepted', () => {
+    assert.equal(validSignature(body, sign('old-secret'), 'old-secret,new-secret', true), true);
+    assert.equal(validSignature(body, sign('new-secret'), 'old-secret, new-secret', true), true);
+  });
+
+  test('a secret that is not listed is still rejected, and a single secret works as before', () => {
+    assert.equal(validSignature(body, sign('other-secret'), 'old-secret,new-secret', true), false);
+    assert.equal(validSignature(body, sign('only-secret'), 'only-secret', true), true);
+    assert.equal(validSignature(body, sign('other-secret'), 'only-secret', true), false);
+  });
+
+  test('only commas and spaces count as no secret (refused in production)', () => {
+    assert.equal(validSignature(body, undefined, ' , ', true), false);
+    assert.equal(signatureFailureReason(body, undefined, ' , ', true), 'META_APP_SECRET is not configured');
+  });
+});

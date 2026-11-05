@@ -119,6 +119,8 @@ export const typeDefs = /* GraphQL */ `
     isCollaborator: Boolean!
     "Was ever assigned to someone (its assignment history): such a chat is no longer a New Lead, even if unassigned again"
     wasAssigned: Boolean!
+    "AI Robot in this chat: null (not started) | active | stopped | handover (handed to the team: 'Needs human')"
+    aiRobotState: String
   }
 
   type ConversationCounts {
@@ -482,6 +484,8 @@ export const resolvers = {
         ? c._count.assignments > 0
         : !!(await prisma.assignmentRecord.findFirst({ where: { conversationId: c.id }, select: { id: true } })),
     contact: (c: ConversationParent) => c.contact ?? prisma.contact.findUnique({ where: { id: c.contactId } }),
+    aiRobotState: async (c: ConversationParent & { aiRobotState?: string | null }) =>
+      c.aiRobotState !== undefined ? c.aiRobotState : ((await prisma.conversation.findUnique({ where: { id: c.id }, select: { aiRobotState: true } }))?.aiRobotState ?? null),
     // Hidden for someone who cleared the chat after it was sent
     lastMessage: async (c: ConversationParent, _args: unknown, ctx: Context) => {
       const last = (

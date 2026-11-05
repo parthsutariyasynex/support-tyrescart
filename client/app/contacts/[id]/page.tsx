@@ -147,7 +147,7 @@ function ContactDetails() {
   // Live (one connection): the same customer events the chat side panel follows, plus this chat's labels, assignee,
   // status and history
   useEffect(() => {
-    const socket = io(API_URL, { auth: { token: getToken() } });
+    const socket = io(API_URL, { auth: { token: getToken() }, addTrailingSlash: false });
     const relay = (event: string, windowEvent: string) => socket.on(event, (d: unknown) => window.dispatchEvent(new CustomEvent(windowEvent, { detail: d })));
     relay('contact:updated', CONTACT_UPDATED_EVENT);
     relay('contact:remarks', CONTACT_REMARKS_EVENT);

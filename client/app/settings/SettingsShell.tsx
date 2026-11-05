@@ -35,7 +35,9 @@ export function settingsGroups(role: string | undefined): Group[] {
               { href: '/settings/users', label: 'User management' },
               { href: '/settings/roles', label: 'Roles and permissions' },
               { href: '/settings/automations', label: 'Simple automations' },
+              { href: '/settings/ai-robot', label: 'AI Robot' },
               { href: '/settings/reports', label: 'Reports' },
+              { href: '/settings/whatsapp-activity', label: 'WhatsApp connection activity' },
             ],
           },
         ]

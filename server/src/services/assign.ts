@@ -154,6 +154,13 @@ export async function assignConversation(
         throw missingMember(err);
       });
     if (count === 0) continue; // changed by someone else in between: read it again
+    // The AI Robot only answers unassigned chats: once someone holds it, the robot stops in this chat for good (until the
+    // chat is closed and reopened; services/aiRobot.ts). Unassigning it again doesn't restart the robot.
+    if (member)
+      await prisma.conversation.updateMany({
+        where: { id: conversationId, OR: [{ aiRobotState: null }, { aiRobotState: 'active' }] },
+        data: { aiRobotState: 'stopped', aiRobotReason: 'assigned', aiRobotStateAt: new Date() },
+      });
 
     const payload = member && toAssigneeRef(member);
     const by = actor?.name ?? options.actorLabel ?? 'the system';

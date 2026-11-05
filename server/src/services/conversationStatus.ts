@@ -26,13 +26,22 @@ async function setStatus(auth: AuthPayload, conversationId: string, status: Conv
   const changed = current.status !== status || (status === 'snoozed' && current.snoozedUntil?.getTime() !== snoozedUntil?.getTime());
   if (changed) {
     // Conditional update so two agents clicking at once don't both "win" with different timestamps
+    // Replaced (the AI Robot: closing a chat starts a new robot session for when it's reopened; snoozing it stops the
+    // robot, as someone is handling it; services/aiRobot.ts):
+    // data:
+    //   status === 'closed'
+    //     ? { status, closedAt: new Date(), closedById: auth.userId, snoozedUntil: null, updatedBy: auth.userId }
+    //     : status === 'snoozed'
+    //       ? { status, snoozedUntil, closedAt: null, closedById: null, updatedBy: auth.userId }
+    //       : { status, closedAt: null, closedById: null, snoozedUntil: null, updatedBy: auth.userId },
+    const now = new Date();
     await prisma.conversation.updateMany({
       where: { id: conversationId, workspaceId: auth.workspaceId, status: current.status },
       data:
         status === 'closed'
-          ? { status, closedAt: new Date(), closedById: auth.userId, snoozedUntil: null, updatedBy: auth.userId }
+          ? { status, closedAt: now, closedById: auth.userId, snoozedUntil: null, updatedBy: auth.userId, aiRobotState: null, aiRobotReason: null, aiRobotStateAt: now, aiRobotSessionAt: now }
           : status === 'snoozed'
-            ? { status, snoozedUntil, closedAt: null, closedById: null, updatedBy: auth.userId }
+            ? { status, snoozedUntil, closedAt: null, closedById: null, updatedBy: auth.userId, ...(current.aiRobotState === 'stopped' ? {} : { aiRobotState: 'stopped', aiRobotReason: 'snoozed', aiRobotStateAt: now }) }
             : { status, closedAt: null, closedById: null, snoozedUntil: null, updatedBy: auth.userId },
     });
   }

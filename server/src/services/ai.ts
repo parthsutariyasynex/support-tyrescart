@@ -18,8 +18,16 @@ import { requireSupervisor } from './permissions.js';
 // The chat's messages go to the AI service; logs never hold the messages, the summary or the reply (counts only).
 
 export type AiKind = 'summary' | 'reply';
-// content: the request's data part (the chat in <conversation>, and for an update the summary so far in <summary>)
-type Ask = (kind: AiKind, system: string, content: string) => Promise<string>;
+// robot: the AI Robot's automatic replies (services/aiRobot.ts), which bring their own instructions and tools;
+// web: the robot's search_web tool (one web-search request, see searchWeb)
+export type AskKind = AiKind | 'robot' | 'web';
+// Tools the AI may call while writing (the AI Robot's catalogue and web search): run gets the tool's name and
+// arguments and returns its result as text (JSON) for the AI
+export type RobotTool = { name: string; description: string; parameters: Record<string, unknown> };
+export type RobotTools = { list: RobotTool[]; run: (name: string, args: Record<string, unknown>) => Promise<string> };
+// content: the request's data part (the chat in <conversation>, and for an update the summary so far in <summary>).
+// Fakes in tests get the robot's tools too, and may call them before answering.
+type Ask = (kind: AskKind, system: string, content: string, tools?: RobotTools) => Promise<string>;
 
 // AI Reply: the customer's latest message plus the chat around it, up to this much text (characters) before it and
 // as much after it (the team's messages since); AI Summary reads the whole chat
@@ -104,21 +112,21 @@ class AiHttpError extends Error {
 // Free models' servers are often briefly full (429, or 502/503 from the provider): tried once more after a short wait
 export const AI_RETRY_MS = { value: 2000 };
 const BUSY = new Set([429, 502, 503]);
-async function askOpenRouter(_kind: AiKind, system: string, content: string): Promise<string> {
+async function askOpenRouter(_kind: AskKind, system: string, content: string, model = env.aiModel): Promise<string> {
   try {
-    return await askOpenRouterOnce(system, content);
+    return await askOpenRouterOnce(system, content, model);
   } catch (err) {
     if (!(err instanceof AiHttpError) || !BUSY.has(err.status)) throw err;
     await new Promise((r) => setTimeout(r, AI_RETRY_MS.value));
-    return askOpenRouterOnce(system, content);
+    return askOpenRouterOnce(system, content, model);
   }
 }
 
-async function askOpenRouterOnce(system: string, content: string): Promise<string> {
+async function askOpenRouterOnce(system: string, content: string, model = env.aiModel): Promise<string> {
   const res = await fetch(`${env.openRouterBase}/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.openRouterApiKey}`, 'Content-Type': 'application/json', 'X-Title': 'TyresCart Support Chat' },
-    body: JSON.stringify({ model: env.aiModel, max_tokens: 2000, messages: [{ role: 'user', content: `${system}\n\n${content}` }] }),
+    body: JSON.stringify({ model, max_tokens: 2000, messages: [{ role: 'user', content: `${system}\n\n${content}` }] }),
     signal: AbortSignal.timeout(60_000),
   });
   const data = (await res.json().catch(() => null)) as { choices?: { message?: { content?: unknown } }[]; error?: { code?: unknown } } | null;
@@ -132,13 +140,13 @@ async function askOpenRouterOnce(system: string, content: string): Promise<strin
 let client: Anthropic | null = null;
 const anthropic = () => (client ??= new Anthropic({ apiKey: env.anthropicApiKey, timeout: 60_000, maxRetries: 1 }));
 
-async function askClaude(kind: AiKind, system: string, content: string): Promise<string> {
-  const fallback = FALLBACK_MODELS.has(env.aiModel);
+async function askClaude(kind: AskKind, system: string, content: string, model = env.aiModel): Promise<string> {
+  const fallback = FALLBACK_MODELS.has(model);
   const response = await anthropic().beta.messages.create({
-    model: env.aiModel,
+    model,
     max_tokens: 16000,
-    // A reply should come quickly; a summary is worth a little more thought
-    output_config: { effort: kind === 'reply' ? 'low' : 'medium' },
+    // A reply should come quickly; a summary is worth a little more thought (the AI Robot's replies too: quick)
+    output_config: { effort: kind === 'summary' ? 'medium' : 'low' },
     ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
     system,
     messages: [{ role: 'user', content }],
@@ -152,6 +160,133 @@ async function askClaude(kind: AiKind, system: string, content: string): Promise
   return text;
 }
 
+// The AI Robot's model: AI_ROBOT_MODEL, or the same one as AI Reply/Summary
+export const robotModel = () => (fake ? 'test' : env.aiRobotModel || env.aiModel);
+
+// One request for the AI Robot (services/aiRobot.ts), which writes its own instructions and checks the answer. Errors
+// are thrown as they are (AiHttpError with its HTTP status, or AppError): the robot records them in its own run.
+// Replaced (the robot can call tools: Tyrescart catalogue, web search):
+// export function askRobot(system: string, content: string): Promise<string> {
+//   if (fake) return fake('robot', system, content);
+//   const model = env.aiRobotModel || env.aiModel;
+//   return env.openRouterApiKey ? askOpenRouter('robot', system, content, model) : askClaude('robot', system, content, model);
+// }
+export function askRobot(system: string, content: string, tools?: RobotTools): Promise<string> {
+  if (fake) return fake('robot', system, content, tools);
+  const model = env.aiRobotModel || env.aiModel;
+  if (!tools?.list.length) return env.openRouterApiKey ? askOpenRouter('robot', system, content, model) : askClaude('robot', system, content, model);
+  return env.openRouterApiKey ? askOpenRouterWithTools(system, content, model, tools) : askClaudeWithTools(system, content, model, tools);
+}
+
+// Rounds of tool calls before the AI must answer (the last round offers no more tool calls)
+export const MAX_TOOL_ROUNDS = 5;
+
+type OpenRouterMessage = { role: string; content?: unknown; tool_calls?: { id: string; type?: string; function: { name: string; arguments?: string } }[]; tool_call_id?: string };
+
+async function openRouterRequest(body: Record<string, unknown>) {
+  const once = async () => {
+    const res = await fetch(`${env.openRouterBase}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.openRouterApiKey}`, 'Content-Type': 'application/json', 'X-Title': 'TyresCart Support Chat' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const data = (await res.json().catch(() => null)) as { choices?: { message?: OpenRouterMessage }[]; error?: { code?: unknown } } | null;
+    if (!res.ok || data?.error) throw new AiHttpError(typeof data?.error?.code === 'number' ? data.error.code : res.status);
+    const message = data?.choices?.[0]?.message;
+    if (!message) throw new AppError('The AI gave an empty answer. Try again.', 502, 'AI_UNAVAILABLE');
+    return message;
+  };
+  try {
+    return await once();
+  } catch (err) {
+    if (!(err instanceof AiHttpError) || !BUSY.has(err.status)) throw err;
+    await new Promise((r) => setTimeout(r, AI_RETRY_MS.value));
+    return once();
+  }
+}
+
+const argsOf = (raw: unknown): Record<string, unknown> => {
+  if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(typeof raw === 'string' && raw.trim() ? raw : '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+async function askOpenRouterWithTools(system: string, content: string, model: string, tools: RobotTools): Promise<string> {
+  const messages: OpenRouterMessage[] = [{ role: 'user', content: `${system}\n\n${content}` }];
+  const toolDefs = tools.list.map((t) => ({ type: 'function', function: t }));
+  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+    const message = await openRouterRequest({ model, max_tokens: 2000, messages, tools: toolDefs, tool_choice: round === MAX_TOOL_ROUNDS ? 'none' : 'auto' });
+    const calls = message.tool_calls ?? [];
+    if (!calls.length || round === MAX_TOOL_ROUNDS) {
+      const text = typeof message.content === 'string' ? message.content.trim() : '';
+      if (!text) throw new AppError('The AI gave an empty answer. Try again.', 502, 'AI_UNAVAILABLE');
+      return text;
+    }
+    messages.push({ role: 'assistant', content: message.content ?? '', tool_calls: calls });
+    for (const call of calls) messages.push({ role: 'tool', tool_call_id: call.id, content: await tools.run(call.function.name, argsOf(call.function.arguments)) });
+  }
+  throw new AppError('The AI gave an empty answer. Try again.', 502, 'AI_UNAVAILABLE');
+}
+
+async function askClaudeWithTools(system: string, content: string, model: string, tools: RobotTools): Promise<string> {
+  const fallback = FALLBACK_MODELS.has(model);
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content }];
+  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+    const response = await anthropic().beta.messages.create({
+      model,
+      max_tokens: 16000,
+      output_config: { effort: 'low' },
+      ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
+      system,
+      tools: tools.list.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Beta.BetaTool.InputSchema })),
+      tool_choice: round === MAX_TOOL_ROUNDS ? { type: 'none' } : { type: 'auto' },
+      messages,
+    });
+    if (response.stop_reason === 'refusal') throw new AppError('The AI declined to answer for this chat.', 422, 'AI_REFUSED');
+    const calls = response.content.flatMap((b) => (b.type === 'tool_use' ? [b] : []));
+    if (!calls.length || round === MAX_TOOL_ROUNDS) {
+      const text = response.content
+        .flatMap((b) => (b.type === 'text' ? [b.text] : []))
+        .join('')
+        .trim();
+      if (!text) throw new AppError('The AI gave an empty answer. Try again.', 502, 'AI_UNAVAILABLE');
+      return text;
+    }
+    messages.push({ role: 'assistant', content: response.content as Anthropic.Beta.BetaContentBlockParam[] });
+    const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+    for (const call of calls) results.push({ type: 'tool_result', tool_use_id: call.id, content: await tools.run(call.name, argsOf(call.input)) });
+    messages.push({ role: 'user', content: results });
+  }
+  throw new AppError('The AI gave an empty answer. Try again.', 502, 'AI_UNAVAILABLE');
+}
+
+export const webSearchAvailable = () => !!fake || !!env.openRouterApiKey;
+
+// The robot's search_web tool: one request to OpenRouter's web search (the "web" plugin) for a general tyre question.
+// Returns a short answer and the pages it used. Only through OpenRouter; never used for prices or stock (prompt rule).
+export async function searchWeb(question: string): Promise<{ answer: string; sources: string[] }> {
+  const system = [
+    'Answer this general question about tyres or cars in at most 3 short, factual sentences, in English. Use the web',
+    'results. Do not give prices, offers, stock or shop recommendations. If the results do not answer it, say so.',
+  ].join(' ');
+  if (fake) return { answer: await fake('web', system, question), sources: [] };
+  if (!env.openRouterApiKey) throw new AppError('Web search is not available on this server.', 503, 'AI_NOT_CONFIGURED');
+  const message = (await openRouterRequest({
+    model: env.aiRobotModel || env.aiModel,
+    max_tokens: 600,
+    plugins: [{ id: 'web', max_results: 3 }],
+    messages: [{ role: 'user', content: `${system}\n\nQuestion: ${question}` }],
+  })) as OpenRouterMessage & { annotations?: { type?: string; url_citation?: { url?: string } }[] };
+  const answer = typeof message.content === 'string' ? message.content.trim() : '';
+  const sources = (message.annotations ?? []).flatMap((a) => (a.type === 'url_citation' && a.url_citation?.url ? [a.url_citation.url] : [])).slice(0, 3);
+  return { answer, sources };
+}
+
 function requireConfigured() {
   if (!aiConfigured()) throw new AppError('AI is not set up on this server (OPENROUTER_API_KEY or ANTHROPIC_API_KEY).', 503, 'AI_NOT_CONFIGURED');
 }
@@ -161,9 +296,9 @@ function requireConfigured() {
 // Replaced (automation added: whether a team message was sent from AI Reply):
 // type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null };
 // const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true } as const;
-type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null; automation: string | null };
-const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true, automation: true } as const;
-function lineOf(m: ChatLine) {
+export type ChatLine = { id: string; createdAt: Date; direction: string; type: string; body: string; mediaName: string | null; deletedAt: Date | null; automation: string | null };
+export const LINE_FIELDS = { id: true, createdAt: true, direction: true, type: true, body: true, mediaName: true, deletedAt: true, automation: true } as const;
+export function lineOf(m: ChatLine) {
   const who = m.direction === 'in' ? 'Customer' : 'Team';
   const body = m.body.trim().slice(0, MESSAGE_CHARS);
   const what = m.type === 'text' || m.type === 'template' ? body : `[${m.type}${m.mediaName ? `: ${m.mediaName}` : ''}]${body ? ` ${body}` : ''}`;
@@ -211,7 +346,16 @@ const before = (c: Checkpoint) => ({ OR: [{ createdAt: { lt: c.createdAt } }, { 
 // A message sent from AI Reply (inbox.ts sendMessage, aiGenerated)
 const AI_REPLY = 'ai_reply';
 // In AI Reply's context a team message sent from an AI suggestion says so
-const replyLineOf = (m: ChatLine) => (m.direction === 'out' && m.automation === AI_REPLY ? lineOf(m).replace(/^Team:/, 'Team (sent from an AI suggestion):') : lineOf(m));
+// Replaced (the AI Robot's messages are named as such too; services/aiRobot.ts reads the chat with this):
+// const replyLineOf = (m: ChatLine) => (m.direction === 'out' && m.automation === AI_REPLY ? lineOf(m).replace(/^Team:/, 'Team (sent from an AI suggestion):') : lineOf(m));
+export const replyLineOf = (m: ChatLine) =>
+  m.direction !== 'out'
+    ? lineOf(m)
+    : m.automation === AI_REPLY
+      ? lineOf(m).replace(/^Team:/, 'Team (sent from an AI suggestion):')
+      : m.automation === 'ai_robot'
+        ? lineOf(m).replace(/^Team:/, 'AI Robot:')
+        : lineOf(m);
 
 // AI Reply's context: the messages (not deleted ones) right before the customer's latest message, nearest first, until
 // REPLY_CONTEXT_CHARS of text, then that message, then the team's messages after it (so the reply doesn't repeat them),

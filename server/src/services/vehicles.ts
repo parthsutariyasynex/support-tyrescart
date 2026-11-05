@@ -21,13 +21,6 @@ const text = (max: number, label: string) =>
     .nullish()
     .transform((v) => v || null);
 
-const requiredText = (max: number, label: string) =>
-  z
-    .string({ error: `Enter the ${label}` })
-    .trim()
-    .min(1, `Enter the ${label}`)
-    .max(max, `Keep the ${label} to ${max} characters or fewer`);
-
 // The latest calendar day anywhere on Earth (UTC+14), so "today" in the user's own time zone is never refused
 const latestToday = () => new Date(Date.now() + 14 * 3600_000).toISOString().slice(0, 10);
 
@@ -50,13 +43,16 @@ const day = (label: string) =>
 const detailsSchema = z.object({
   // Optional; stored uppercase, empty → null
   plateNumber: text(20, 'plate number').transform((v) => v?.toUpperCase() ?? null),
-  make: requiredText(60, 'make'),
-  model: requiredText(60, 'model'),
+  // Make, model and year are optional (empty → null); only tyre size 1 is required
+  make: text(60, 'make'),
+  model: text(60, 'model'),
   year: z
-    .number({ error: 'Enter the year' })
-    .int('Enter the year')
-    .min(1900, 'Enter the year')
-    .refine((y) => y <= new Date().getUTCFullYear() + 1, 'Enter the year'),
+    .number({ error: 'Enter a 4-digit year' })
+    .int('Enter a 4-digit year')
+    .min(1900, 'Enter a year from 1900')
+    .refine((y) => y <= new Date().getUTCFullYear() + 1, 'The year can be at most next year')
+    .nullish()
+    .transform((v) => v ?? null),
   registrationDate: day('registration date'),
   lastServiceDate: day('last purchase / service date'),
   tireSize1: z.string({ error: 'Enter tyre size 1' }).trim().min(1, 'Enter tyre size 1').max(30, 'Keep tyre size 1 to 30 characters or fewer'),
@@ -76,8 +72,12 @@ const vehicleSchema = detailsSchema.extend({
 // Edit: only the fields sent change (a vehicle never moves to another contact)
 const updateSchema = detailsSchema.partial();
 
-// The vehicle id from the app ("42") as the BIGINT it's stored as; anything else matches no vehicle
-const vehicleId = (id: string) => (/^\d{1,20}$/.test(id) && BigInt(id) <= 18446744073709551615n ? BigInt(id) : null);
+// The vehicle id from the app ("42") as the BIGINT it's stored as; anything else is "Vehicle not found"
+function vehicleId(id: string) {
+  const v = String(id ?? '').trim();
+  if (!/^\d{1,20}$/.test(v)) throw notFound('Vehicle');
+  return BigInt(v);
+}
 
 const toDay = (v: string | null) => (v ? new Date(`${v}T00:00:00Z`) : null);
 const fromDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
@@ -85,7 +85,7 @@ const fromDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 // API shape: id as a string (BIGINT), dates as yyyy-mm-dd, no workspace or audit ids
 function shape(v: Vehicle) {
   return {
-    id: String(v.id),
+    id: v.id.toString(),
     contactId: v.contactId,
     plateNumber: v.plateNumber,
     make: v.make,
@@ -174,8 +174,7 @@ export async function addVehicle(auth: AuthPayload, rawInput: unknown) {
 export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unknown) {
   await getPermissions(auth);
   const data = parse(updateSchema, rawInput);
-  const key = vehicleId(id);
-  const vehicle = key === null ? null : await prisma.vehicle.findFirst({ where: { id: key, workspaceId: auth.workspaceId, deletedAt: null } });
+  const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId(id), workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   const { registrationDate, lastServiceDate, ...rest } = data;
   const updated = await prisma.vehicle.update({
@@ -194,8 +193,7 @@ export async function updateVehicle(auth: AuthPayload, id: string, rawInput: unk
 // Soft delete
 export async function deleteVehicle(auth: AuthPayload, id: string) {
   await getPermissions(auth);
-  const key = vehicleId(id);
-  const vehicle = key === null ? null : await prisma.vehicle.findFirst({ where: { id: key, workspaceId: auth.workspaceId, deletedAt: null } });
+  const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId(id), workspaceId: auth.workspaceId, deletedAt: null } });
   if (!vehicle) throw notFound('Vehicle');
   await prisma.vehicle.update({
     where: { id: vehicle.id },

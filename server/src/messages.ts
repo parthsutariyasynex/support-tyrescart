@@ -11,6 +11,7 @@ import { inboundSentAt, laterOf } from './services/messagingWindow.js';
 import { errorCodeOf, errorDetailsOf, fitText, logEvent, waRef } from './services/logging.js';
 import { explainMetaError } from './services/metaErrors.js';
 import { locationBody, placeFromWebhook } from './services/locationFormat.js';
+import { onCustomerMessage } from './services/aiRobot.js';
 
 // Meta's explanation for a message it couldn't deliver as a normal type (e.g. type "unsupported", code 131051)
 export type ProviderError = { code?: number; title?: string; error_data?: { details?: string } };
@@ -222,6 +223,8 @@ export async function saveIncoming(workspaceId: string, m: Incoming) {
     console.error('[automations] failed', conversation.id, (err as Error).message);
     void logEvent({ level: 'ERROR', category: 'system', event: 'automation.failed', message: `Automations failed for an incoming message: ${(err as Error)?.message ?? err}`, workspaceId, messageId: message.id, conversationId: conversation.id, errorCode: errorCodeOf(err), errorDetails: errorDetailsOf(err) });
   });
+  // AI Robot: schedules its reply in an unassigned chat (after routing, which may have just assigned it). Never throws.
+  void onCustomerMessage(conversation.id);
   return message;
 }
 

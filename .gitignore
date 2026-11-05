@@ -20,6 +20,7 @@ tyrescart-support-*.json
 
 # Private notes with production credentials: never committed
 test.txt
+help.txt
 
 # Next.js & Build outputs (.next-*/: retired build folders, e.g. client/.next-retired-20261022T135408Z/)
 .next/

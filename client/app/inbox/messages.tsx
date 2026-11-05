@@ -64,7 +64,9 @@ export function messageActions(m: Message, viewer: { userId: string; isAdmin: bo
   const actions: MessageAction[] = canReply && m.status !== 'pending' ? ['reply'] : [];
   // Forward to other chats: what this app can send (text, photos, documents, voice notes); their own rules apply there
   if (m.status !== 'pending' && forwardKind(m)) actions.push('forward');
-  if (m.body) actions.push('copy');
+  // Copy: a photo or sticker copies the picture; anything else its text (never a "[video]"-style placeholder)
+  if ((m.type === 'image' || m.type === 'sticker') && m.mediaMime) actions.push('copy');
+  else if (m.body && !isMediaPlaceholder(m.body)) actions.push('copy');
   const mine = m.direction === 'out' && !!viewer && (viewer.isAdmin || m.sentById === viewer.userId);
   if (mine && m.type === 'text') actions.push('edit');
   // Pin / unpin for the whole team: owners and admins (sent messages only, not one still being sent)
@@ -195,8 +197,11 @@ export function MessageBubble({
         {reactions.length > 0 && <ReactionBadge message={m} isOut={isOut} onRemove={onReact && m.teamReaction ? () => onReact(null) : undefined} />}
 
         {m.automation && !m.senderName && (
-          <p className="mb-0.5 pr-4 text-[11px] font-semibold text-muted" title="Sent automatically (Settings → Simple automations)">
-            {m.automation === 'follow_up' ? '🤖 Follow-up' : '🤖 Auto-reply'}
+          <p
+            className={`mb-0.5 pr-4 text-[11px] font-semibold ${m.automation === 'ai_robot' ? 'text-primary' : 'text-muted'}`}
+            title={m.automation === 'ai_robot' ? 'Sent by the AI Robot (Settings → AI Robot)' : 'Sent automatically (Settings → Simple automations)'}
+          >
+            {m.automation === 'ai_robot' ? '🤖 AI Robot' : m.automation === 'follow_up' ? '🤖 Follow-up' : '🤖 Auto-reply'}
           </p>
         )}
         {m.senderName && (

@@ -14,6 +14,7 @@ import { webhookRouter } from './routes/webhook.js';
 import { liveRouter } from './routes/live.js';
 import { clientLogRouter } from './routes/clientLog.js';
 import { startAssignmentReminders } from './services/assignmentReminders.js';
+import { startAiRobot } from './services/aiRobot.js';
 import { startSnoozeWaker } from './services/conversationStatus.js';
 import { startDeletedContactsPurge } from './services/deletedContacts.js';
 import { startLogRetention } from './services/logRetention.js';
@@ -143,6 +144,7 @@ const stopSnoozeWaker = startSnoozeWaker();
 const stopPurge = startDeletedContactsPurge();
 const stopLogRetention = startLogRetention();
 const stopLiveSweeper = startLiveLocationSweeper();
+const stopAiRobot = startAiRobot();
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
     logEventSync({ level: 'SUCCESS', category: 'system', event: 'server.stopping', message: `Received ${signal}: stopping the scheduled jobs`, reason: `The process received ${signal} (Ctrl+C, a restart or a deploy)`, outcome: 'stopping', previousStatus: 'running', newStatus: 'stopping', data: { signal, pid: process.pid, uptimeSeconds: Math.round(process.uptime()) } });
@@ -151,4 +153,5 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
     stopPurge();
     stopLogRetention();
     stopLiveSweeper();
+    stopAiRobot();
   });

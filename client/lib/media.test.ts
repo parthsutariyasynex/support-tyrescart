@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { checkFile, documentLabel, filePreview, fileType, formatSize, imageProblem, isMediaPlaceholder, pastedName, quotePreview } from './media';
+import { checkFile, copyImage, documentLabel, filePreview, fitPastedImage, fileType, formatSize, IMAGE_MAX_BYTES, imageProblem, isMediaPlaceholder, pastedName, quotePreview } from './media';
 
 const MB = 1024 * 1024;
 describe('files before sending', () => {
@@ -59,4 +59,15 @@ test('a quoted message shows one line: its text, a file label, or that it was de
   assert.equal(quotePreview({ type: 'document', body: '', mediaName: 'invoice.pdf' }), '📄 invoice.pdf');
   assert.equal(quotePreview({ type: 'voice', body: '' }), '🎤 Voice message');
   assert.equal(quotePreview({ type: 'text', body: '', deleted: true }), 'This message was deleted');
+});
+
+test('fitPastedImage leaves images that fit, and other files, as they are', async () => {
+  const small = new File(['x'], 'shot.png', { type: 'image/png' });
+  assert.equal(await fitPastedImage(small), small);
+  const doc = new File([new Uint8Array(IMAGE_MAX_BYTES + 1)], 'big.pdf', { type: 'application/pdf' });
+  assert.equal(await fitPastedImage(doc), doc);
+});
+
+test('copyImage explains when the browser cannot copy images', async () => {
+  await assert.rejects(copyImage('m1'), /can't copy images/);
 });

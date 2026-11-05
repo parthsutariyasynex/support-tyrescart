@@ -215,6 +215,51 @@ export async function updateAutomationSettings(auth: AuthPayload, rawInput: unkn
 
 // --- Running (called for every customer message)
 
+// An automatic text message (Simple automations' auto-reply, the AI Robot): saved as pending with its automation mark,
+// sent with sendText, logged, and shown live in the inbox. Returns the saved message (status sent or failed), or null
+// when the chat (or the whole workspace) was deleted while WhatsApp was answering: deleting it removes this message
+// with it (updateMany doesn't throw for a row that's gone), and then there's nothing left to update or show.
+// The caller has already decided and claimed the send (no checks here).
+export async function sendAutomatedText(
+  workspaceId: string,
+  conversationId: string,
+  account: Parameters<typeof sendText>[0],
+  waId: string,
+  body: string,
+  automation: 'auto_reply' | 'ai_robot',
+) {
+  const message = await prisma.message.create({ data: { conversationId, direction: 'out', type: 'text', body, status: 'pending', automation } });
+  let wamid: string | null = null;
+  let sendError: unknown;
+  try {
+    wamid = await withMessageTrace({ messageId: message.id, conversationId }, () => sendText(account, waId, body));
+  } catch (err) {
+    sendError = err;
+  }
+  logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'text', automation, error: sendError, waMessageId: wamid, content: body });
+  const result = sendError === undefined ? { waMessageId: wamid, status: 'sent' } : { status: 'failed', error: (sendError as Error).message };
+  const { count: kept } = await prisma.message.updateMany({ where: { id: message.id }, data: result });
+  await prisma.conversation.updateMany({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
+  const saved = kept ? await prisma.message.findUnique({ where: { id: message.id } }) : null;
+  const conversation = saved ? await prisma.conversation.findUnique({ where: { id: conversationId }, include: { contact: true } }) : null;
+  if (saved && conversation) {
+    emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
+    return saved;
+  }
+  const what = automation === 'auto_reply' ? 'the auto-reply' : 'the AI Robot reply';
+  void logEvent({
+    level: 'WARNING',
+    category: 'message',
+    event: `automation.${automation}_discarded`,
+    message: `The chat was deleted while ${what} was being sent (${sendError === undefined ? 'WhatsApp accepted it' : 'WhatsApp refused it'})`,
+    outcome: 'discarded',
+    errorDetails: `The chat (or its workspace) was deleted while Meta was answering, so the reply has nothing left to update or show${sendError === undefined ? '' : `. WhatsApp had refused it: ${(sendError as Error)?.message ?? sendError}`}`,
+    workspaceId,
+    data: { conversationId, messageId: message.id },
+  });
+  return null;
+}
+
 export async function runAutomations(workspaceId: string, conversationId: string, now = new Date()) {
   const row = await prisma.automationSettings.findUnique({ where: { workspaceId } });
   if (!row?.enabled) return { assigned: null as string | null, replied: null as string | null };
@@ -257,38 +302,12 @@ export async function runAutomations(workspaceId: string, conversationId: string
       const body = fillVariables(text, await variableValues(workspaceId, conversationId));
       // Claimed first (compare-and-set on lastAutoReplyAt), so two messages arriving together send one reply
       const { count } = await prisma.conversation.updateMany({ where: { id: conversationId, lastAutoReplyAt: conv.lastAutoReplyAt }, data: { lastAutoReplyAt: now } });
-      if (count) {
-        const message = await prisma.message.create({ data: { conversationId, direction: 'out', type: 'text', body, status: 'pending', automation: 'auto_reply' } });
-        let wamid: string | null = null;
-        let sendError: unknown;
-        try {
-          wamid = await withMessageTrace({ messageId: message.id, conversationId }, () => sendText(account, conv.contact.waId, body));
-        } catch (err) {
-          sendError = err;
-        }
-        logMessageSend({ workspaceId, conversationId, messageId: message.id, type: 'text', automation: 'auto_reply', error: sendError, waMessageId: wamid, content: body });
-        // The chat (or the whole workspace) can be deleted while WhatsApp is answering, which removes this message
-        // with it: updateMany doesn't throw for a row that's gone, and then there's nothing left to update or show
-        const result = sendError === undefined ? { waMessageId: wamid, status: 'sent' } : { status: 'failed', error: (sendError as Error).message };
-        const { count: kept } = await prisma.message.updateMany({ where: { id: message.id }, data: result });
-        await prisma.conversation.updateMany({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
-        const saved = kept ? await prisma.message.findUnique({ where: { id: message.id } }) : null;
-        const conversation = saved ? await prisma.conversation.findUnique({ where: { id: conversationId }, include: { contact: true } }) : null;
-        if (saved && conversation) {
-          emitToWorkspace(workspaceId, 'message:new', { conversation, message: await withSender(saved) });
-          replied = saved.id;
-        } else
-          void logEvent({
-            level: 'WARNING',
-            category: 'message',
-            event: 'automation.auto_reply_discarded',
-            message: `The chat was deleted while the auto-reply was being sent (${sendError === undefined ? 'WhatsApp accepted it' : 'WhatsApp refused it'})`,
-            outcome: 'discarded',
-            errorDetails: `The chat (or its workspace) was deleted while Meta was answering, so the reply has nothing left to update or show${sendError === undefined ? '' : `. WhatsApp had refused it: ${(sendError as Error)?.message ?? sendError}`}`,
-            workspaceId,
-            data: { conversationId, messageId: message.id },
-          });
-      }
+      // Replaced (the sending part is shared with the AI Robot: sendAutomatedText above):
+      // if (count) {
+      //   const message = await prisma.message.create({ data: { conversationId, direction: 'out', type: 'text', body, status: 'pending', automation: 'auto_reply' } });
+      //   ... sent with sendText, logged (logMessageSend), shown (message:new), or logged as discarded if the chat was deleted meanwhile
+      // }
+      if (count) replied = (await sendAutomatedText(workspaceId, conversationId, account, conv.contact.waId, body, 'auto_reply'))?.id ?? null;
     }
   } catch (err) {
     console.error('[automations] auto-reply failed', conversationId, (err as Error).message);
