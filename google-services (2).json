@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "305453757911",
+    "project_id": "crm-tyrescart",
+    "storage_bucket": "crm-tyrescart.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:305453757911:android:d097aae479b08eb0450792",
+        "android_client_info": {
+          "package_name": "tech.synex.tyrescart_support"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDzG7gzmbiES4IvS5iEdf6ivPvN-H9Y6Pk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

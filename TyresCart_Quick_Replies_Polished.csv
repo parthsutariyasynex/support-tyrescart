@@ -1,0 +1,161 @@
+id,shortcut,description,category,created_by,updated_by,status,sort_order,created_at,updated_at
+1,BrandPreference,"Do you have a brand you trust, or a budget in mind? Share either one and I'll personally shortlist the best-value options for you, with clear pricing from the start 😊",car_tyres,NULL,NULL,1,2,7/16/2026 15:38,7/22/2026 12:17
+2,Carmake,"I'd be glad to help you find the right tyres. Could you please share your car's make, model and year?",car_tyres,NULL,NULL,1,5,7/16/2026 15:38,7/19/2026 16:54
+3,Installationsupport,"We offer free fitment at our partner garages for a quick, hassle-free fit. If you prefer, our mobile van can come to your doorstep for an additional AED 300.00. Whichever you choose, we'll confirm every detail with you beforehand.",car_services,NULL,4,1,3,7/16/2026 15:38,7/22/2026 12:17
+4,Stockcheck,Please give me a moment while I confirm the exact stock for you.,car_tyres,NULL,NULL,1,6,7/16/2026 15:38,7/19/2026 16:54
+5,Payment Options Available,"At TyresCart.ae you can pay by Credit/Debit Card, or split the cost with Tamara / Tabby into installments of up to 12 months. I'm happy to guide you through checkout whenever you're ready.",other,NULL,4,1,20,7/16/2026 15:38,7/19/2026 20:15
+6,Orderconfirm,"Thank you for your order at TyresCart.ae. Before we proceed, I'd like to confirm the details with you. Our team will then verify the physical stock in our warehouse and keep you updated honestly at every step.",car_tyres,NULL,NULL,1,3,7/16/2026 15:38,7/19/2026 16:54
+7,Location,"To assist you better, may I ask where in the UAE you are located? This helps us suggest the most convenient fitting option for you.",car_tyres,NULL,NULL,1,7,7/16/2026 15:38,7/19/2026 16:54
+8,Closinghours,"We're past our working hours, so we can't physically verify the stock right now. I'd rather not give you unconfirmed information, so may I update you first thing tomorrow morning?",car_tyres,NULL,NULL,1,8,7/16/2026 15:38,7/19/2026 16:54
+9,followup first time,Hello 👋 I'm following up on your earlier inquiry. Is there anything I can clarify or help you with?,car_tyres,NULL,6,1,9,7/16/2026 15:38,7/19/2026 16:54
+10,Discountpayment,"How are you planning to pay? Some payment methods may qualify for a better price, and I'll gladly check what we can offer you.",car_tyres,NULL,NULL,1,10,7/16/2026 15:38,7/19/2026 16:54
+11,Onlinestore,"TyresCart.ae is a trusted online tyre shop in the UAE, offering premium tyres, wheels, car batteries and automotive care. We combine convenient online ordering and competitive, transparent pricing with professional installation through our partner network across Abu Dhabi, Dubai and the other Emirates.",car_services,NULL,NULL,1,11,7/16/2026 15:38,7/19/2026 16:54
+12,Wheelalignment,"Your wheel alignment check is free of charge. If any adjustment is needed, the fixing charge depends on the alignment report, and alignment services usually start from AED 150+.",car_services,NULL,NULL,1,12,7/16/2026 15:38,7/19/2026 16:54
+13,Tyresize,"Could you please share your current tyre size? If you're not sure, a photo of the tyre sidewall is perfect and we'll read it for you.",car_tyres,NULL,NULL,1,13,7/16/2026 15:38,7/19/2026 16:54
+14,paymentpreference,"Once your payment is complete, please send us a screenshot so our accounts team can verify it and update your order promptly.",car_tyres,NULL,NULL,1,14,7/16/2026 15:38,7/19/2026 16:54
+15,tyresqty,How many tyres are you looking to buy?,car_tyres,NULL,NULL,1,15,7/16/2026 15:38,7/19/2026 16:54
+16,choicefinal,"Please take your time to decide. Once you've finalised your choice, just let us know and we'll take care of the rest.",car_tyres,NULL,NULL,1,16,7/16/2026 15:38,7/19/2026 16:54
+17,quickorder,You can make your payment here: https://www.tyrescart.ae/quick-order-payment/,car_tyres,NULL,NULL,1,17,7/16/2026 15:38,7/19/2026 16:54
+18,Incomplete Order,"It looks like you started an online order at TyresCart.ae but didn't complete it. Did anything go wrong, or is there a question I can answer? We're happy to help.",car_tyres,NULL,6,1,18,7/16/2026 15:38,7/19/2026 16:54
+19,referring,"Thank you for choosing TyresCart.ae 🇦🇪. If you were happy with our service, it would mean a great deal to us if you recommended TyresCart.ae to your family, friends or colleagues. Your trust is what helps us grow 🤗",car_tyres,NULL,NULL,1,19,7/16/2026 15:38,7/19/2026 16:54
+20,Car Insurance Process,"To prepare your insurance quote, please share your *Driving License*, *Mulkiya* and *Emirates ID*. With these we can find you the most accurate and best-value offers.",car_insurance,NULL,6,1,20,7/16/2026 15:38,7/19/2026 16:54
+21,confirmtyresize,"To make sure we supply exactly the right tyres, please send us clear photos of your tyre sidewall so we can verify the size selected in your order.",car_tyres,NULL,NULL,1,21,7/16/2026 15:38,7/19/2026 16:54
+22,Leave Customer Cross Sale Approach Service,"Also, something you may find useful 👇
+
+At TyresCart.ae we're here for more than just tyres, and we'd love to look after your whole car:
+
+🛡️ Affordable car insurance (Comprehensive & Third Party)
+🔋 Fast battery replacement & emergency jump start
+🔧 Brake pad replacement for safer driving
+🛠️ Essential car services under one roof
+✨ Stylish rims & wheels to upgrade your ride
+
+📞 Whenever you need us, just send a message. We're always happy to help 😊",other,NULL,6,1,22,7/16/2026 15:38,7/22/2026 12:17
+23,fitting,We hope everything went smoothly. How was your fitting experience?,car_services,NULL,NULL,1,23,7/16/2026 15:38,7/19/2026 16:54
+24,Transparency,"At TyresCart.ae, transparency is the foundation of everything we do. We believe in clear pricing, honest advice and reliable service, and we stay by your side long after the sale, so you can always trust us first with your vehicle 😊",car_tyres,NULL,NULL,1,24,7/16/2026 15:38,7/19/2026 16:54
+25,alternate,"Our customers are at the heart of TyresCart.ae. We build lasting relationships through honest advice, dependable service and constant support, so you can count on us first for everything your car needs 😊",car_tyres,NULL,NULL,1,1,7/16/2026 15:38,7/29/2026 10:11
+26,readyorder,"To prepare your order and invoice, please share the following details: Name, Phone, Email, Car Plate Number, Car Make, Car Model, Car Year.",car_tyres,NULL,NULL,1,26,7/16/2026 15:38,7/19/2026 16:54
+27,completeinstalltion,"We trust your tyre fitting was completed to your complete satisfaction. If you need anything on the road ahead, please feel free to contact us. Your safety and satisfaction are always our priority 🚗😊",car_services,NULL,NULL,1,27,7/16/2026 15:38,7/19/2026 16:54
+28,invoice,"Invoice in the Name -
+*Trade Name:* DSP Trade Hub FZ-LLC
+*Address:* FDAM0707, Compass Building, Al Shohada Road, AL Hamra Industrial Zone-FZ, Ras Al Khaimah, 1624, Ras Al Khaimah +971505069575
+*TRN:* 105036835400003",car_tyres,NULL,NULL,1,28,7/16/2026 15:38,7/22/2026 12:17
+29,offline,"Thank you for reaching out! We've received your contact details through our website, TyresCart.ae, and we're glad to assist you.",car_tyres,NULL,6,1,29,7/16/2026 15:38,7/19/2026 16:54
+30,greetings,"Hello, and welcome to TyresCart.ae! It's a pleasure to assist you. How can we help with your inquiry today?",car_tyres,NULL,6,1,30,7/16/2026 15:38,7/19/2026 16:54
+31,tyrehelp,Looking for tyres? We offer a wide range of brands and sizes. Share your car details or tyre size and I'll help you find the right fit.,car_tyres,NULL,NULL,1,31,7/16/2026 15:38,7/19/2026 16:54
+32,delivery,"We offer same-day or next-day delivery within Abu Dhabi & Dubai 🚚, and free installation is available at our partner locations.",car_services,NULL,NULL,1,32,7/16/2026 15:38,7/19/2026 16:54
+33,nostock,"I'm sorry, this item is currently out of stock. Would you like us to let you know as soon as it's available, or shall I suggest a suitable alternative?",car_tyres,NULL,NULL,1,33,7/16/2026 15:38,7/19/2026 16:54
+34,paymentconfirm,"Thank you, we've received your payment! Your order is now being processed, and a confirmation email will reach you shortly.",car_tyres,NULL,NULL,1,34,7/16/2026 15:38,7/19/2026 16:54
+35,feedback,"Your feedback helps us serve you better. When you have a minute, we'd love to know how we did 😊",car_tyres,NULL,NULL,1,35,7/16/2026 15:38,7/19/2026 16:54
+37,stockreserve,"To reserve your stock, we kindly request you to make the payment online using the link. Once received, we'll arrange the tyres with our installer partner based on the available appointment time.",car_services,NULL,NULL,1,36,7/16/2026 15:38,7/19/2026 16:54
+38,done,May I check whether your tyre installation has been completed?,car_services,NULL,NULL,1,37,7/16/2026 15:38,7/19/2026 16:54
+39,stockcheck2,"Once we've confirmed the stock, we'll send you the payment link so you can secure your order.",car_tyres,NULL,NULL,1,38,7/16/2026 15:38,7/19/2026 16:54
+40,pricegaurantee,"Fair and honest pricing matters to us, and we always aim to give you the best price we possibly can.",car_tyres,NULL,NULL,1,39,7/16/2026 15:38,7/19/2026 16:54
+41,forward,"Thank you! I've passed your details to the concerned department, and they'll contact you shortly by WhatsApp or phone.",car_tyres,NULL,NULL,1,40,7/16/2026 15:38,7/19/2026 16:54
+42,understand,"Thank you for your understanding. We want you to feel informed at every step, so please feel free to contact us any time you have a question.",car_tyres,NULL,NULL,1,41,7/16/2026 15:38,7/19/2026 16:54
+43,tyrepreference,Please let us know your preferred brand and we'll check its availability for you.,car_tyres,NULL,NULL,1,42,7/16/2026 15:38,7/19/2026 16:54
+44,discounttyre,"Let us check the stock first, and we'll do our best to come back with the most competitive offer we can.",car_tyres,NULL,NULL,1,43,7/16/2026 15:38,7/19/2026 16:54
+45,googlepreview,Happy with your purchase at TyresCart.ae? 😊 We'd really value your honest feedback. You can leave us a quick Google review here: https://g.page/r/CQ_gDJtAoV1oEAI/review,car_tyres,NULL,NULL,1,44,7/16/2026 15:38,7/19/2026 16:54
+46,experience,We hope your online purchase went smoothly 😊 How was your experience with the fitting at our installer partner? Your honest feedback helps us improve.,car_services,NULL,NULL,1,45,7/16/2026 15:38,7/19/2026 16:54
+47,yearpreference,"Which manufacturing year would you prefer, 2025 or 2026?",car_tyres,NULL,NULL,1,46,7/16/2026 15:38,7/19/2026 16:54
+48,expirepaymentlink,A quick note: the payment link expires 15 minutes after it is generated.,car_tyres,NULL,NULL,1,47,7/16/2026 15:38,7/19/2026 16:54
+49,tyrescart,"TyresCart.ae is an independent online business working with multiple suppliers, which lets us offer a wide range of options to suit your preferences. We're here to support you throughout your journey with us.",car_tyres,NULL,NULL,1,48,7/16/2026 15:38,7/19/2026 16:54
+50,currentbrand,Which brand of tyres is currently on your car?,car_tyres,NULL,NULL,1,49,7/16/2026 15:38,7/19/2026 16:54
+51,thanks,"Thank you for your business! It was a pleasure serving you, and we look forward to helping you again.",car_tyres,NULL,NULL,1,50,7/16/2026 15:38,7/19/2026 16:54
+52,reserve,"To confirm and reserve your tyres, we kindly request you to pay online. Once we receive the payment, we'll prepare the tyres at our warehouse and arrange them at your installation location.",car_services,NULL,NULL,1,51,7/16/2026 15:38,7/19/2026 16:54
+53,Welcome TyresCart.ae Customer,"A warm welcome to TyresCart.ae 👋
+
+We're here for more than just tyres. We'd love to look after your whole car:
+
+🚗 Car tyres from all major brands
+🛡️ Car insurance (3rd Party & Comprehensive)
+🔋 Battery replacement & emergency service
+🔧 Brake pad replacement & service
+🛠️ Essential quick car services (Oil/AC/etc)
+
+📞 Whenever you need us, just send a message. We're always happy to help 😊",other,NULL,6,1,52,7/16/2026 15:38,7/22/2026 12:17
+54,reviewprice,We regularly review competitor pricing so that our customers get the best possible prices on the same brands. It also helps us discuss our cost expectations openly with our partners.,car_tyres,NULL,NULL,1,53,7/16/2026 15:38,7/19/2026 16:54
+55,acknowledgeinstaller,"Please share this document with the installer for their acknowledgement. Once they confirm, they can go ahead and set up your tyre fitting appointment.",car_services,NULL,NULL,1,54,7/16/2026 15:38,7/19/2026 16:54
+56,installerlocation,"We have fitting installers in every Emirate across the UAE, so a professional fitter is always close to you.",car_services,NULL,NULL,1,55,7/16/2026 15:38,7/19/2026 16:54
+57,qualityproducts,"TyresCart.ae is committed to quality products and dependable support, and we'll be here for you until it's time for your next set of tyres.",car_tyres,NULL,NULL,1,56,7/16/2026 15:38,7/19/2026 16:54
+58,opportunity,We'd be grateful for the opportunity to serve you. We promise expert care and honest value for as long as you're on the road with our tyres 🤗,car_tyres,NULL,NULL,1,57,7/16/2026 15:38,7/19/2026 16:54
+59,quickordercard,You can make your payment here: https://www.tyrescart.ae/quick-order-payment-card/,car_tyres,NULL,NULL,1,58,7/16/2026 15:38,7/19/2026 16:54
+60,appointmentcustomer,We'll send you your Work Order Appointment copy shortly. Please show it to the installer when you arrive so your fitting goes smoothly and quickly.,car_services,NULL,NULL,1,59,7/16/2026 15:38,7/19/2026 16:54
+61,clearimage,Could you also send a clear photo of your current tyres showing the size marking? This lets us double-check that the size you ordered is correct.,car_tyres,NULL,NULL,1,60,7/16/2026 15:38,7/19/2026 16:54
+62,VAT,Trade Name: DSP Trade Hub FZ-LLC TRN: 105036835400003,car_tyres,NULL,NULL,1,61,7/16/2026 15:38,7/19/2026 16:54
+64,reviews,"Dear Valued Customer,
+
+Thank you for choosing TyresCart.ae for your recent tyre purchase. We want your 'click-to-fit' experience to be seamless, and your honest feedback tells us how well we're doing.
+
+We've recently launched our official Trustpilot page and would be honored if you could share your experience with us. Your review helps other UAE drivers decide with confidence.
+
+Share your feedback here: https://www.trustpilot.com/review/tyrescart.ae
+
+Thank you for being part of our journey!",car_tyres,NULL,NULL,1,62,7/16/2026 15:38,7/22/2026 12:17
+65,review,"Thank you for choosing TyresCart.ae for your recent tyre purchase. We want your 'click-to-fit' experience to be seamless, and your honest feedback tells us how well we're doing.
+
+We've recently launched our official Trustpilot page and would be honored if you could share your experience with us. Your review helps other UAE drivers decide with confidence.
+
+Share your feedback here: https://www.trustpilot.com/review/tyrescart.ae
+
+Thank you for being part of our journey!",car_tyres,NULL,NULL,1,63,7/16/2026 15:38,7/22/2026 12:17
+66,Insurance Documents,"As per *Central Bank of the UAE (CBUAE)* guidelines, we are not permitted to collect documents such as a driving license, Emirates ID or vehicle registration copy, nor can we accept confirmations through WhatsApp or any instant messaging application. Thank you for your understanding.
+
+Kindly email the required documents to:
+info@tyrescart.ae",car_insurance,NULL,6,1,64,7/16/2026 15:38,7/22/2026 12:17
+67,googlemappreview,"If you have a moment, we'd be grateful for a Google review at this link: https://maps.app.goo.gl/wY8wmukb8K8e63E39 Your feedback means a lot to our team. Drive safe! 🚘",car_tyres,NULL,NULL,1,65,7/16/2026 15:38,7/19/2026 16:54
+68,Insurance Quote,"Just so you know 👇
+
+At TyresCart.ae we look after more than your tyres 🛡️
+
+Get *reliable and affordable car insurance* tailored to your needs:
+
+✅ Comprehensive Insurance – Full protection for total peace of mind.
+
+✅ Third-Party Liability – Essential coverage at the best rates.
+
+📞 Would you like a quick quote? Just send us a message and we'll take care of it 😊",car_insurance,NULL,6,1,66,7/16/2026 15:38,7/22/2026 12:17
+69,No Tabby/Tamara Payment Option,"For selected premium tyres on our website, Tabby/Tamara has been disabled so that we can keep prices competitive for you. For these items you will normally see only the standard card payment option at checkout.",other,NULL,6,1,67,7/16/2026 15:38,7/19/2026 16:54
+71,otherprice,"May I ask where you saw this price? We're always expanding our supplier network to improve availability and offer our customers the most competitive rates, so your information is genuinely helpful 😊",car_tyres,NULL,NULL,1,68,7/16/2026 15:38,7/19/2026 16:54
+72,otherprice2,A wider supplier network lets us stay competitive and pass the savings directly on to you 📈,car_tyres,NULL,NULL,1,69,7/16/2026 15:38,7/19/2026 16:54
+73,Got Deal from Other,"Congratulations on finding a good deal! If you ever need car or bike tyres, a battery or insurance in future, please keep us in mind. We'd be glad to look after you with our best service and rates 👍",other,NULL,6,1,70,7/16/2026 15:38,7/19/2026 16:54
+74,updatestatusorder,"Once your tyre fitting is complete, please let us know so we can update your order status and close your file 🤗",car_services,NULL,NULL,1,71,7/16/2026 15:38,7/19/2026 16:54
+75,cardpaymentlink,You can complete your payment online using this link: https://qr.totalpay.ae/202509043268b96dcc10555,car_tyres,NULL,NULL,1,72,7/16/2026 15:38,7/19/2026 16:54
+76,Payment Advance,"We need an advance payment to process your order. Once it's confirmed, we'll reserve your tyres and have them ready at the installer for your scheduled fitting.",car_services,NULL,6,1,73,7/16/2026 15:38,7/19/2026 16:54
+77,klever,"By the way, our parent company, Klever.ae, also provides Software/IT and Digital Marketing services in the UAE. If you ever need support with technology or marketing, we'd be delighted to help 🤗",other,NULL,1,1,74,7/16/2026 15:38,7/19/2026 16:54
+78,Tabby/Tamara Payment Option,"To be transparent with you: because of narrow margins on certain items, we're usually unable to offer *Tabby/Tamara installment* plans on them. If you'd still prefer to pay in installments, we can arrange it with an additional 5% processing fee on the total amount.",other,NULL,6,1,75,7/16/2026 15:38,7/19/2026 16:54
+80,Renew Car Insurance,"With your vehicle renewal coming up, can we help with your car insurance? We offer both Full Comprehensive and Third-Party options, and we can prepare a quick quote for you today.",car_insurance,NULL,6,1,76,7/16/2026 15:38,7/19/2026 16:54
+81,Prepare Order,"Once your payment is successful, please share these details so we can prepare your order and invoice: Name, Phone, Email, Car Plate Number, Car Make, Car Model, Car Year.",car_tyres,NULL,6,1,77,7/16/2026 15:38,7/19/2026 16:54
+82,Alternate Brand Choice,Would you be open to alternative brands that offer the same high quality within your price range? I'd be glad to compare them with you.,car_tyres,NULL,6,1,78,7/16/2026 15:38,7/19/2026 16:54
+83,Order Online,"TyresCart.ae is an online retailer working with certified fitting centers across the UAE. To secure your order, simply complete the payment online; we'll reserve your tyres immediately and schedule your fitting at the time and location that suit you best 😊",car_services,NULL,6,1,79,7/16/2026 15:38,7/19/2026 16:54
+84,followup second time,"I just wanted to check whether you're still looking for tyres for your vehicle. If you have any questions about brands, availability or pricing, please ask. I'm here to help you get the best deal 😊",car_tyres,NULL,6,1,80,7/16/2026 15:38,7/19/2026 16:54
+86,Hours,"Our business hours are:
+Monday: 09:00 - 18:00
+Tuesday: 09:00 - 18:00
+Wednesday: 09:00 - 18:00
+Thursday: 09:00 - 18:00
+Friday: 09:00 - 18:00
+Saturday: 09:00 - 18:00
+Sunday: Closed",car_tyres,NULL,NULL,1,81,7/16/2026 15:38,7/22/2026 12:17
+88,Price Includes,"Fully fitted price per tyre
+
+There are no extras to pay on the day of your visit for the tyre fitting.
+
+Your price includes:
+- VAT
+- Fitting (bead lock wheels etc. excluded)
+- Balancing
+- New rubber valve (standard valve only)
+- Delivery to the installer
+- Disposal of old tyres
+- On purchase of 4 tyres, 1 FREE tyre rotation every 20,000 km per year
+
+Please note: wheel alignment is not included.",car_services,NULL,6,1,82,7/16/2026 15:38,7/22/2026 12:17
+89,Car Battery Request,"TyresCart.ae would be happy to help you find the perfect battery for your vehicle! To check exact compatibility and stock, and to give you the best price, could you please share a few details?
+
+🚗 Car make & model (e.g., Nissan Patrol, Toyota Camry)
+📅 Year of manufacture (e.g., 2021)
+🔋 Current battery: a photo of it or its model number
+
+Once you share these, we'll send over the best options right away 😊",battery,6,6,1,83,7/18/2026 10:49,7/22/2026 12:17
+90,klevertest,This description is klever test add data ,other,NULL,NULL,1,100,NULL,NULL

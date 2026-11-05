@@ -10,6 +10,7 @@ const FLAG_FONT = 'Twemoji Country Flags';
 export const metadata: Metadata = {
   title: `${APP_NAME} — WhatsApp Business SaaS`,
   description: 'Shared inbox, broadcasts and automations on official WhatsApp Cloud API',
+  icons: { icon: '/favicon.ico?v=2' },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

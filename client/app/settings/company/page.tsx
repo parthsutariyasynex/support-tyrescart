@@ -220,7 +220,7 @@ function Company({ me }: { me: Me }) {
             </section>
           </>
         ) : (
-          <section className="mt-5">
+          <section className="mt-5 space-y-5">
             <dl className="divide-y divide-line-soft rounded-xl border border-line bg-surface">
               {row(
                 'Status',
@@ -279,6 +279,7 @@ function ConnectWhatsApp({ current }: { current: Me['workspace']['whatsapp'] }) 
   const [accessToken, setAccessToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [checks, setChecks] = useState<WhatsAppCheck[] | null>(null);
   const [confirming, setConfirming] = useState(false);
   const connected = !!current?.displayPhone;
@@ -288,12 +289,14 @@ function ConnectWhatsApp({ current }: { current: Me['workspace']['whatsapp'] }) 
   async function connect() {
     setBusy(true);
     setError('');
+    setSuccess('');
     setChecks(null);
     try {
       const account = await connectWhatsApp({ wabaId: wabaId.trim(), phoneNumberId: phoneNumberId.trim(), accessToken: accessToken.trim() });
       setChecks(account.checks ?? []);
       setAccessToken('');
       setConfirming(false);
+      setSuccess(`Connected: ${account.displayPhone}`);
       showToast(`whatsapp:${Date.now()}`, '', 'WhatsApp connected', `${account.displayPhone} passed all 7 checks. Reloading…`);
       setTimeout(() => window.location.reload(), 3000); // every page shows the new number after the reload
     } catch (e) {
@@ -313,24 +316,26 @@ function ConnectWhatsApp({ current }: { current: Me['workspace']['whatsapp'] }) 
 
   return (
     <form
-      className="mt-5 rounded-xl border border-line bg-surface p-6"
+      className="rounded-xl border border-line bg-surface p-6"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!ready || busy) return;
+        if (busy) return;
+        if (!ready) return setError(accessToken.trim() && accessToken.trim().length < 10 ? 'That access token looks too short.' : 'All fields are required.');
         if (replacing) setConfirming(true);
         else void connect();
       }}
     >
       <h3 className="text-[15px] font-bold text-ink">{connected ? 'Update WhatsApp connection' : 'Connect WhatsApp'}</h3>
       <p className="mt-1 text-[13px] text-body-soft">
-        From Meta: WhatsApp Manager (account and phone number IDs) and Business Settings → System users (a token that never expires, with whatsapp_business_messaging and
-        whatsapp_business_management). Nothing is saved unless all 7 checks with Meta pass.
+        From Meta: the account and phone number IDs are in <span className="font-medium text-ink">Meta Developer Dashboard → WhatsApp → API Setup</span> (or WhatsApp
+        Manager); the token is from Business Settings → System users (one that never expires, with whatsapp_business_messaging and whatsapp_business_management).
+        Nothing is saved unless all 7 checks with Meta pass.
       </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        {field('waba-id', 'WhatsApp Business account ID', wabaId, setWabaId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.wabaId || '' })}
-        {field('phone-number-id', 'Phone number ID', phoneNumberId, setPhoneNumberId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.phoneNumberId || '' })}
+        {field('waba-id', 'WhatsApp Business account ID', wabaId, setWabaId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.wabaId || 'e.g. 123456789012345' })}
+        {field('phone-number-id', 'Phone number ID', phoneNumberId, setPhoneNumberId, { inputMode: 'numeric', autoComplete: 'off', placeholder: current?.phoneNumberId || 'e.g. 987654321098765' })}
         <div className="sm:col-span-2">
-          {field('access-token', 'Permanent access token (System User)', accessToken, setAccessToken, { type: 'password', autoComplete: 'off', spellCheck: false })}
+          {field('access-token', 'Permanent access token (System User)', accessToken, setAccessToken, { type: 'password', autoComplete: 'off', spellCheck: false, placeholder: 'Paste your permanent system user token' })}
           <span className="mt-1 block text-[11px] text-faint">Sent once to verify and save; it is never shown again.</span>
         </div>
       </div>
@@ -350,6 +355,7 @@ function ConnectWhatsApp({ current }: { current: Me['workspace']['whatsapp'] }) 
       )}
       {busy && <p className="mt-4 text-[12px] text-body-soft">Checking with Meta: {CHECK_NAMES.join(' · ')}…</p>}
       {error && <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{error} Nothing was changed.</p>}
+      {success && <p className="mt-4 rounded-lg bg-success-soft px-3 py-2 text-[13px] text-success">{success}</p>}
 
       <div className="mt-5 flex justify-end">
         <button type="submit" disabled={!ready || busy} className="min-w-24 rounded-lg bg-primary px-5 py-2 text-[13px] font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-50">
